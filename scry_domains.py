@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import re
 
@@ -67,6 +68,15 @@ def find_domains(base_path: str) -> list[dict]:
     return domains
 
 
+def render(domains: list[dict]) -> str:
+    lines = [f"Ash domains ({len(domains)}):"]
+    for d in domains:
+        label = f"{d['resources']} resource" + ("s" if d["resources"] != 1 else "")
+        desc = f" — {d['description']}" if d["description"] else ""
+        lines.append(f"  {d['module']} ({label}){desc}")
+    return "\n".join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Ash domain overview")
     parser.add_argument("--path", default="lib", help="Base path to scan")
@@ -76,11 +86,17 @@ def main():
     if not domains:
         return
 
-    print(f"Ash domains ({len(domains)}):")
-    for d in domains:
-        label = f"{d['resources']} resource" + ("s" if d["resources"] != 1 else "")
-        desc = f" — {d['description']}" if d["description"] else ""
-        print(f"  {d['module']} ({label}){desc}")
+    # SessionStart hooks must emit this JSON envelope to reach the model as
+    # context — plain stdout doesn't reliably get there. A prior version of
+    # this script just print()'d, which meant the domain map went nowhere
+    # useful even when the hook was wired up correctly.
+    payload = {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": render(domains),
+        }
+    }
+    print(json.dumps(payload))
 
 
 if __name__ == "__main__":
