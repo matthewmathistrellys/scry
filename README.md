@@ -14,7 +14,9 @@ to ask. Two independent checks, install either or both:
   Is the main worktree actually on `main`? Is it dirty? Has local
   `main` drifted from `origin/main`? Are any of your other worktrees
   already merged and safe to delete, or unmerged and quietly
-  abandoned for days with nobody watching them?
+  abandoned for days with nobody watching them? And when the main
+  worktree *isn't* on `main`, it reports what that is costing you —
+  see [Receipts](#receipts).
 
 No `mix`/BEAM boot required for `scry.sh` — pure text parsing (grep +
 AST-free regex over your `.ex` files) — and `health.sh` is plain
@@ -111,6 +113,40 @@ seconds — a session-start hook that hangs is worse than one that skips.
 Both hooks emit the `hookSpecificOutput.additionalContext` envelope
 Claude Code's SessionStart event expects — plain stdout doesn't
 reliably reach the model, only this does.
+
+## Receipts
+
+"The main worktree isn't on main" reads exactly the same on day 15 as on
+day 1, which is how a correct warning gets worked around fifteen days
+running while the situation quietly gets worse. So when the primary
+worktree is off `main`, `health.sh` also reports what it is costing:
+
+```
+- WARNING: on branch 'feat/thing', not main. ... Modified: 207, untracked: 3.
+- Parked on 'feat/thing' for 15 day(s). This warning has been repeating, unchanged, that whole time.
+- This branch's content is ALREADY IN origin/main. Nothing here is pending review — the worktree is simply stranded on finished work.
+- EXPOSURE: 92 file(s) here exist in NO commit on ANY branch — checked all 95. A checkout, reset or clean in this worktree destroys them permanently.
+```
+
+Three facts, no policy. **Duration** turns a repeated warning into an
+escalating one. **Already merged** is the difference between "work in
+progress in an odd place" and "stranded on something finished" — and it
+uses patch-id equivalence, so a squash or rebase merge, which rewrites
+SHAs and hides from `git branch --merged`, is still caught. **Exposure**
+is the only number that measures real risk: files present in no commit
+on any ref are the ones a `checkout`, `reset` or `clean` destroys for
+good.
+
+The exposure scan is bounded by a 3-second budget, because the history
+walk is slowest for exactly the never-committed files it is looking for.
+If it runs out of time it says how far it got (`checked 40 of 300`)
+rather than quietly reporting a number that means less than it appears
+to.
+
+This hook stays advisory on purpose. Blocking the edit is a policy
+opinion — trunk-based, work-in-linked-worktrees — that belongs in the
+project enforcing it, not in the tool everyone installs to *see* their
+repo. Scry's job is to make the cost impossible to misread.
 
 ## Why
 
