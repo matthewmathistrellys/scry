@@ -1,0 +1,9 @@
+# Linked worktrees live here (see ~/Dev/CLAUDE.md — one location, gitignored).
+.worktrees/
+
+# Per-project Scry config: may carry a health URL or other local endpoints.
+.claude/scry.env
+
+__pycache__/
+*.pyc
+.DS_Store

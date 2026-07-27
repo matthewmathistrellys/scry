@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Ash domain overview — the parser behind scry.sh.
+Ash domain overview — the Elixir/Ash scanner behind architecture.sh.
+
+One of several stack scanners under scanners/; architecture.sh detects
+which one applies and dispatches. The language name lives here rather
+than on the hook so that a single hook, wired once, works in any repo.
 
 Greps a lib/ tree for `use Ash.Domain` modules and prints one line per
 domain: module name, resource count, first sentence of @moduledoc. No
@@ -8,7 +12,7 @@ mix/BEAM boot required — pure text parsing, meant to run in well under
 a second at session start.
 
 Usage:
-    python3 scry_domains.py [--path lib]
+    python3 scanners/elixir_ash.py [--path lib]
 """
 
 import argparse

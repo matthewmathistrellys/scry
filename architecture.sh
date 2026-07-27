@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
-# scry.sh — Claude Code SessionStart hook: surfaces Ash domain structure
-# the instant a session starts, so a fresh agent doesn't have to go
-# digging for architecture. No mix/BEAM boot required — pure text
-# parsing, runs in well under a second.
+# architecture.sh — Claude Code SessionStart hook: answers "what is this
+# codebase?" the instant a session starts, so a fresh agent doesn't have
+# to go digging. Runs in well under a second.
 #
-# Walks up from the session's cwd looking for the nearest mix.exs, and
-# scans that project's lib/. If no mix.exs is found anywhere above cwd
-# (e.g. a session started outside any Elixir app, or in a language this
-# tool doesn't have a scanner for yet), it falls back to a quick layout
-# of the subdirectories below cwd — some orientation beats none.
+# This file is a DISPATCHER, not a language scanner. It detects which
+# stack it's looking at and hands off to the matching scanner under
+# scanners/ — today that's Elixir/Ash (via mix.exs), with Python and
+# TypeScript to follow. The language name belongs on the scanner, never
+# on this entry point: one hook wired once has to work in every repo,
+# including a polyglot tree, so it cannot require the installer to know
+# the stack in advance. Adding a language means adding a scanner and a
+# detection line here — never a second hook to install.
 #
-# Install: copy scry.sh + scry_domains.py into your project (e.g.
-# .claude/hooks/), then wire scry.sh into .claude/settings.json — see
+# If no scanner matches, it falls back to a quick layout of the
+# subdirectories below cwd — some orientation beats none.
+#
+# Install: copy architecture.sh + scanners/ into your project (e.g.
+# .claude/hooks/), then wire architecture.sh into settings.json — see
 # README for the exact snippet.
 
 emit_context() {
@@ -58,7 +63,7 @@ if [ -z "$mix_root" ]; then
   exit 0
 fi
 
-script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scry_domains.py"
+script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scanners/elixir_ash.py"
 if [ -f "$script" ]; then
   out="$(python3 "$script" --path "$mix_root/lib")"
   [ -n "$out" ] && printf '%s\n' "$out" || quick_layout
