@@ -84,7 +84,7 @@ Worktrees: 6 total (5 besides primary).
 ```
 Session fleet (SessionStart):
 - 3 other Claude session(s) active in this repo family in the last 15 min: myapp (2), myapp/.worktrees/dependabot-catchall. Oldest has been running 1h50m.
-- COLLISION RISK: one of them is in THIS exact directory. Check before editing shared files, and do not assume a clean tree stays clean.
+- COLLISION RISK: one of them is working in this same tree, not just this repo family. This tree has 4 file(s) modified or untracked right now — if either side commits or resets first, the other's changes are what's exposed. Check before editing shared files, and do not assume a clean tree stays clean.
 - Last session in this directory: "Fix accessibility issue" (ended 36m ago).
 ```
 
@@ -96,7 +96,13 @@ Machine pressure (SessionStart):
 
 "Repo family" means the repo **and every one of its linked worktrees** — they
 are one work stream, so a session in `.worktrees/foo` is a neighbour, not a
-stranger.
+stranger. COLLISION RISK is scoped narrower, to the **same working tree**:
+two sessions in `/repo` and `/repo/apps/web` are the same checkout even
+though they're in different directories, and a `checkout`, `reset` or
+`clean` in one is exactly as destructive to the other's uncommitted work. A
+session in a different linked worktree doesn't carry that exposure — that's
+the entire point of a worktree — so it stays in the family count, not the
+collision line.
 
 ## Install
 
@@ -229,6 +235,14 @@ and a review list full of false alarms is a list you learn to skim.
 trunk-based, work-in-linked-worktrees — that belongs in the project enforcing
 it, not in the tool everyone installs to *see* their repo. Scry reports facts
 and stops. What to do about four sessions in one directory is yours to decide.
+
+**Projects consequences, never actions.** When signals combine into something
+worth a line, that line states the mechanical, verifiable consequence of the
+current state — "this tree has 4 files exposed if either side commits or
+resets first" — never a recommendation like "consider a worktree." A
+prediction of what *will* happen is a guess dressed as sight; a statement of
+what *is* exposed right now is a fact, and a name is the difference between
+scrying and giving orders.
 
 ## License
 
