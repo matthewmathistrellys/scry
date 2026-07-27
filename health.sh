@@ -37,6 +37,34 @@ g() { git -C "$main_wt" "$@"; }
 offline=0
 g fetch origin main --quiet 2>/dev/null || offline=1
 
+# Is this ref's content already in origin/main?
+#
+# Ancestor check first (cheap); patch-id equivalence second, so a squash or
+# rebase merge — which rewrites SHAs and hides from --merged and from
+# --is-ancestor alike — is still recognised as merged.
+#
+# Both the primary-worktree check and the worktree sweep below ask this same
+# question, and for a while they answered it differently: the sweep used the
+# ancestor test alone. That fails safe — it can never call an unmerged branch
+# merged — but a squash-merged branch failed the test, fell through to the age
+# check, and was reported as "UNMERGED ... may hold real work". Finished work
+# accumulating in a bucket labelled possibly-precious is how the list that
+# matters becomes the list you skim. One verdict, one implementation.
+content_is_in_main() {
+  local ref="$1" mb tr syn
+  [ "$offline" -eq 0 ] || return 1
+  [ "$(g rev-list --count "origin/main..$ref" 2>/dev/null || echo 1)" = "0" ] && return 0
+  mb="$(g merge-base origin/main "$ref" 2>/dev/null)"
+  tr="$(g rev-parse "$ref^{tree}" 2>/dev/null)"
+  [ -n "$mb" ] && [ -n "$tr" ] || return 1
+  syn="$(GIT_AUTHOR_NAME=scry GIT_AUTHOR_EMAIL=scry@local \
+         GIT_COMMITTER_NAME=scry GIT_COMMITTER_EMAIL=scry@local \
+         GIT_AUTHOR_DATE=2000-01-01T00:00:00 GIT_COMMITTER_DATE=2000-01-01T00:00:00 \
+         g commit-tree "$tr" -p "$mb" -m _ 2>/dev/null)"
+  [ -n "$syn" ] || return 1
+  g cherry origin/main "$syn" 2>/dev/null | head -1 | grep -q '^-'
+}
+
 branch="$(g symbolic-ref --quiet --short HEAD || echo '(detached)')"
 modified="$(g status --porcelain | grep -cv '^??')"
 untracked="$(g status --porcelain | grep -c '^??')"
@@ -68,24 +96,8 @@ else
   fi
 
   # Already merged? Then nothing here is pending — it is purely stranded.
-  # Ancestor check first (cheap); patch-id equivalence second, so a squash or
-  # rebase merge — which rewrites SHAs and hides from --merged — is still seen.
-  if [ "$offline" -eq 0 ]; then
-    merged=""
-    if [ "$(g rev-list --count origin/main..HEAD 2>/dev/null || echo 1)" = "0" ]; then
-      merged=yes
-    else
-      mb="$(g merge-base origin/main HEAD 2>/dev/null)"
-      tr="$(g rev-parse 'HEAD^{tree}' 2>/dev/null)"
-      if [ -n "$mb" ] && [ -n "$tr" ]; then
-        syn="$(GIT_AUTHOR_NAME=scry GIT_AUTHOR_EMAIL=scry@local \
-               GIT_COMMITTER_NAME=scry GIT_COMMITTER_EMAIL=scry@local \
-               GIT_AUTHOR_DATE=2000-01-01T00:00:00 GIT_COMMITTER_DATE=2000-01-01T00:00:00 \
-               g commit-tree "$tr" -p "$mb" -m _ 2>/dev/null)"
-        [ -n "$syn" ] && g cherry origin/main "$syn" 2>/dev/null | head -1 | grep -q '^-' && merged=yes
-      fi
-    fi
-    [ -n "$merged" ] && lines+=("- This branch's content is ALREADY IN origin/main. Nothing here is pending review — the worktree is simply stranded on finished work.")
+  if content_is_in_main HEAD; then
+    lines+=("- This branch's content is ALREADY IN origin/main. Nothing here is pending review — the worktree is simply stranded on finished work.")
   fi
 
   # What would a checkout or reset here actually destroy? Only files that exist
@@ -249,7 +261,7 @@ while [ "$i" -lt "$total" ]; do
     continue
   fi
   [ "$br" = "main" ] && continue
-  if [ "$offline" -eq 0 ] && git -C "$main_wt" merge-base --is-ancestor "refs/heads/$br" origin/main 2>/dev/null; then
+  if content_is_in_main "refs/heads/$br"; then
     stale=$((stale+1))
     stale_list+=("$br")
     continue
