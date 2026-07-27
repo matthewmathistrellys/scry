@@ -75,7 +75,7 @@ lines+=("Primary worktree: $main_wt")
 if [ "$branch" = "main" ]; then
   lines+=("- On main. Modified: $modified, untracked: $untracked.")
 else
-  lines+=("- WARNING: on branch '$branch', not main. The main worktree should always sit on main; feature work belongs in a linked worktree. Modified: $modified, untracked: $untracked.")
+  lines+=("- WARNING: on branch '$branch', not main. The primary worktree should stay on main as the stable reference for the repo. Modified: $modified, untracked: $untracked.")
 
   # ── Why this warning carries its receipts ────────────────────────────────
   # The bare warning above is not enough on its own. On one project it was
