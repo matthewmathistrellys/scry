@@ -48,6 +48,70 @@ if [ "$branch" = "main" ]; then
   lines+=("- On main. Modified: $modified, untracked: $untracked.")
 else
   lines+=("- WARNING: on branch '$branch', not main. The main worktree should always sit on main; feature work belongs in a linked worktree. Modified: $modified, untracked: $untracked.")
+
+  # ── Why this warning carries its receipts ────────────────────────────────
+  # The bare warning above is not enough on its own. On one project it was
+  # correct and identical at every session start for 15 days while the
+  # condition got worse; being told "you're not on main" reads the same on day
+  # 1 as on day 15, so nothing ever forced the issue. What actually makes it
+  # undeniable is the cost — how long it has been true, whether the branch was
+  # already merged (making the work pointless as well as stranded), and how
+  # much of what is sitting here exists nowhere in git. Those are facts, not
+  # policy, which is the only kind of pressure this hook should apply.
+
+  # How long parked here — the most recent checkout onto this branch.
+  since="$(g reflog show --date=unix HEAD 2>/dev/null \
+           | grep -m1 -F "to $branch" | sed -n 's/^[^@]*@{\([0-9]\{1,\}\)}.*/\1/p')"
+  if [ -n "$since" ]; then
+    days=$(( ( $(date +%s) - since ) / 86400 ))
+    [ "$days" -ge 1 ] && lines+=("- Parked on '$branch' for $days day(s). This warning has been repeating, unchanged, that whole time.")
+  fi
+
+  # Already merged? Then nothing here is pending — it is purely stranded.
+  # Ancestor check first (cheap); patch-id equivalence second, so a squash or
+  # rebase merge — which rewrites SHAs and hides from --merged — is still seen.
+  if [ "$offline" -eq 0 ]; then
+    merged=""
+    if [ "$(g rev-list --count origin/main..HEAD 2>/dev/null || echo 1)" = "0" ]; then
+      merged=yes
+    else
+      mb="$(g merge-base origin/main HEAD 2>/dev/null)"
+      tr="$(g rev-parse 'HEAD^{tree}' 2>/dev/null)"
+      if [ -n "$mb" ] && [ -n "$tr" ]; then
+        syn="$(GIT_AUTHOR_NAME=scry GIT_AUTHOR_EMAIL=scry@local \
+               GIT_COMMITTER_NAME=scry GIT_COMMITTER_EMAIL=scry@local \
+               GIT_AUTHOR_DATE=2000-01-01T00:00:00 GIT_COMMITTER_DATE=2000-01-01T00:00:00 \
+               g commit-tree "$tr" -p "$mb" -m _ 2>/dev/null)"
+        [ -n "$syn" ] && g cherry origin/main "$syn" 2>/dev/null | head -1 | grep -q '^-' && merged=yes
+      fi
+    fi
+    [ -n "$merged" ] && lines+=("- This branch's content is ALREADY IN origin/main. Nothing here is pending review — the worktree is simply stranded on finished work.")
+  fi
+
+  # What would a checkout or reset here actually destroy? Only files that exist
+  # in no commit on any ref are truly unrecoverable, so that is what we count.
+  # Bounded by a wall-clock budget: the per-file history walk is slowest for
+  # exactly the files we care about, and a session hook that hangs is worse
+  # than one that reports partial results — so it says how far it got.
+  cands="$( { g diff --cached --name-only --diff-filter=A 2>/dev/null
+              g ls-files --others --exclude-standard 2>/dev/null; } | sort -u)"
+  total="$(printf '%s' "$cands" | grep -c . )"
+  if [ "$total" -gt 0 ]; then
+    deadline=$(( $(date +%s) + 3 ))
+    checked=0; orphans=0
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      [ "$(date +%s)" -ge "$deadline" ] && break
+      checked=$(( checked + 1 ))
+      [ -z "$(g log --all --max-count=1 --format=%h -- "$f" 2>/dev/null)" ] && orphans=$(( orphans + 1 ))
+    done <<EOF
+$cands
+EOF
+    if [ "$orphans" -gt 0 ]; then
+      scope="all $total"; [ "$checked" -lt "$total" ] && scope="$checked of $total (time budget)"
+      lines+=("- EXPOSURE: $orphans file(s) here exist in NO commit on ANY branch — checked $scope. A checkout, reset or clean in this worktree destroys them permanently. Inspect before moving: git -C $main_wt status --porcelain")
+    fi
+  fi
 fi
 
 if [ "$offline" -eq 1 ]; then
