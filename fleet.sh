@@ -120,23 +120,43 @@ for p in (os.environ.get("WORKTREE_PATHS") or "").splitlines():
 
 parent = os.path.dirname(family)
 
+def resolve_path(entry):
+    """Absolute path an encoded transcript dir represents, if resolvable.
+    Not a worktree — a session started in some subdirectory. The encoding
+    is lossy, so only trust a reconstruction the filesystem confirms;
+    otherwise there is no path to give back."""
+    if entry in known:
+        return known[entry]
+    guess = entry.replace("-", "/")
+    return guess if os.path.isdir(guess) else None
+
 def readable(entry):
     """Report a transcript directory as a path a human recognises."""
-    if entry in known:
-        path = known[entry]
-    else:
-        # Not a worktree — a session started in some subdirectory. The
-        # encoding is lossy, so only trust a reconstruction the filesystem
-        # confirms; otherwise show the raw name rather than invent a path.
-        guess = entry.replace("-", "/")
-        path = guess if os.path.isdir(guess) else None
+    path = resolve_path(entry)
     if not path:
         return entry.lstrip("-")
     return os.path.relpath(path, parent) if path.startswith(parent) else path
 
+# Which known worktree root contains a path, if any — longest match first
+# so a nested worktree wins over its parent. This is what makes "here"
+# mean "the same checkout" rather than "the same directory": two sessions
+# in /repo and /repo/apps/web are not in the same directory, but a
+# checkout/reset/clean in one is just as destructive to the other's
+# uncommitted work, because it's the same working tree either way.
+worktree_roots = sorted(known.values(), key=len, reverse=True)
+
+def worktree_of(path):
+    if not path:
+        return None
+    for root in worktree_roots:
+        if path == root or path.startswith(root + os.sep):
+            return root
+    return None
+
 # ── 1. Other live sessions in this repo family ──────────────────────────
 family_prefix = encode(family)
 self_prefix   = encode(cwd)
+self_worktree = worktree_of(cwd)
 live, here, oldest_start = [], 0, None
 
 if os.path.isdir(projects):
@@ -166,7 +186,7 @@ if os.path.isdir(projects):
             if oldest_start is None or start < oldest_start:
                 oldest_start = start
             live.append(readable(entry))
-            if entry == self_prefix:
+            if self_worktree and worktree_of(resolve_path(entry)) == self_worktree:
                 here += 1
 
 def human(seconds):
@@ -224,7 +244,7 @@ for p in _glob.glob(os.path.join(projects, "*", "*", "subagents", "*.jsonl")):
     seen = tail_cwds(p)
     if not seen:
         continue
-    if cwd in seen:
+    if self_worktree and any(worktree_of(c) == self_worktree for c in seen):
         sub_here += 1
         continue
     inside = [c for c in seen if c == family or c.startswith(family + os.sep)]
@@ -264,10 +284,25 @@ if sub_elsewhere or sub_here:
 if here or sub_here:
     n = here + sub_here
     which = "one of them is" if n == 1 else f"{n} of them are"
+    # The consequence, not the instruction: what a checkout/reset/clean
+    # here would actually cost right now, stated as a fact about current
+    # exposure — never as a recommendation to branch or worktree.
+    dirty = 0
+    try:
+        st = subprocess.run(["git", "-C", cwd, "status", "--porcelain"],
+                             capture_output=True, text=True, timeout=3).stdout
+        dirty = len([ln for ln in st.splitlines() if ln.strip()])
+    except Exception:
+        pass
+    exposure = (
+        f" This tree has {dirty} file(s) modified or untracked right now — "
+        "if either side commits or resets first, the other's changes are "
+        "what's exposed."
+    ) if dirty else ""
     lines.append(
-        f"- COLLISION RISK: {which} in THIS exact directory. "
-        "Check before editing shared files, and do not assume a clean "
-        "tree stays clean."
+        f"- COLLISION RISK: {which} working in this same tree, not just "
+        f"this repo family.{exposure} Check before editing shared files, "
+        "and do not assume a clean tree stays clean."
     )
 
 # ── 2. Other agent CLIs on the machine ──────────────────────────────────
