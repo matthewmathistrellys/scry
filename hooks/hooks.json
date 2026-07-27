@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/architecture.sh",
+            "statusMessage": "Reading architecture...",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/health.sh",
+            "statusMessage": "Checking repo health...",
+            "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/fleet.sh",
+            "statusMessage": "Checking other sessions...",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/pressure.sh",
+            "statusMessage": "Checking machine pressure...",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
