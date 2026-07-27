@@ -30,9 +30,11 @@ install any or all:
   what that is costing you — see [Receipts](#receipts).
 - **`fleet.sh`** — how many other sessions are live in this repo *and
   its worktrees*, how old they are, whether one is in your exact
-  directory, whether other agent CLIs (Codex, Gemini, aider) are
+  directory, **which subagents are editing here without a session of
+  their own**, whether other agent CLIs (Codex, Gemini, aider) are
   competing for the same machine, and what the last session here was
-  doing. See [The output budget](#the-output-budget) and
+  doing. See [The output budget](#the-output-budget),
+  [Subagents count](#subagents-count), and
   [Why fleet.sh emits titles only](#why-fleetsh-emits-titles-only).
 - **`pressure.sh`** — load per core, swap in use, disk headroom, and
   which dev servers are already listening. A session cannot see the cost
@@ -49,7 +51,7 @@ repo) — the slowest case, not the quiet one:
 ```
 architecture.sh   115ms
 pressure.sh       188ms
-fleet.sh          325ms
+fleet.sh          386ms
 ```
 
 ## The output budget
@@ -101,6 +103,7 @@ repo:
 ```
 Session fleet (SessionStart):
 - 5 other Claude session(s) active in this repo family in the last 15 min: myapp (4), myapp/.worktrees/dependabot-catchall. Oldest has been running 1h50m.
+- 1 subagent from other sessions is working in this repo family: 1 in this directory. Subagents edit files without a session of their own, so a directory can be under active change with no session in it.
 - COLLISION RISK: 4 of them are in THIS exact directory. Check before editing shared files, and do not assume a clean tree stays clean.
 - Other agent CLI(s) also running on this machine: codex (running 5d13h).
 - Last session in this directory: "Fix coding assistant accessibility issue" (ended 36m ago).
@@ -217,6 +220,29 @@ Claude Code's SessionStart event expects — plain stdout doesn't
 reliably reach the model, only this does. Each exits `0` unconditionally:
 a session-start hook that fails, or that hangs, is worse than one that
 skips.
+
+## Subagents count
+
+A subagent is not a session, but it **is** a concurrent writer — and it
+does not necessarily work where its parent lives. A session in a repo
+root routinely dispatches one into a worktree.
+
+Counting only top-level transcripts therefore reports an actively-edited
+directory as empty. Found by cross-checking against `/prune-worktrees`,
+which guards worktrees by file mtime and correctly held one that
+`fleet.sh` called idle: no session had that worktree as its cwd, while
+28,682 files in it had been modified within four hours. The writer was a
+subagent dispatched from the repo root.
+
+So subagent transcripts are read too, and attributed by **the cwd they
+record for themselves**, never by their parent's. Attribution uses every
+directory a subagent touched recently rather than just its latest,
+because the useful question is *"has it been editing here"* rather than
+*"where is it standing now"* — a false warning costs a line of output, a
+missed one costs an edit.
+
+Cost is negligible: `stat` on ~1000 transcripts is 2ms, and only the
+handful written inside the window are opened at all.
 
 ## Why `fleet.sh` emits titles only
 

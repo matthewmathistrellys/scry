@@ -114,6 +114,34 @@ The dotted edges are the existing division of labor, already stated in
 `/prune-worktrees`: **hooks detect, skills remediate.** No hook ever deletes,
 merges, or judges whether work is worth keeping.
 
+## Correction: subagents are concurrent writers
+
+Found after the first implementation, by cross-checking against
+`/prune-worktrees` — which had independently grown an active-worktree guard
+based on file mtime.
+
+The guard held `feat/rename-sequence-direction` as "touched in the last 4h — a
+concurrent agent may be live in it." `fleet.sh` reported the same worktree as
+having no sessions at all. **The guard was right and this design was wrong.**
+
+The evidence: no top-level session had that worktree as its cwd, while 28,682
+files in it had been modified within four hours. The writer was a *subagent*
+dispatched from a session in the repo root. The original implementation
+excluded `subagents/` on the reasoning that a subagent is not an independent
+session — true, but the wrong question. A subagent is not a session; it **is** a
+concurrent writer, and it does not necessarily work where its parent lives.
+
+Fixed by reading subagent transcripts and attributing them by the cwd they
+record for themselves, using every directory touched in the recent window
+rather than just the latest — a false warning costs a line, a missed one costs
+an edit. Cost: 2ms to `stat` ~1000 transcripts; only those inside the window
+are opened.
+
+**The general lesson:** a heuristic that measures the *effect* (files changed)
+caught what a precise measurement of the wrong *cause* (sessions) missed. When
+two independent checks disagree, the one that looks at outcomes is usually
+worth believing first.
+
 ## Boundaries
 
 **What a hook must never do:** act. Detect and report only. The remediation

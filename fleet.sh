@@ -177,6 +177,62 @@ def human(seconds):
     if h: return f"{h}h{m:02d}m"
     return f"{m}m"
 
+# ── 1b. Subagents working in this family ────────────────────────────────
+# A subagent is not a session, but it IS a concurrent writer, and it does
+# not necessarily work where its parent session lives: a session in the
+# repo root routinely dispatches one into a worktree. Counting only
+# top-level transcripts therefore reports an actively-edited worktree as
+# empty — verified 2026-07-26, when a worktree with 28k files touched in
+# four hours had no session cwd'd into it at all. So subagents are read
+# separately and attributed by the cwd they record for themselves, never
+# by their parent's.
+def tail_cwds(path, limit=65536):
+    """Every cwd a transcript recorded recently. Bounded read — these
+    reach MBs. Returns a set, not the latest, deliberately: a subagent
+    moves between directories (repo root, then a worktree), and for a
+    collision check the question is "has it been editing here", not
+    "where is it standing now". Erring toward a false warning costs a
+    line of output; erring the other way costs a lost edit."""
+    seen = set()
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - limit))
+            chunk = fh.read().decode("utf-8", "ignore")
+        for ln in chunk.splitlines():
+            try:
+                d = json.loads(ln)
+            except Exception:
+                continue
+            if d.get("cwd"):
+                seen.add(d["cwd"])
+    except Exception:
+        pass
+    return seen
+
+sub_here, sub_elsewhere = 0, []
+import glob as _glob
+for p in _glob.glob(os.path.join(projects, "*", "*", "subagents", "*.jsonl")):
+    # Our own subagents are not a collision with ourselves.
+    if self_id and os.sep + self_id + os.sep in p:
+        continue
+    try:
+        if now - os.stat(p).st_mtime > window:
+            continue
+    except OSError:
+        continue
+    seen = tail_cwds(p)
+    if not seen:
+        continue
+    if cwd in seen:
+        sub_here += 1
+        continue
+    inside = [c for c in seen if c == family or c.startswith(family + os.sep)]
+    if inside:
+        # One subagent, one entry — report the deepest path it touched,
+        # which is the most specific thing true about it.
+        sub_elsewhere.append(os.path.relpath(max(inside, key=len), parent))
+
 if live:
     from collections import Counter
     grouped = ", ".join(
@@ -188,13 +244,31 @@ if live:
         f"- {len(live)} other Claude session(s) active in this repo family "
         f"in the last {window // 60} min: {grouped}.{age}"
     )
-    if here:
-        which = "one of them is" if here == 1 else f"{here} of them are"
-        lines.append(
-            f"- COLLISION RISK: {which} in THIS exact directory. "
-            "Check before editing shared files, and do not assume a clean "
-            "tree stays clean."
-        )
+
+if sub_elsewhere or sub_here:
+    from collections import Counter
+    total_subs = len(sub_elsewhere) + sub_here
+    where = Counter(sub_elsewhere)
+    detail = ", ".join(f"{n} ({c})" if c > 1 else n for n, c in where.items())
+    if sub_here:
+        detail = (f"{sub_here} in this directory" + (f"; {detail}" if detail else ""))
+    noun = "subagent" if total_subs == 1 else "subagents"
+    verb = "is" if total_subs == 1 else "are"
+    lines.append(
+        f"- {total_subs} {noun} from other sessions {verb} working in this "
+        f"repo family: {detail}. Subagents edit files without a session of "
+        f"their own, so a directory can be under active change with no "
+        f"session in it."
+    )
+
+if here or sub_here:
+    n = here + sub_here
+    which = "one of them is" if n == 1 else f"{n} of them are"
+    lines.append(
+        f"- COLLISION RISK: {which} in THIS exact directory. "
+        "Check before editing shared files, and do not assume a clean "
+        "tree stays clean."
+    )
 
 # ── 2. Other agent CLIs on the machine ──────────────────────────────────
 try:
