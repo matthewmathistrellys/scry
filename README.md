@@ -20,13 +20,28 @@ machine is carrying. Four independent checks fill that in.
   (Elixir/Ash today, others to follow), so one hook works in every repo
   including a polyglot tree. Outside a recognised project it falls back to a
   directory layout.
-- **`health.sh`** — is the main worktree on `main`? Is it dirty? Has local
-  `main` drifted from `origin/main`? Are any worktrees already merged and safe
-  to delete, or unmerged and quietly aging? Optionally, is merged work actually
-  deployed? When the primary worktree is *off* `main` it also reports how long
-  it has been parked, whether the branch is already merged, and how many files
-  exist in no commit on any ref — the ones a `checkout`, `reset` or `clean`
-  would destroy for good.
+- **`health.sh`** — the repo's health from this session's perspective:
+  - **Primary worktree state:** on main? dirty? stranded on a merged branch?
+    How long parked? Files that exist in no commit on any branch?
+  - **Primary worktree consequences:** when the session is in the primary
+    worktree, projects the mechanical consequences — orphaned edits inherited
+    by future sessions, silent ref corruption from concurrent checkouts,
+    repo-wide merge blockage if left on a feature branch.
+  - **Session worktree health:** when the session is in a linked worktree,
+    reports the branch's relationship to the world — already merged (stranded
+    on finished work), base drift (origin/main has moved since the fork
+    point), unpushed commits (work that exists only on this disk), and branch
+    age (last commit N days ago).
+  - **Local main vs origin/main:** divergence in either direction — stranded
+    local commits or a stale local tip. Auto-fast-forwards when safe.
+  - **Deploy drift:** whether merged work is actually live (optional,
+    requires config — see [Deploy drift](#deploy-drift)).
+  - **Worktree hygiene sweep:** merged worktrees safe to remove, abandoned
+    branches quietly aging, missing directories, detached HEADs.
+  - **Open PRs and CI status:** every open PR with CI rollup (green, failing,
+    pending) and review state (approved, changes requested, needs review).
+    The session's own branch is marked. Zero config — derived from the git
+    remote via `gh`. Silently skipped if `gh` isn't installed.
 - **`fleet.sh`** — how many other sessions are live in this repo *and its
   worktrees*, how old they are, whether one is in your exact directory, which
   subagents are editing here without a session of their own, whether other
@@ -36,10 +51,9 @@ machine is carrying. Four independent checks fill that in.
   servers are already listening.
 
 Nothing boots a build tool, and nothing touches the network except the optional
-deploy-drift check. `architecture.sh` is text parsing, `health.sh` is plain
-`git`, and `fleet.sh` and `pressure.sh` read local files and `sysctl`. On a
-busy 8-core laptop — the slow case, not the quiet one — `architecture.sh` runs
-in ~115ms, `pressure.sh` ~190ms, `fleet.sh` ~390ms.
+deploy-drift check and the PR/CI lookup (via `gh`, when installed). On a busy
+8-core laptop — the slow case, not the quiet one — the full suite runs in
+~2 seconds.
 
 ## Quiet by default
 
@@ -58,6 +72,12 @@ industrialise that problem.
 | Disk | 60% used | ≥90% used, or <20GB free |
 | Sessions in this repo | just you | any other live one |
 | Last session | none recorded | a title exists |
+| Session in primary worktree | in a linked worktree | in the primary |
+| Session worktree merged | not merged | content already in main |
+| Session worktree drift | up to date | origin/main ahead of fork point |
+| Unpushed commits | all pushed | commits only on disk |
+| Branch age | recent | ≥3 days since last commit |
+| Open PRs | none, or `gh` unavailable | any open PR exists |
 
 Silence is the default and the feature. A check that reports nothing is
 reporting something: *nothing here needs your attention.* Every threshold is
@@ -76,22 +96,56 @@ Ash domains (4):
 ```
 Dev environment health (SessionStart):
 Primary worktree: /Users/you/Dev/myapp
+- THIS SESSION IS IN THE PRIMARY WORKTREE — the shared checkout for the repo.
+  Edits here are not isolated: uncommitted changes are inherited by every
+  session that arrives after this one, with no indication of ownership. A
+  branch switch from any concurrent session moves the checked-out ref silently
+  — commits land on the wrong branch without warning. If this worktree is left
+  on a feature branch, the repo-wide merge path stays blocked until someone
+  returns it to main.
 - On main. Modified: 0, untracked: 0.
-Worktrees: 6 total (5 besides primary).
-- 2 worktree(s) already fully merged into origin/main and safe to remove (git worktree remove): fix/typo, feat/old-thing
+- Production is up to date with origin/main (a1b2c3d).
+Worktrees: 3 total (2 besides primary).
+- 1 worktree(s) already fully merged into origin/main and safe to remove
+  (git worktree remove): fix/old-thing
+Open PRs: 2
+  #42 feat/new-thing -- CI green, approved <- this session
+  #43 fix/edge-case -- CI failing (1/4), no reviews
+```
+
+```
+Dev environment health (SessionStart):
+Primary worktree: /Users/you/Dev/myapp
+- On main. Modified: 0, untracked: 0.
+- Production is up to date with origin/main (a1b2c3d).
+This session's worktree: /Users/you/Dev/myapp/.worktrees/feat-new-thing
+- Branch: feat/new-thing. Modified: 2, untracked: 1.
+- origin/main is 5 commit(s) ahead of this branch's fork point — base has
+  drifted.
+- No remote tracking branch. 3 commit(s) exist only on this disk.
+Worktrees: 3 total (2 besides primary).
+Open PRs: 1
+  #42 feat/new-thing -- CI green, no reviews <- this session
 ```
 
 ```
 Session fleet (SessionStart):
-- 3 other Claude session(s) active in this repo family in the last 15 min: myapp (2), myapp/.worktrees/dependabot-catchall. Oldest has been running 1h50m.
-- COLLISION RISK: one of them is working in this same tree, not just this repo family. This tree has 4 file(s) modified or untracked right now — if either side commits or resets first, the other's changes are what's exposed. Check before editing shared files, and do not assume a clean tree stays clean.
+- 3 other Claude session(s) active in this repo family in the last 15 min:
+  myapp (2), myapp/.worktrees/dependabot-catchall. Oldest has been running
+  1h50m.
+- COLLISION RISK: one of them is working in this same tree, not just this repo
+  family. This tree has 4 file(s) modified or untracked right now — if either
+  side commits or resets first, the other's changes are what's exposed. Check
+  before editing shared files, and do not assume a clean tree stays clean.
 - Last session in this directory: "Fix accessibility issue" (ended 36m ago).
 ```
 
 ```
 Machine pressure (SessionStart):
-- MACHINE OVERSUBSCRIBED: load 18.7 on 8 cores (2.3x). More parallel agents or test runs will slow everything already running rather than finish sooner.
-- Local servers already listening: node :3000 postgres :5432. Check before starting another — the port may be taken by a session you cannot see.
+- MACHINE OVERSUBSCRIBED: load 18.7 on 8 cores (2.3x). More parallel agents
+  or test runs will slow everything already running rather than finish sooner.
+- Local servers already listening: node :3000 postgres :5432. Check before
+  starting another — the port may be taken by a session you cannot see.
 ```
 
 "Repo family" means the repo **and every one of its linked worktrees** — they
@@ -158,9 +212,10 @@ running hook until you copy it again, and nothing reports the drift.
 `architecture.sh` keeps `scanners/` beside it and resolves the scanner relative
 to its own location, so the two move together. `health.sh` always resolves to
 the **primary** worktree via `git-common-dir`, regardless of which worktree or
-subdirectory the session started in. `fleet.sh` reads the `SessionStart` JSON
-payload on stdin to learn its own session id, so it never reports itself as a
-collision.
+subdirectory the session started in, and additionally reports the session's own
+worktree health when it differs from the primary. `fleet.sh` reads the
+`SessionStart` JSON payload on stdin to learn its own session id, so it never
+reports itself as a collision.
 
 All four emit the `hookSpecificOutput.additionalContext` envelope Claude Code's
 `SessionStart` event expects — plain stdout doesn't reliably reach the model,
@@ -189,6 +244,15 @@ unparseable response, or a commit this repo has never seen: each says so
 explicitly as `Deploy state UNKNOWN`, with the reason. A check that quietly
 reports nothing teaches you it looked and found nothing wrong, which is worse
 than having no check. The request times out after 3 seconds.
+
+## PR and CI status (zero config)
+
+When `gh` (the GitHub CLI) is installed and authenticated, `health.sh` lists
+every open PR in the repo with a one-line summary: PR number, branch, CI
+rollup, and review state. The session's own branch is marked `<- this session`.
+
+No configuration needed — the git remote provides the repo. If `gh` isn't
+installed or authentication fails, the block is silently skipped (fails open).
 
 ## Tuning
 
@@ -238,11 +302,20 @@ and stops. What to do about four sessions in one directory is yours to decide.
 
 **Projects consequences, never actions.** When signals combine into something
 worth a line, that line states the mechanical, verifiable consequence of the
-current state — "this tree has 4 files exposed if either side commits or
-resets first" — never a recommendation like "consider a worktree." A
-prediction of what *will* happen is a guess dressed as sight; a statement of
-what *is* exposed right now is a fact, and a name is the difference between
-scrying and giving orders.
+current state — "commits land on the wrong branch without warning" — never a
+recommendation like "consider a worktree." A prediction of what *will* happen
+is a guess dressed as sight; a statement of what *is* exposed right now is a
+fact, and a name is the difference between scrying and giving orders.
+
+**Zero config where possible.** Deploy drift requires configuration because
+Scry can't guess where your app lives. PR/CI status requires none — the git
+remote is already there. The principle: if the information is derivable from
+what's already in the repo, don't ask the user to configure it.
+
+**Fails open.** Every hook exits 0 unconditionally. A session-start hook that
+blocks or hangs is worse than one that skips. Optional features (`gh` for
+PR/CI, `SCRY_HEALTH_URL` for deploy drift) degrade to silence, never to
+errors.
 
 ## License
 

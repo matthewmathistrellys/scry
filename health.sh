@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # SessionStart hook: git/worktree dev-environment health report.
 #
-# Always operates on the PRIMARY worktree, no matter which worktree or
-# subdirectory the session started in. Fast-forward only for main — it can
-# never rewrite or lose anything.
+# Reports primary worktree health unconditionally, plus the session's own
+# worktree health when it differs from the primary (branch staleness, base
+# drift, unpushed commits, already-merged status). Fast-forward only for
+# main — it can never rewrite or lose anything.
 #
 # Emits its findings via `additionalContext` so a fresh agent session sees
-# the repo's actual state up front — primary-worktree cleanliness, whether
-# local main has drifted from origin/main, and a worktree hygiene sweep
-# (missing directories, stale/merged branches, quietly abandoned branches) —
-# every session, not just when something's wrong. Terminal-only systemMessage
+# the repo's actual state up front — primary-worktree cleanliness, the
+# session worktree's branch health, whether local main has drifted from
+# origin/main, and a worktree hygiene sweep (missing directories,
+# stale/merged branches, quietly abandoned branches) — every session, not
+# just when something's wrong. Terminal-only systemMessage
 # output is easy to miss across many sessions; additionalContext reaches the
 # model directly, which is the point.
 set -uo pipefail
@@ -29,10 +31,29 @@ print(json.dumps(out))
 PY
 }
 
+# Read session cwd from the SessionStart JSON payload (same as fleet.sh).
+payload="$(cat 2>/dev/null || true)"
+session_cwd="$(SCRY_PAYLOAD="$payload" python3 -c '
+import json, os
+try:
+    d = json.loads(os.environ.get("SCRY_PAYLOAD") or "{}")
+except Exception:
+    d = {}
+print(d.get("cwd", "") or os.getcwd())
+' 2>/dev/null)"
+[ -n "$session_cwd" ] || session_cwd="$PWD"
+
 common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || exit 0
 main_wt="${common%/.git}"
 [ -d "$main_wt" ] || exit 0
 g() { git -C "$main_wt" "$@"; }
+
+# The worktree this session is actually sitting in — may differ from the primary.
+session_wt="$(git -C "$session_cwd" rev-parse --show-toplevel 2>/dev/null || echo "$session_cwd")"
+in_primary=0
+[ "$session_wt" = "$main_wt" ] && in_primary=1
+
+now_epoch="$(date +%s)"
 
 offline=0
 g fetch origin main --quiet 2>/dev/null || offline=1
@@ -72,6 +93,10 @@ untracked="$(g status --porcelain | grep -c '^??')"
 lines=()
 lines+=("Primary worktree: $main_wt")
 
+if [ "$in_primary" -eq 1 ]; then
+  lines+=("- THIS SESSION IS IN THE PRIMARY WORKTREE — the shared checkout for the repo. Edits here are not isolated: uncommitted changes are inherited by every session that arrives after this one, with no indication of ownership. A branch switch from any concurrent session moves the checked-out ref silently — commits land on the wrong branch without warning. If this worktree is left on a feature branch, the repo-wide merge path stays blocked until someone returns it to main.")
+fi
+
 if [ "$branch" = "main" ]; then
   lines+=("- On main. Modified: $modified, untracked: $untracked.")
 else
@@ -91,7 +116,7 @@ else
   since="$(g reflog show --date=unix HEAD 2>/dev/null \
            | grep -m1 -F "to $branch" | sed -n 's/^[^@]*@{\([0-9]\{1,\}\)}.*/\1/p')"
   if [ -n "$since" ]; then
-    days=$(( ( $(date +%s) - since ) / 86400 ))
+    days=$(( ( now_epoch - since ) / 86400 ))
     [ "$days" -ge 1 ] && lines+=("- Parked on '$branch' for $days day(s). This warning has been repeating, unchanged, that whole time.")
   fi
 
@@ -109,7 +134,7 @@ else
               g ls-files --others --exclude-standard 2>/dev/null; } | sort -u)"
   total="$(printf '%s' "$cands" | grep -c . )"
   if [ "$total" -gt 0 ]; then
-    deadline=$(( $(date +%s) + 3 ))
+    deadline=$(( now_epoch + 3 ))
     checked=0; orphans=0
     while IFS= read -r f; do
       [ -n "$f" ] || continue
@@ -208,6 +233,49 @@ except Exception:
   fi
 fi
 
+# ── Session worktree health ────────────────────────────────────────────────
+# When the session is in a linked worktree (not the primary), report the
+# branch's relationship to the world: is it merged, stale, unpushed, or
+# drifting behind main? These are the facts that govern the session's first
+# decision and that no session can currently see without digging.
+if [ "$in_primary" -eq 0 ]; then
+  sw_branch="$(git -C "$session_wt" symbolic-ref --quiet --short HEAD 2>/dev/null || echo '(detached)')"
+  sw_modified="$(git -C "$session_wt" status --porcelain 2>/dev/null | grep -cv '^??')"
+  sw_untracked="$(git -C "$session_wt" status --porcelain 2>/dev/null | grep -c '^??')"
+
+  lines+=("This session's worktree: $session_wt")
+  lines+=("- Branch: $sw_branch. Modified: $sw_modified, untracked: $sw_untracked.")
+
+  if [ "$sw_branch" != "(detached)" ] && [ "$offline" -eq 0 ]; then
+    # Already merged?
+    if content_is_in_main "refs/heads/$sw_branch"; then
+      lines+=("- This branch's content is ALREADY IN origin/main. This worktree is stranded on finished work.")
+    else
+      # Base drift — how far has main moved since this branch diverged?
+      mb="$(g merge-base origin/main "refs/heads/$sw_branch" 2>/dev/null || true)"
+      if [ -n "$mb" ]; then
+        drift="$(g rev-list --count "${mb}..origin/main" 2>/dev/null || echo 0)"
+        [ "$drift" -gt 0 ] && lines+=("- origin/main is $drift commit(s) ahead of this branch's fork point — base has drifted.")
+      fi
+    fi
+
+    # Unpushed commits — work that exists only on this disk.
+    has_remote="$(g config --get "branch.${sw_branch}.remote" 2>/dev/null || true)"
+    if [ -n "$has_remote" ]; then
+      unpushed="$(g rev-list --count "${has_remote}/${sw_branch}..refs/heads/${sw_branch}" 2>/dev/null || echo 0)"
+      [ "$unpushed" -gt 0 ] && lines+=("- $unpushed commit(s) not pushed to any remote — only on this disk.")
+    else
+      local_only="$(g rev-list --count "origin/main..refs/heads/${sw_branch}" 2>/dev/null || echo 0)"
+      [ "$local_only" -gt 0 ] && lines+=("- No remote tracking branch. $local_only commit(s) exist only on this disk.")
+    fi
+
+    # Branch age — how long since the last commit?
+    sw_last_epoch="$(g log -1 --format=%ct "refs/heads/$sw_branch" 2>/dev/null || echo "$now_epoch")"
+    sw_age_days=$(( ( now_epoch - sw_last_epoch ) / 86400 ))
+    [ "$sw_age_days" -ge 3 ] && lines+=("- Last commit on this branch: $sw_age_days days ago.")
+  fi
+fi
+
 # ── Worktree hygiene sweep ──────────────────────────────────────────────────
 # Parse `git worktree list --porcelain` into parallel path/branch arrays.
 wt_path=()
@@ -232,7 +300,6 @@ done < <(g worktree list --porcelain 2>/dev/null)
 # it looks like it might still matter but nothing is actually watching it.
 ABANDONED_DAYS=3
 ABANDONED_SECONDS=$((ABANDONED_DAYS * 86400))
-now_epoch="$(date +%s)"
 
 total=${#wt_path[@]}
 missing=0
@@ -309,10 +376,74 @@ if [ "$abandoned" -gt 0 ]; then
   lines+=("- $abandoned worktree(s) UNMERGED but untouched for over $ABANDONED_DAYS days — likely abandoned, needs a human look (not auto-removable, may hold real work): $sample")
 fi
 
+# ── Open PRs and CI status ─────────────────────────────────────────────────
+# One gh call, zero config — the remote is already in git. Fails open: if gh
+# isn't installed or not authenticated, this block is silently skipped.
+if command -v gh >/dev/null 2>&1; then
+  pr_json="$(gh pr list --repo "$(g remote get-url origin 2>/dev/null)" \
+    --state open \
+    --json number,headRefName,statusCheckRollup,reviewDecision,title,isDraft \
+    2>/dev/null || true)"
+  if [ -n "$pr_json" ] && [ "$pr_json" != "[]" ]; then
+    # Determine the session's branch for marking
+    if [ "$in_primary" -eq 0 ]; then
+      mark_branch="$(git -C "$session_wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+    else
+      mark_branch="$branch"
+    fi
+    pr_lines="$(MARK_BRANCH="$mark_branch" PR_DATA="$pr_json" python3 - <<'PRPY' 2>/dev/null
+import json, os, sys
+try:
+    prs = json.loads(os.environ.get("PR_DATA", "[]"))
+except Exception:
+    sys.exit(0)
+if not prs:
+    sys.exit(0)
+mark = os.environ.get("MARK_BRANCH", "")
+out = []
+for pr in sorted(prs, key=lambda p: p.get("number", 0)):
+    n = pr.get("number", "?")
+    branch = pr.get("headRefName", "")
+    draft = pr.get("isDraft", False)
+    checks = pr.get("statusCheckRollup") or []
+    review = pr.get("reviewDecision", "")
+    if not checks:
+        ci = "no CI"
+    else:
+        total = len(checks)
+        passed = sum(1 for c in checks if c.get("conclusion") == "SUCCESS")
+        failed = sum(1 for c in checks if c.get("conclusion") == "FAILURE")
+        pending = sum(1 for c in checks if c.get("status") != "COMPLETED")
+        if pending:
+            ci = "CI pending"
+        elif failed:
+            ci = f"CI failing ({failed}/{total})"
+        elif passed == total:
+            ci = "CI green"
+        else:
+            ci = "CI mixed"
+    rv = {"APPROVED": "approved", "CHANGES_REQUESTED": "changes requested",
+          "REVIEW_REQUIRED": "needs review"}.get(review, "no reviews")
+    tag = "draft, " if draft else ""
+    me = " <- this session" if branch == mark else ""
+    out.append(f"  #{n} {branch} -- {tag}{ci}, {rv}{me}")
+print(f"Open PRs: {len(prs)}")
+for line in out:
+    print(line)
+PRPY
+)"
+    if [ -n "$pr_lines" ]; then
+      while IFS= read -r pl; do
+        lines+=("$pl")
+      done <<< "$pr_lines"
+    fi
+  fi
+fi
+
 ctx="Dev environment health (SessionStart):
 $(printf '%s\n' "${lines[@]}")
 
-If production is behind origin/main, if deploy state is UNKNOWN, if the primary worktree isn't on main, is dirty, or several worktrees are stale/merged/abandoned, say so directly and plainly at the start of your first response — don't wait to be asked. Terminal systemMessages are easy to miss across sessions; this additionalContext block is the channel that reliably reaches you."
+Say anything flagged above directly and plainly at the start of your first response — don't wait to be asked. That includes: session in the primary worktree, primary not on main, deploy drift, session worktree stranded/drifted/unpushed, stale or abandoned worktrees, and failing CI on open PRs."
 
 emit "" "$ctx"
 exit 0
