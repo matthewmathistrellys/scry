@@ -1,0 +1,26 @@
+{
+  "name": "scry",
+  "version": "1.2.0",
+  "description": "Session-start checks for codebase architecture, repository health, concurrent agent activity, and machine pressure.",
+  "author": {
+    "name": "Matthew Mathis",
+    "url": "https://github.com/matthewmathistrellys"
+  },
+  "homepage": "https://github.com/matthewmathistrellys/scry",
+  "repository": "https://github.com/matthewmathistrellys/scry",
+  "license": "MIT",
+  "keywords": ["session-start", "repository-health", "worktrees", "developer-tools"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Scry",
+    "shortDescription": "See repository and machine state at session start",
+    "longDescription": "Adds quiet, advisory session-start context about codebase architecture, repository hygiene, concurrent Claude and Codex activity, and local machine pressure.",
+    "developerName": "Matthew Mathis",
+    "category": "Developer Tools",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/matthewmathistrellys/scry",
+    "defaultPrompt": [
+      "Use Scry to check the state of this workspace."
+    ]
+  }
+}

@@ -5,9 +5,9 @@ description: Run Scry's health, fleet, pressure, and architecture checks on dema
 
 # Scry — on-demand state of the world
 
-Run the same four checks that fire at SessionStart, right now. Each script
-lives in the plugin root and emits JSON — extract the `additionalContext`
-field for the human-readable report.
+Run the same four checks that fire at SessionStart in Claude Code and Codex,
+right now. Each script lives in the plugin root and emits JSON — extract the
+`additionalContext` field for the human-readable report.
 
 ## Steps
 
@@ -53,8 +53,8 @@ msg = data.get("systemMessage", "")
 
 ## Important
 
-- These are the SAME scripts that run at session start. The output format
-  is identical. No special handling needed.
+- These are the SAME scripts both clients run at session start. The output
+  format is identical. No client-specific handling is needed.
 - health.sh makes network calls (git fetch, deploy check, gh pr list) so
   it may take 2-3 seconds. The others are local and fast.
 - Every script exits 0 unconditionally. A missing script or a failed parse

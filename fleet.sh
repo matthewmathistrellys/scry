@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fleet.sh — Claude Code SessionStart hook: answers "what else is
+# fleet.sh — Claude Code / Codex SessionStart hook: answers "what else is
 # happening right now?" — the question no session can currently ask.
 #
 # Every agent session believes it is alone. It is told its directory and
@@ -11,7 +11,8 @@
 # sprawl that produced is documented in ~/Dev/CLAUDE.md.
 #
 # Reports three things, all read locally, no network:
-#   1. Other sessions live in this repo FAMILY (the repo and every one of
+#   1. Other Claude and Codex sessions live in this repo FAMILY (the repo
+#      and every one of
 #      its linked worktrees — they are one work stream, so a session in
 #      .worktrees/foo is a neighbour, not a stranger).
 #   2. Other agent CLIs on the box (Codex, Gemini, aider, ...) — they
@@ -61,13 +62,14 @@ PY
 # itself as a collision is worse than useless) and cwd because $PWD is
 # not guaranteed to be the session's directory.
 payload="$(cat 2>/dev/null || true)"
-read -r self_id session_cwd <<<"$(SCRY_PAYLOAD="$payload" python3 - <<'PY'
+read -r self_id session_cwd transcript_path <<<"$(SCRY_PAYLOAD="$payload" python3 - <<'PY'
 import json, os
 try:
     d = json.loads(os.environ.get("SCRY_PAYLOAD") or "{}")
 except Exception:
     d = {}
-print(d.get("session_id", ""), d.get("cwd", "") or os.getcwd())
+print(d.get("session_id", ""), d.get("cwd", "") or os.getcwd(),
+      d.get("transcript_path", "") or "")
 PY
 )"
 [ -n "$session_cwd" ] || session_cwd="$PWD"
@@ -90,18 +92,21 @@ esac
 worktree_paths="$(git -C "$session_cwd" worktree list --porcelain 2>/dev/null \
   | sed -n 's/^worktree //p')"
 
+fleet_tmp="$(mktemp "${TMPDIR:-/tmp}/scry-fleet.XXXXXX")" || exit 0
+trap 'rm -f "$fleet_tmp"' EXIT
 SELF_ID="$self_id" SESSION_CWD="$session_cwd" FAMILY_ROOT="$family_root" \
-ACTIVE_MINUTES="$ACTIVE_MINUTES" AGENT_BINARIES="$AGENT_BINARIES" \
-WORKTREE_PATHS="$worktree_paths" \
-python3 - <<'PY' > /tmp/.scry_fleet_$$ 2>/dev/null
-import json, os, re, subprocess, time
+TRANSCRIPT_PATH="$transcript_path" ACTIVE_MINUTES="$ACTIVE_MINUTES" \
+AGENT_BINARIES="$AGENT_BINARIES" WORKTREE_PATHS="$worktree_paths" \
+python3 - >"$fleet_tmp" 2>/dev/null <<'PY'
+import glob, json, os, re, subprocess, time
 
 self_id  = os.environ["SELF_ID"]
-cwd      = os.environ["SESSION_CWD"]
-family   = os.environ["FAMILY_ROOT"]
+cwd      = os.path.realpath(os.environ["SESSION_CWD"])
+family   = os.path.realpath(os.environ["FAMILY_ROOT"])
 window   = int(os.environ["ACTIVE_MINUTES"]) * 60
 agents   = set(os.environ["AGENT_BINARIES"].split())
 now      = time.time()
+transcript_path = os.environ.get("TRANSCRIPT_PATH", "")
 
 def encode(path):
     # Claude Code's transcript directory name: '/', '.' and '_' all become
@@ -109,12 +114,13 @@ def encode(path):
     return re.sub(r"[/._]", "-", path)
 
 projects = os.path.expanduser("~/.claude/projects")
+codex_home = os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex"))
 lines = []
 
 # encoded-dir-name -> readable path, for every worktree git knows about.
 known = {}
 for p in (os.environ.get("WORKTREE_PATHS") or "").splitlines():
-    p = p.strip()
+    p = os.path.realpath(p.strip())
     if p:
         known[encode(p)] = p
 
@@ -148,6 +154,7 @@ worktree_roots = sorted(known.values(), key=len, reverse=True)
 def worktree_of(path):
     if not path:
         return None
+    path = os.path.realpath(path)
     for root in worktree_roots:
         if path == root or path.startswith(root + os.sep):
             return root
@@ -265,6 +272,71 @@ if live:
         f"in the last {window // 60} min: {grouped}.{age}"
     )
 
+# Codex rollouts expose all fleet fields needed in their first session_meta
+# record. Read only that record: conversation content is neither needed nor a
+# stable interface. File mtime is the activity signal, matching Claude above.
+codex_live, codex_here, codex_oldest = [], 0, None
+codex_sub_here, codex_sub_elsewhere = 0, []
+for p in glob.glob(os.path.join(codex_home, "sessions", "*", "*", "*", "*.jsonl")):
+    try:
+        st = os.stat(p)
+        if now - st.st_mtime > window:
+            continue
+        with open(p, encoding="utf-8") as fh:
+            meta = json.loads(fh.readline()).get("payload", {})
+    except Exception:
+        continue
+    sid = meta.get("id") or meta.get("session_id") or ""
+    if sid == self_id or (
+        transcript_path
+        and os.path.realpath(p) == os.path.realpath(transcript_path)
+    ):
+        continue
+    raw_cwd = meta.get("cwd") or ""
+    if not raw_cwd:
+        continue
+    other_cwd = os.path.realpath(raw_cwd)
+    if not (other_cwd == family or other_cwd.startswith(family + os.sep)):
+        continue
+    other_wt = worktree_of(other_cwd)
+    is_subagent = meta.get("thread_source") == "subagent" or isinstance(meta.get("source"), dict)
+    if is_subagent:
+        if self_worktree and other_wt == self_worktree:
+            codex_sub_here += 1
+        else:
+            codex_sub_elsewhere.append(os.path.relpath(other_cwd, parent))
+        continue
+    start = getattr(st, "st_birthtime", st.st_ctime)
+    codex_oldest = start if codex_oldest is None else min(codex_oldest, start)
+    codex_live.append(os.path.relpath(other_cwd, parent))
+    if self_worktree and other_wt == self_worktree:
+        codex_here += 1
+
+if codex_live:
+    from collections import Counter
+    grouped = ", ".join(
+        f"{name} ({n})" if n > 1 else name
+        for name, n in sorted(Counter(codex_live).items(), key=lambda kv: -kv[1])
+    )
+    age = f" Oldest has been running {human(now - codex_oldest)}." if codex_oldest else ""
+    lines.append(
+        f"- {len(codex_live)} other Codex session(s) active in this repo family "
+        f"in the last {window // 60} min: {grouped}.{age}"
+    )
+
+if codex_sub_here or codex_sub_elsewhere:
+    from collections import Counter
+    total = codex_sub_here + len(codex_sub_elsewhere)
+    where = Counter(codex_sub_elsewhere)
+    detail = ", ".join(f"{n} ({c})" if c > 1 else n for n, c in where.items())
+    if codex_sub_here:
+        detail = f"{codex_sub_here} in this directory" + (f"; {detail}" if detail else "")
+    noun, verb = ("subagent", "is") if total == 1 else ("subagents", "are")
+    lines.append(
+        f"- {total} Codex {noun} from other sessions {verb} working in this "
+        f"repo family: {detail}. Subagents edit files without a session of "
+        f"their own, so a directory can be under active change with no session in it."
+    )
 if sub_elsewhere or sub_here:
     from collections import Counter
     total_subs = len(sub_elsewhere) + sub_here
@@ -281,8 +353,8 @@ if sub_elsewhere or sub_here:
         f"session in it."
     )
 
-if here or sub_here:
-    n = here + sub_here
+if here or sub_here or codex_here or codex_sub_here:
+    n = here + sub_here + codex_here + codex_sub_here
     which = "one of them is" if n == 1 else f"{n} of them are"
     # The consequence, not the instruction: what a checkout/reset/clean
     # here would actually cost right now, stated as a fact about current
@@ -326,9 +398,20 @@ for row in ps.splitlines():
         while len(parts) < 3:
             parts.insert(0, 0)
         secs = (int(days or 0) * 86400) + parts[0] * 3600 + parts[1] * 60 + parts[2]
-        found.setdefault(base, human(secs))
+        found.setdefault(base, []).append(secs)
+# The current client is necessarily present and is not "other". Subtract one
+# process for it; session metadata above still reports additional same-client
+# activity in this repository with much better attribution.
+current_client = "codex" if f"{os.sep}.codex{os.sep}" in transcript_path else "claude"
+if current_client in found and found[current_client]:
+    found[current_client].pop(0)
+    if not found[current_client]:
+        del found[current_client]
 if found:
-    listed = ", ".join(f"{n} (running {t})" for n, t in sorted(found.items()))
+    listed = ", ".join(
+        f"{n} ({len(times)} running; oldest {human(max(times))})"
+        for n, times in sorted(found.items())
+    )
     lines.append(f"- Other agent CLI(s) also running on this machine: {listed}.")
 
 # ── 3. What the previous session here was doing ─────────────────────────
@@ -376,9 +459,9 @@ if os.path.isdir(sd):
 
 print("\n".join(lines))
 PY
-
-body="$(cat /tmp/.scry_fleet_$$ 2>/dev/null)"
-rm -f /tmp/.scry_fleet_$$
+body="$(<"$fleet_tmp")"
+rm -f "$fleet_tmp"
+trap - EXIT
 [ -n "$body" ] && emit "Session fleet (SessionStart):
 $body"
 exit 0

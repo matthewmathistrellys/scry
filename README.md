@@ -1,8 +1,11 @@
 # scry
 
-[Claude Code](https://claude.com/claude-code) `SessionStart` checks that give
-a fresh agent session — or a fresh you — the state of the world the instant it
-starts, instead of making it dig or making you remember to ask.
+[Claude Code](https://claude.com/claude-code) and
+[Codex](https://developers.openai.com/codex/) `SessionStart` checks that give a
+fresh agent session — or a fresh you — the state of the world the instant it
+starts, instead of making it dig or making you remember to ask. Both clients
+run the same four scripts from this repository; only their package manifests
+are client-specific.
 
 A session is told its working directory and a git snapshot, and nothing else.
 Not what else is running, not what the last session was doing, not what the
@@ -42,10 +45,10 @@ machine is carrying. Four independent checks fill that in.
     pending) and review state (approved, changes requested, needs review).
     The session's own branch is marked. Zero config — derived from the git
     remote via `gh`. Silently skipped if `gh` isn't installed.
-- **`fleet.sh`** — how many other sessions are live in this repo *and its
+- **`fleet.sh`** — how many other Claude and Codex sessions are live in this repo *and its
   worktrees*, how old they are, whether one is in your exact directory, which
   subagents are editing here without a session of their own, whether other
-  agent CLIs (Codex, Gemini, aider) are competing for the same machine, and
+  agent CLIs (Gemini, aider, and others) are competing for the same machine, and
   what the last session here was called.
 - **`pressure.sh`** — load per core, swap in use, disk headroom, and which dev
   servers are already listening.
@@ -160,6 +163,8 @@ collision line.
 
 ## Install
 
+### Claude Code
+
 ```
 /plugin marketplace add matthewmathistrellys/scry
 /plugin install scry
@@ -169,13 +174,34 @@ That is the whole install. The hooks register themselves and run from the
 plugin's own directory, so updating is `/plugin update scry` — there are no
 copies on your machine to keep in sync.
 
+### Codex
+
+```sh
+codex plugin marketplace add matthewmathistrellys/scry
+codex plugin add scry@scry
+```
+
+Review and trust the four bundled hooks when Codex asks. Codex deliberately
+does not run newly installed, non-managed plugin hooks until their definitions
+have been trusted. Updating the marketplace snapshot and reinstalling refreshes
+the cached plugin:
+
+```sh
+codex plugin marketplace upgrade scry
+codex plugin add scry@scry
+```
+
+The Codex package uses `.codex-plugin/plugin.json`; Claude uses
+`.claude-plugin/plugin.json`. Both discover the same `hooks/hooks.json`, skill,
+scripts, and scanners, so there is no copied implementation to drift.
+
 All four checks are worth having everywhere, not just in the repos you
 remembered to wire up: `fleet.sh` and `pressure.sh` are about the machine, and
 every check degrades to silence where it doesn't apply. `architecture.sh` falls
 back to a directory listing, `health.sh` skips a directory that isn't a git
 repo, and `fleet.sh` says nothing when you're the only session.
 
-To try it without installing:
+To try the Claude package without installing:
 
 ```
 claude --plugin-dir /path/to/scry
@@ -213,14 +239,17 @@ running hook until you copy it again, and nothing reports the drift.
 to its own location, so the two move together. `health.sh` always resolves to
 the **primary** worktree via `git-common-dir`, regardless of which worktree or
 subdirectory the session started in, and additionally reports the session's own
-worktree health when it differs from the primary. `fleet.sh` reads the
-`SessionStart` JSON payload on stdin to learn its own session id, so it never
-reports itself as a collision.
+worktree health when it differs from the primary. `fleet.sh` reads the common
+`SessionStart` JSON payload on stdin to learn its own session id, cwd, and
+transcript path, so it never reports itself as a collision. Claude activity is
+derived from recent metadata under `~/.claude/projects`; Codex activity is
+derived from only the first `session_meta` record and mtime of rollouts under
+`${CODEX_HOME:-~/.codex}/sessions`. Scry does not inspect Codex conversation
+content.
 
-All four emit the `hookSpecificOutput.additionalContext` envelope Claude Code's
-`SessionStart` event expects — plain stdout doesn't reliably reach the model,
-only this does. Each exits `0` unconditionally: a session-start hook that
-fails, or that hangs, is worse than one that skips.
+All four emit the `hookSpecificOutput.additionalContext` envelope supported by
+both clients. Each exits `0` unconditionally: a session-start hook that fails,
+or that hangs, is worse than one that skips.
 
 ## Deploy drift (optional)
 
@@ -275,11 +304,11 @@ what is measured.
 **Subagents count.** A subagent is not a session, but it *is* a concurrent
 writer, and it does not necessarily work where its parent lives — a session in
 a repo root routinely dispatches one into a worktree. Counting only top-level
-transcripts therefore reports an actively-edited directory as empty. Subagent
-transcripts are read too, and attributed by the cwd they record for themselves,
-never by their parent's, using every directory touched recently rather than
-just the latest: the useful question is *has it been editing here*, not *where
-is it standing now*.
+transcripts therefore reports an actively-edited directory as empty. Claude
+subagents are attributed using recent cwd metadata from their transcript tail;
+Codex subagents are attributed using their first `session_meta` record. The
+useful question is *has another writer been active here*, not merely how many
+top-level sessions exist.
 
 **Titles, never content.** `fleet.sh` reports what the last session in a
 directory was *called*, never what it said or concluded. A title reads as a

@@ -10,7 +10,7 @@
 # two node servers live; nothing running on it could tell.
 #
 # Reports load, swap, disk and locally-listening dev servers. All of it
-# comes from sysctl/vm_stat/df/lsof — instant, local, no network.
+# comes from local macOS/Linux system interfaces — instant, local, no network.
 #
 # Silence is the default. Every threshold below is set where the number
 # starts changing a decision, not where it becomes non-zero: load 4 on 8
@@ -46,8 +46,9 @@ PY
 lines=()
 
 # ── Load ────────────────────────────────────────────────────────────────
-cores="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 0)"
+cores="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
 load1="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')"
+[ -n "$load1" ] || load1="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
 [ -n "$load1" ] || load1="$(uptime | sed 's/.*load averages*:[ ]*//' | awk '{print $1}' | tr -d ,)"
 if [ -n "$load1" ] && [ "$cores" -gt 0 ] 2>/dev/null; then
   verdict="$(LOAD="$load1" CORES="$cores" WARN="$LOAD_PER_CORE_WARN" python3 - <<'PY'
@@ -68,6 +69,11 @@ fi
 
 # ── Swap ────────────────────────────────────────────────────────────────
 swap_used="$(sysctl -n vm.swapusage 2>/dev/null | sed -n 's/.*used = \([0-9.]*\)M.*/\1/p')"
+[ -n "$swap_used" ] || swap_used="$(awk '
+  /^SwapTotal:/ { total=$2 }
+  /^SwapFree:/ { free=$2 }
+  END { if (total != "" && free != "") printf "%.0f", (total-free)/1024 }
+' /proc/meminfo 2>/dev/null)"
 if [ -n "$swap_used" ]; then
   used_int="${swap_used%%.*}"
   if [ "${used_int:-0}" -ge "$SWAP_USED_MB_WARN" ] 2>/dev/null; then
@@ -76,7 +82,7 @@ if [ -n "$swap_used" ]; then
 fi
 
 # ── Disk ────────────────────────────────────────────────────────────────
-read -r free_gb used_pct <<<"$(df -Pg / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $4, $5}')"
+read -r free_gb used_pct <<<"$(df -Pk / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); printf "%d %s\n", $4/1048576, $5}')"
 if [ -n "${free_gb:-}" ]; then
   if [ "$free_gb" -lt "$DISK_FREE_GB_WARN" ] 2>/dev/null || [ "${used_pct:-0}" -ge "$DISK_USED_PCT_WARN" ] 2>/dev/null; then
     lines+=("- Disk low: ${free_gb}GB free (${used_pct}% used). Builds, containers and git operations fail in confusing ways below this.")
