@@ -81,13 +81,42 @@ def render(domains: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def deps_not_fetched(mix_root: str) -> bool:
+    """True when this checkout has never run `mix deps.get` — no deps/ dir.
+
+    A fresh worktree carries mix.exs and lib/ (checked into git) but not
+    deps/ or _build/ (both gitignored), so a session that starts compiling
+    without noticing hits a bare Mix.Error instead of a clear next step.
+    Presence of deps/ is the cheap, reliable signal — it only exists once
+    `mix deps.get` has actually run.
+    """
+    return bool(mix_root) and os.path.isdir(mix_root) and not os.path.isdir(os.path.join(mix_root, "deps"))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Ash domain overview")
     parser.add_argument("--path", default="lib", help="Base path to scan")
+    parser.add_argument(
+        "--mix-root",
+        default=None,
+        help="Directory containing mix.exs (defaults to the parent of --path)",
+    )
     args = parser.parse_args()
 
+    mix_root = args.mix_root or os.path.dirname(os.path.normpath(args.path))
+
+    sections = []
+    if deps_not_fetched(mix_root):
+        sections.append(
+            "Elixir deps not fetched in this worktree yet (no deps/ directory found "
+            f"under {mix_root}) — run `mix deps.get` before anything here compiles."
+        )
+
     domains = find_domains(args.path)
-    if not domains:
+    if domains:
+        sections.append(render(domains))
+
+    if not sections:
         return
 
     # SessionStart hooks must emit this JSON envelope to reach the model as
@@ -97,7 +126,7 @@ def main():
     payload = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": render(domains),
+            "additionalContext": "\n\n".join(sections),
         }
     }
     print(json.dumps(payload))

@@ -86,6 +86,41 @@ content_is_in_main() {
   g cherry origin/main "$syn" 2>/dev/null | head -1 | grep -q '^-'
 }
 
+# What would a checkout, reset, or clean in $1 (a worktree path) actually
+# destroy? Only files that exist in no commit on any ref are truly
+# unrecoverable, so that is what this counts — a normal untracked or modified
+# file already has the plain count reported alongside it and isn't special.
+# Bounded by a wall-clock budget: the per-file history walk is slowest for
+# exactly the files we care about, and a session hook that hangs is worse
+# than one that reports partial results — so it says how far it got.
+#
+# Shared by the primary-worktree check and the session-worktree check below:
+# the risk is identical in either location, and an untracked file with no
+# history anywhere is exactly as unrecoverable in a linked worktree as in the
+# primary one — the 2026-08-10 incident's stranded brief lived in a linked
+# worktree, not the primary, which the original primary-only version of this
+# check would have missed entirely.
+orphan_file_exposure() {
+  local wt="$1" cands total deadline checked orphans f scope
+  cands="$( { git -C "$wt" diff --cached --name-only --diff-filter=A 2>/dev/null
+              git -C "$wt" ls-files --others --exclude-standard 2>/dev/null; } | sort -u)"
+  total="$(printf '%s' "$cands" | grep -c . )"
+  [ "$total" -gt 0 ] || return 0
+  deadline=$(( $(date +%s) + 3 ))
+  checked=0; orphans=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ "$(date +%s)" -ge "$deadline" ] && break
+    checked=$(( checked + 1 ))
+    [ -z "$(git -C "$wt" log --all --max-count=1 --format=%h -- "$f" 2>/dev/null)" ] && orphans=$(( orphans + 1 ))
+  done <<EOF
+$cands
+EOF
+  [ "$orphans" -gt 0 ] || return 0
+  scope="all $total"; [ "$checked" -lt "$total" ] && scope="$checked of $total (time budget)"
+  echo "- EXPOSURE: $orphans file(s) here exist in NO commit on ANY branch — checked $scope. A checkout, reset or clean in this worktree destroys them permanently. Inspect before moving: git -C $wt status --porcelain"
+}
+
 branch="$(g symbolic-ref --quiet --short HEAD || echo '(detached)')"
 modified="$(g status --porcelain | grep -cv '^??')"
 untracked="$(g status --porcelain | grep -c '^??')"
@@ -125,30 +160,8 @@ else
     lines+=("- This branch's content is ALREADY IN origin/main. Nothing here is pending review — the worktree is simply stranded on finished work.")
   fi
 
-  # What would a checkout or reset here actually destroy? Only files that exist
-  # in no commit on any ref are truly unrecoverable, so that is what we count.
-  # Bounded by a wall-clock budget: the per-file history walk is slowest for
-  # exactly the files we care about, and a session hook that hangs is worse
-  # than one that reports partial results — so it says how far it got.
-  cands="$( { g diff --cached --name-only --diff-filter=A 2>/dev/null
-              g ls-files --others --exclude-standard 2>/dev/null; } | sort -u)"
-  total="$(printf '%s' "$cands" | grep -c . )"
-  if [ "$total" -gt 0 ]; then
-    deadline=$(( now_epoch + 3 ))
-    checked=0; orphans=0
-    while IFS= read -r f; do
-      [ -n "$f" ] || continue
-      [ "$(date +%s)" -ge "$deadline" ] && break
-      checked=$(( checked + 1 ))
-      [ -z "$(g log --all --max-count=1 --format=%h -- "$f" 2>/dev/null)" ] && orphans=$(( orphans + 1 ))
-    done <<EOF
-$cands
-EOF
-    if [ "$orphans" -gt 0 ]; then
-      scope="all $total"; [ "$checked" -lt "$total" ] && scope="$checked of $total (time budget)"
-      lines+=("- EXPOSURE: $orphans file(s) here exist in NO commit on ANY branch — checked $scope. A checkout, reset or clean in this worktree destroys them permanently. Inspect before moving: git -C $main_wt status --porcelain")
-    fi
-  fi
+  exp="$(orphan_file_exposure "$main_wt")"
+  [ -n "$exp" ] && lines+=("$exp")
 fi
 
 if [ "$offline" -eq 1 ]; then
@@ -244,7 +257,11 @@ if [ "$in_primary" -eq 0 ]; then
   sw_untracked="$(git -C "$session_wt" status --porcelain 2>/dev/null | grep -c '^??')"
 
   lines+=("This session's worktree: $session_wt")
+  lines+=("- THIS SESSION IS LOCKED TO THIS WORKTREE — Claude Code confines a session to whatever worktree it started in, so it cannot directly create, enter, or cd into another one (EnterWorktree, wt switch, cd, and git -C all refuse from here). The one way out is ExitWorktree, which returns the session to the primary worktree and unlocks it — the conversation is preserved, nothing is lost. Run that first if asked to start unrelated new work; do not try to work around the lock.")
   lines+=("- Branch: $sw_branch. Modified: $sw_modified, untracked: $sw_untracked.")
+
+  exp="$(orphan_file_exposure "$session_wt")"
+  [ -n "$exp" ] && lines+=("$exp")
 
   if [ "$sw_branch" != "(detached)" ] && [ "$offline" -eq 0 ]; then
     # Already merged?

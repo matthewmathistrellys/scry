@@ -65,7 +65,7 @@ fi
 
 script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scanners/elixir_ash.py"
 if [ -f "$script" ]; then
-  out="$(python3 "$script" --path "$mix_root/lib")"
+  out="$(python3 "$script" --path "$mix_root/lib" --mix-root "$mix_root")"
   [ -n "$out" ] && printf '%s\n' "$out" || quick_layout
 else
   quick_layout

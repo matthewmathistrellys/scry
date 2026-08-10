@@ -22,7 +22,10 @@ machine is carrying. Four independent checks fill that in.
   not a language scanner: it detects the stack and hands off to `scanners/`
   (Elixir/Ash today, others to follow), so one hook works in every repo
   including a polyglot tree. Outside a recognised project it falls back to a
-  directory layout.
+  directory layout. The Elixir/Ash scanner also flags a worktree whose
+  dependencies were never fetched (no `deps/` directory) — the fastest way to
+  turn a fresh worktree's first `mix compile` into a bare `Mix.Error` into a
+  heads-up instead.
 - **`health.sh`** — the repo's health from this session's perspective:
   - **Primary worktree state:** on main? dirty? stranded on a merged branch?
     How long parked? Files that exist in no commit on any branch?
@@ -31,10 +34,16 @@ machine is carrying. Four independent checks fill that in.
     by future sessions, silent ref corruption from concurrent checkouts,
     repo-wide merge blockage if left on a feature branch.
   - **Session worktree health:** when the session is in a linked worktree,
-    reports the branch's relationship to the world — already merged (stranded
-    on finished work), base drift (origin/main has moved since the fork
-    point), unpushed commits (work that exists only on this disk), and branch
-    age (last commit N days ago).
+    states unprompted that Claude Code has locked the session to it and gives
+    the one working way out (`ExitWorktree`) — the lock is real, not a
+    Worktrunk setting, and losing an hour to relearning that live is what this
+    line exists to prevent. Then reports the branch's relationship to the
+    world — already merged (stranded on finished work), base drift
+    (origin/main has moved since the fork point), unpushed commits (work that
+    exists only on this disk), branch age (last commit N days ago), and files
+    that exist in no commit on any branch (the same unrecoverable-on-cleanup
+    check the primary worktree gets, run here too — the file at risk is just
+    as often in the linked worktree as in the primary one).
   - **Local main vs origin/main:** divergence in either direction — stranded
     local commits or a stale local tip. Auto-fast-forwards when safe.
   - **Deploy drift:** whether merged work is actually live (optional,
@@ -75,11 +84,13 @@ industrialise that problem.
 | Disk | 60% used | ≥90% used, or <20GB free |
 | Sessions in this repo | just you | any other live one |
 | Last session | none recorded | a title exists |
-| Session in primary worktree | in a linked worktree | in the primary |
+| Session worktree location | never silent | states primary-worktree consequences, or the linked-worktree lock + `ExitWorktree` escape hatch — whichever applies |
 | Session worktree merged | not merged | content already in main |
 | Session worktree drift | up to date | origin/main ahead of fork point |
 | Unpushed commits | all pushed | commits only on disk |
 | Branch age | recent | ≥3 days since last commit |
+| Orphan files (primary or session worktree) | none | a file exists in no commit on any branch |
+| Elixir/Ash worktree deps | `deps/` present | `deps/` missing — `mix deps.get` needed |
 | Open PRs | none, or `gh` unavailable | any open PR exists |
 
 Silence is the default and the feature. A check that reports nothing is
@@ -122,6 +133,10 @@ Primary worktree: /Users/you/Dev/myapp
 - On main. Modified: 0, untracked: 0.
 - Production is up to date with origin/main (a1b2c3d).
 This session's worktree: /Users/you/Dev/myapp/.worktrees/feat-new-thing
+- THIS SESSION IS LOCKED TO THIS WORKTREE — Claude Code confines a session to
+  whatever worktree it started in, so it cannot directly create, enter, or cd
+  into another one. The one way out is ExitWorktree, which returns to the
+  primary worktree and unlocks the session — the conversation is preserved.
 - Branch: feat/new-thing. Modified: 2, untracked: 1.
 - origin/main is 5 commit(s) ahead of this branch's fork point — base has
   drifted.

@@ -128,6 +128,100 @@ class ScryHookTests(unittest.TestCase):
             self.assertIn("1 Codex subagent", report)
             self.assertIn("COLLISION RISK: 3 of them are", report)
 
+    def test_session_worktree_reports_lock_escape_hatch_and_orphan_exposure(self):
+        # 2026-08-10 incident: a session inside a linked worktree spent an
+        # hour failing to leave it, and an untracked file in that same
+        # worktree (not the primary) had no commit anywhere and would have
+        # been unrecoverable on cleanup. Both facts must reach the session
+        # unprompted.
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            primary = base / "primary"
+            primary.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main", str(primary)], check=True)
+            subprocess.run(["git", "-C", str(primary), "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+            linked = base / "linked"
+            subprocess.run(
+                ["git", "-C", str(primary), "worktree", "add", "-q", "-b", "feature", str(linked)],
+                check=True,
+            )
+            (linked / "orphan.md").write_text("unbacked-up brief\n")
+
+            result = run_hook(
+                "health.sh",
+                linked,
+                {"cwd": str(linked)},
+                {"HOME": str(base)},
+            )
+            report = context(result)
+            self.assertIn("THIS SESSION IS LOCKED TO THIS WORKTREE", report)
+            self.assertIn("ExitWorktree", report)
+            self.assertIn("EXPOSURE: 1 file(s) here exist in NO commit on ANY branch", report)
+
+    def test_session_worktree_stays_silent_when_clean(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            primary = base / "primary"
+            primary.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main", str(primary)], check=True)
+            subprocess.run(["git", "-C", str(primary), "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+            linked = base / "linked"
+            subprocess.run(
+                ["git", "-C", str(primary), "worktree", "add", "-q", "-b", "feature", str(linked)],
+                check=True,
+            )
+
+            result = run_hook(
+                "health.sh",
+                linked,
+                {"cwd": str(linked)},
+                {"HOME": str(base)},
+            )
+            self.assertNotIn("EXPOSURE", context(result))
+
+    def test_primary_worktree_orphan_exposure_still_reported_off_main(self):
+        # Regression guard for the orphan_file_exposure refactor: the
+        # original primary-only check must still fire.
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = base / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+            subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "sidework"], check=True)
+            (repo / "orphan.md").write_text("unbacked-up\n")
+
+            result = run_hook("health.sh", repo, {"cwd": str(repo)}, {"HOME": str(base)})
+            report = context(result)
+            self.assertIn("EXPOSURE: 1 file(s) here exist in NO commit on ANY branch", report)
+
+    def test_elixir_scanner_flags_missing_deps_and_clears_once_fetched(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = base / "repo"
+            (repo / "lib/my_app").mkdir(parents=True)
+            (repo / "mix.exs").write_text("defmodule MyApp.MixProject do\nend\n")
+            (repo / "lib/my_app/accounts.ex").write_text(
+                'defmodule MyApp.Accounts do\n'
+                '  @moduledoc """\n'
+                "  Users and sessions.\n"
+                '  """\n'
+                "  use Ash.Domain\n"
+                "end\n"
+            )
+
+            missing = run_hook("architecture.sh", repo, {}, {"HOME": str(base)})
+            report = context(missing)
+            self.assertIn("Elixir deps not fetched", report)
+            self.assertIn("mix deps.get", report)
+            self.assertIn("Ash domains (1)", report)
+
+            (repo / "deps").mkdir()
+            fetched = run_hook("architecture.sh", repo, {}, {"HOME": str(base)})
+            fetched_report = context(fetched)
+            self.assertNotIn("Elixir deps not fetched", fetched_report)
+            self.assertIn("Ash domains (1)", fetched_report)
+
     def test_fleet_is_silent_for_only_current_codex_session(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
