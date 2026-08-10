@@ -257,7 +257,7 @@ if [ "$in_primary" -eq 0 ]; then
   sw_untracked="$(git -C "$session_wt" status --porcelain 2>/dev/null | grep -c '^??')"
 
   lines+=("This session's worktree: $session_wt")
-  lines+=("- THIS SESSION IS LOCKED TO THIS WORKTREE — Claude Code confines a session to whatever worktree it started in, so it cannot directly create, enter, or cd into another one (EnterWorktree, wt switch, cd, and git -C all refuse from here). The one way out is ExitWorktree, which returns the session to the primary worktree and unlocks it — the conversation is preserved, nothing is lost. Run that first if asked to start unrelated new work; do not try to work around the lock.")
+  lines+=("- THIS SESSION IS LOCKED TO THIS WORKTREE — Claude Code confines a session to whatever worktree it started in, so it cannot directly create or enter another one, and plain cd or git -C into another worktree's path is refused too (same guard, regardless of which tool created that worktree). The one way out is ExitWorktree, which returns the session to the primary worktree and unlocks it — the conversation is preserved, nothing is lost. Run that first if asked to start unrelated new work; do not try to work around the lock.")
   lines+=("- Branch: $sw_branch. Modified: $sw_modified, untracked: $sw_untracked.")
 
   exp="$(orphan_file_exposure "$session_wt")"
