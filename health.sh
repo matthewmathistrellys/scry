@@ -258,6 +258,16 @@ if [ "$in_primary" -eq 0 ]; then
 
   lines+=("This session's worktree: $session_wt")
   lines+=("- THIS SESSION IS LOCKED TO THIS WORKTREE — Claude Code confines a session to whatever worktree it started in, so it cannot directly create or enter another one, and plain cd or git -C into another worktree's path is refused too (same guard, regardless of which tool created that worktree). The one way out is ExitWorktree, which returns the session to the primary worktree and unlocks it — the conversation is preserved, nothing is lost. Run that first if asked to start unrelated new work; do not try to work around the lock.")
+
+  # Sibling of the lock warning above: a session that starts inside a linked
+  # worktree arms worktree shell isolation for itself AND for every subagent
+  # it spawns. That isolation refuses cross-worktree git operations and
+  # refuses compound shell commands outright as "too complex to verify" — so
+  # an orchestration session sitting here cannot dispatch parallel builders
+  # to sibling worktrees and have them commit. This cost a full evening on
+  # 2026-08-14 (trellys-app signup-portal build) before it was diagnosed.
+  # Solo work in a linked worktree is fine; orchestrating from one is not.
+  lines+=("- THIS SESSION IS INSIDE A LINKED WORKTREE — fine for solo work in this tree, but do NOT orchestrate from here: subagents inherit this session's worktree isolation (cross-worktree git refused, compound commands refused, sibling-worktree builders cannot commit; 2026-08-14 incident). Orchestrate from a normal directory and give agents their own worktrees via Agent(..., isolation: worktree). If this session becomes an orchestrator, ExitWorktree first.")
   lines+=("- Branch: $sw_branch. Modified: $sw_modified, untracked: $sw_untracked.")
 
   exp="$(orphan_file_exposure "$session_wt")"
@@ -460,7 +470,7 @@ fi
 ctx="Dev environment health (SessionStart):
 $(printf '%s\n' "${lines[@]}")
 
-Say anything flagged above directly and plainly at the start of your first response — don't wait to be asked. That includes: session in the primary worktree, primary not on main, deploy drift, session worktree stranded/drifted/unpushed, stale or abandoned worktrees, and failing CI on open PRs."
+Say anything flagged above directly and plainly at the start of your first response — don't wait to be asked. That includes: session in the primary worktree, session inside a linked worktree (do not orchestrate from it), primary not on main, deploy drift, session worktree stranded/drifted/unpushed, stale or abandoned worktrees, and failing CI on open PRs."
 
 emit "" "$ctx"
 exit 0

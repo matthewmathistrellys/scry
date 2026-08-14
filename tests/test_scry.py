@@ -158,6 +158,37 @@ class ScryHookTests(unittest.TestCase):
             self.assertIn("ExitWorktree", report)
             self.assertIn("EXPOSURE: 1 file(s) here exist in NO commit on ANY branch", report)
 
+    def test_session_worktree_warns_against_orchestrating_from_linked_worktree(self):
+        # 2026-08-14 incident (trellys-app signup-portal build): a session
+        # that starts in a linked worktree arms worktree shell isolation for
+        # itself and every subagent it spawns — cross-worktree git refused,
+        # compound commands refused, sibling-worktree builders unable to
+        # commit. An evening was lost before this was diagnosed. Sibling
+        # case to the primary-worktree warning above.
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            primary = base / "primary"
+            primary.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main", str(primary)], check=True)
+            subprocess.run(["git", "-C", str(primary), "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+            linked = base / "linked"
+            subprocess.run(
+                ["git", "-C", str(primary), "worktree", "add", "-q", "-b", "feature", str(linked)],
+                check=True,
+            )
+
+            result = run_hook(
+                "health.sh",
+                linked,
+                {"cwd": str(linked)},
+                {"HOME": str(base)},
+            )
+            report = context(result)
+            self.assertIn("THIS SESSION IS INSIDE A LINKED WORKTREE", report)
+            self.assertIn("do NOT orchestrate from here", report)
+            self.assertIn("isolation: worktree", report)
+            self.assertIn("ExitWorktree first", report)
+
     def test_session_worktree_stays_silent_when_clean(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
