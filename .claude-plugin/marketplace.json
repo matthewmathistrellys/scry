@@ -1,6 +1,6 @@
 {
   "name": "scry",
-  "description": "Scry — SessionStart checks for Claude Code that report repo hygiene, deploy drift, concurrent sessions, and machine pressure.",
+  "description": "Scry \u2014 SessionStart checks for Claude Code that report repo hygiene, deploy drift, concurrent sessions, and machine pressure.",
   "owner": {
     "name": "Matthew Mathis"
   },
