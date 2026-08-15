@@ -26,6 +26,24 @@
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/pressure.sh",
             "statusMessage": "Checking machine pressure...",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/provenance.sh",
+            "statusMessage": "Counting doc artifacts...",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r \".tool_input.file_path // empty\" | { read -r f; case \"$f\" in *CLAUDE.md|*AGENTS.md|*/docs/*.md) printf \"%s\" \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PostToolUse\\\",\\\"additionalContext\\\":\\\"Scry doc-provenance: this file is a historical ARTIFACT. Claims in it about current system state (live/deployed/suspended/running/counts) are untrusted until verified against code or production; dated decisions and principles age fine. Acting on an unverified state-claim makes its staleness your wrong action.\\\"},\\\"suppressOutput\\\":true}\";; esac; }",
+            "timeout": 5
           }
         ]
       }
