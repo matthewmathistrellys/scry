@@ -46,6 +46,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/elixir_advisory.sh",
+            "timeout": 30
+          }
+        ]
       }
     ]
   }
