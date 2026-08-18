@@ -158,7 +158,89 @@ check_credo() {
 $credo_out")
 }
 
-EXTRA_CHECKS=(check_credo)
+# Ash.Query.for_read (or bare for_read/2,3 when Ash.Query is imported/used)
+# called without an `actor:` option. This is a real Ash security advisory
+# (GHSA-pcxq-fjp3-r752): calling for_read without the actor, then passing the
+# actor only to a downstream read/read! call, can let policies evaluate
+# without actor context and silently skip authorization.
+#
+# Only runs in Ash projects. This is regex-based in spirit (same pragmatic
+# trade-off as the Repo-bypass check above) but needs to look past the end of
+# the line the call starts on — Ash calls are routinely multi-line — so a
+# single per-line pattern.search() can't do it. It lives here (not in
+# add_regex_check) for the same reason check_credo does: the shared loop only
+# matches within one line at a time. Detection: find each `for_read(`, walk
+# forward counting balanced parens to find that call's own closing paren
+# (falling back to a bounded 400-char lookahead if parens never balance,
+# e.g. truncated/malformed code), and flag it if "actor:" doesn't appear
+# inside that span. This has known false negatives on unusual formatting
+# (e.g. "actor:" split oddly across a string) and will NOT catch every
+# multi-line style, but balanced-paren scanning handles the common Ash
+# idioms (single-line and multi-line calls) that a naive fixed-line-count
+# lookahead would miss.
+check_ash_for_read_without_actor() {
+  mix_has_dep "ash" || return 0
+  local out
+  out="$(python3 -c '
+import re, sys
+
+path = sys.argv[1]
+try:
+    content = open(path, "r", errors="replace").read()
+except OSError:
+    sys.exit(0)
+
+lines = content.splitlines()
+line_starts = []
+pos = 0
+for line in lines:
+    line_starts.append(pos)
+    pos += len(line) + 1
+
+def line_of(idx):
+    lo, hi = 0, len(line_starts) - 1
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if line_starts[mid] <= idx:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo + 1
+
+findings = []
+for m in re.finditer(r"\bfor_read\(", content):
+    start = m.end()
+    depth = 1
+    i = start
+    n = len(content)
+    while i < n and depth > 0:
+        c = content[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        i += 1
+    if depth == 0:
+        args_text = content[start:i - 1]
+    else:
+        args_text = content[start:min(start + 400, n)]
+    if "actor:" in args_text:
+        continue
+    lineno = line_of(m.start())
+    snippet = lines[lineno - 1].strip() if lineno - 1 < len(lines) else ""
+    findings.append(f"  line {lineno}: {snippet}")
+
+if findings:
+    print("\n".join(findings))
+' "$file_path")"
+  [ -n "$out" ] || return 0
+  findings+=("[ash-for-read-without-actor] $(basename "$file_path"):
+$out
+
+Ash.Query.for_read (or for_read/2,3) called without an actor: option. This maps to a real, documented Ash security advisory — GHSA-pcxq-fjp3-r752 (github.com/ash-project/ash/security/advisories/GHSA-pcxq-fjp3-r752). Calling for_read without the actor, then passing the actor later (e.g. only on the downstream read/read! call), can let policies evaluate without actor context — silently skipping authorization. The correct form is for_read(:action, %{}, actor: current_user) |> read!() — actor goes on for_read itself, not (only) on the downstream call.")
+}
+
+EXTRA_CHECKS=(check_credo check_ash_for_read_without_actor)
 
 # To add anti-pattern #4 (or beyond) that needs more than a regex: write a
 # check_<name> function above this line, then list its name here.
