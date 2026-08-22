@@ -15,6 +15,7 @@ machine is carrying. Six independent checks fill that in.
 |---|---|
 | **`architecture.sh`** | What *is* this codebase? |
 | **`stack.sh`** | What is it built *on*? |
+| **`elixir_build_guard.sh`** | Is this command about to cost me 20 minutes? |
 | **`health.sh`** | Is this repo in good shape? |
 | **`fleet.sh`** | What else is happening *right now*? |
 | **`pressure.sh`** | What shape is this machine in? |
@@ -63,6 +64,23 @@ machine is carrying. Six independent checks fill that in.
   rather than as "local", which is literally true and actively misleading.
   Service names come from env var *names*, so they prove a service is *wired*,
   not that it is in use.
+- **`elixir_build_guard.sh`** — a `PreToolUse` speed bump in front of the
+  commands that throw away compiled Elixir artifacts: `mix compile --force`,
+  `mix deps.compile --force`, `mix clean --deps`, `rm -rf _build`, `rm -rf
+  deps`. None of these are destructive — nothing is corrupted and nothing needs
+  repairing — but on an Ash project with 140+ dependencies a cold rebuild costs
+  tens of minutes and saturates the machine while it runs.
+
+  Because the harm is time rather than damage, it is a **two-strike gate**, not
+  a block: the first attempt is denied with the cost stated and the cheaper
+  options named; running the same command again within the window (default 5
+  minutes) lets it through untouched. A reflex becomes a decision, and nothing
+  is ever truly blocked. A plain `mix compile` — which is already incremental,
+  and is the thing we want people running — never fires it.
+
+  Fails open everywhere: not Bash, not an Elixir project, malformed payload or
+  an unwritable state directory all allow the command silently. Disable with
+  `SCRY_BUILD_GUARD=0`; retune with `SCRY_BUILD_GUARD_WINDOW`.
 - **`health.sh`** — the repo's health from this session's perspective:
   - **Primary worktree state:** on main? dirty? stranded on a merged branch?
     How long parked? Files that exist in no commit on any branch?
@@ -131,6 +149,8 @@ industrialise that problem.
 | Orphan files (primary or session worktree) | none | a file exists in no commit on any branch |
 | Elixir/Ash worktree deps | `deps/` present | `deps/` missing — `mix deps.get` needed |
 | Ash domains | no mix project in the repo | every project found, with descriptions |
+| Elixir build state | `_build` populated | `_build` cold — next compile is a FULL build |
+| Force-rebuild command | any ordinary command | first `--force`/`rm -rf _build` attempt |
 | Open PRs | none, or `gh` unavailable | any open PR exists |
 | Stack | no config found | always — see below |
 

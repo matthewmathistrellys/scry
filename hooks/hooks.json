@@ -63,6 +63,18 @@
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/elixir_build_guard.sh",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

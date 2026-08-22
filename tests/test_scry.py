@@ -321,6 +321,102 @@ class ScryHookTests(unittest.TestCase):
             self.assertNotIn("Deploy state UNKNOWN", report)
             self.assertNotIn("SCRY_HEALTH_URL", report)
 
+    # ---- build guard ---------------------------------------------------
+
+    def _bash_payload(self, cwd, command):
+        return {"tool_name": "Bash", "cwd": str(cwd),
+                "tool_input": {"command": command}}
+
+    def _mix_project(self, base, with_deps=True, with_build=True):
+        repo = base / "proj"
+        (repo / "lib").mkdir(parents=True)
+        (repo / "mix.exs").write_text("defmodule M do\nend\n")
+        if with_deps:
+            (repo / "deps" / "ash").mkdir(parents=True)
+        if with_build:
+            (repo / "_build" / "dev").mkdir(parents=True)
+        return repo
+
+    def test_build_guard_denies_first_force_then_allows_the_repeat(self):
+        """Two-strike, not a block: the reflex is stopped, the decision isn't."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._mix_project(base)
+            env = {"TMPDIR": str(base / "state")}
+            (base / "state").mkdir()
+            cmd = "mix compile --force"
+
+            first = run_hook("elixir_build_guard.sh", repo,
+                             self._bash_payload(repo, cmd), env)
+            payload = json.loads(first.stdout)
+            self.assertEqual(
+                payload["hookSpecificOutput"]["permissionDecision"], "deny")
+            reason = payload["hookSpecificOutput"]["permissionDecisionReason"]
+            self.assertIn("run the exact same command again", reason)
+            self.assertIn("incremental", reason)
+
+            second = run_hook("elixir_build_guard.sh", repo,
+                              self._bash_payload(repo, cmd), env)
+            self.assertEqual(second.stdout.strip(), "")  # allowed
+
+    def test_build_guard_never_fires_on_ordinary_commands(self):
+        """A plain `mix compile` is incremental and is what we WANT people running."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._mix_project(base)
+            env = {"TMPDIR": str(base / "state")}
+            (base / "state").mkdir()
+            for cmd in ("mix compile", "mix test", "mix deps.get",
+                        "mix format", "git commit -m 'force'",
+                        "echo rm -rf _build_notes"):
+                result = run_hook("elixir_build_guard.sh", repo,
+                                  self._bash_payload(repo, cmd), env)
+                self.assertEqual(result.stdout.strip(), "", f"fired on: {cmd}")
+
+    def test_build_guard_catches_every_artifact_discarding_form(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._mix_project(base)
+            for i, cmd in enumerate(("mix compile --force",
+                                     "mix deps.compile --force",
+                                     "mix clean --deps",
+                                     "rm -rf _build",
+                                     "rm -rf deps")):
+                # Fresh state dir each time so every command is a first strike.
+                state = base / f"s{i}"
+                state.mkdir()
+                result = run_hook("elixir_build_guard.sh", repo,
+                                  self._bash_payload(repo, cmd),
+                                  {"TMPDIR": str(state)})
+                self.assertTrue(result.stdout.strip(), f"missed: {cmd}")
+
+    def test_build_guard_ignores_non_elixir_projects(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            plain = base / "plain"
+            plain.mkdir()
+            result = run_hook("elixir_build_guard.sh", plain,
+                              self._bash_payload(plain, "rm -rf _build"),
+                              {"TMPDIR": str(base)})
+            self.assertEqual(result.stdout.strip(), "")
+
+    def test_cold_build_is_reported_before_it_costs_twenty_minutes(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._mix_project(base, with_deps=True, with_build=False)
+            (repo / "lib" / "d.ex").write_text(
+                'defmodule D do\n  use Ash.Domain\nend\n')
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            report = context(run_hook("architecture.sh", repo, {}, {"HOME": td}))
+            self.assertIn("COLD", report)
+            self.assertIn("FULL build", report)
+            self.assertNotIn("deps not fetched", report)
+
+            # Warm build: silent.
+            (repo / "_build" / "dev").mkdir(parents=True)
+            warm = context(run_hook("architecture.sh", repo, {}, {"HOME": td}))
+            self.assertNotIn("COLD", warm)
+
     def test_fleet_is_silent_for_only_current_codex_session(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

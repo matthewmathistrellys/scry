@@ -124,6 +124,26 @@ def deps_not_fetched(mix_root: str) -> bool:
     return bool(mix_root) and os.path.isdir(mix_root) and not os.path.isdir(os.path.join(mix_root, "deps"))
 
 
+def build_is_cold(mix_root: str) -> bool:
+    """True when deps are fetched but nothing is compiled yet.
+
+    A cold `_build` does not look like anything from the outside: you run
+    `mix test`, it starts compiling every dependency, and twenty minutes are
+    gone with no warning that they were about to be. It is the normal state
+    of a freshly created worktree, which is exactly where it surprises you.
+    Reported alongside the missing-deps check because it is the same fact one
+    step further along -- no deps/ means nothing will compile, a cold _build
+    means everything will.
+    """
+    if not mix_root or not os.path.isdir(os.path.join(mix_root, "deps")):
+        return False               # deps_not_fetched already covers this
+    build = os.path.join(mix_root, "_build")
+    try:
+        return not os.path.isdir(build) or not os.listdir(build)
+    except OSError:
+        return False
+
+
 def emit(sections: list[str]) -> None:
     """SessionStart hooks must emit this JSON envelope to reach the model as
     context — plain stdout doesn't reliably get there. A prior version of
@@ -164,6 +184,13 @@ def main():
                     "Elixir deps not fetched in this worktree yet (no deps/ directory "
                     f"found under {project}) — run `mix deps.get` before anything here "
                     "compiles."
+                )
+            elif build_is_cold(project):
+                body.append(
+                    f"Elixir build is COLD in {project} (deps fetched, nothing compiled "
+                    "yet) — the next `mix compile`/`mix test` is a FULL build of every "
+                    "dependency, not an incremental one. Budget for it rather than "
+                    "discovering it mid-command."
                 )
             domains = find_domains(os.path.join(project, "lib"))
             if domains:
