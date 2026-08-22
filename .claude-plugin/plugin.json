@@ -1,7 +1,7 @@
 {
   "name": "scry",
   "description": "SessionStart checks that tell an agent session the true state of the world: what this codebase is, whether the repo is in good shape, what else is running, and what the machine is carrying. Also available on demand via /scry.",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "author": {
     "name": "Matthew Mathis"
   },

@@ -300,6 +300,27 @@ class ScryHookTests(unittest.TestCase):
             self.assertIn("Quick layout", report)
             self.assertIn("src", report)
 
+    def test_health_does_not_nag_when_no_deploy_surface_is_configured(self):
+        """A repo with nothing deployed must not be told so every session.
+
+        This warning used to fire unconditionally. scry itself is a plugin --
+        there is no endpoint that could ever satisfy it, so the line repeated
+        forever and trained skimming of the lines beside it that do matter
+        (Matt, 2026-08-22).
+        """
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            repo.mkdir(parents=True)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+            (repo / "f.txt").write_text("x")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                 "commit", "-qm", "init"], cwd=repo, check=True)
+            report = context(run_hook("health.sh", repo, {}, {"HOME": td}))
+            self.assertNotIn("Deploy state UNKNOWN", report)
+            self.assertNotIn("SCRY_HEALTH_URL", report)
+
     def test_fleet_is_silent_for_only_current_codex_session(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

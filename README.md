@@ -83,8 +83,10 @@ machine is carrying. Six independent checks fill that in.
     as often in the linked worktree as in the primary one).
   - **Local main vs origin/main:** divergence in either direction — stranded
     local commits or a stale local tip. Auto-fast-forwards when safe.
-  - **Deploy drift:** whether merged work is actually live (optional,
-    requires config — see [Deploy drift](#deploy-drift)).
+  - **Deploy drift:** whether merged work is actually live. Opt-in: configure a
+    health URL and it never stays silent again; leave it unconfigured and it
+    stays out of the way, because a repo with nothing deployed cannot act on
+    the warning (see [Deploy drift](#deploy-drift)).
   - **Worktree hygiene sweep:** merged worktrees safe to remove, abandoned
     branches quietly aging, missing directories, detached HEADs.
   - **Open PRs and CI status:** every open PR with CI rollup (green, failing,
@@ -136,8 +138,9 @@ Silence is the default and the feature. A check that reports nothing is
 reporting something: *nothing here needs your attention.* Every threshold is
 overridable — see [Tuning](#tuning).
 
-Two signals are deliberate exceptions. Deploy drift never stays silent — see
-below. So does `stack.sh`: a stale doc crosses no threshold and trips no alarm,
+Two signals are deliberate exceptions. Deploy drift never stays silent **once
+configured** — see below; unconfigured, it says nothing, since a plugin with no
+running service can never satisfy it. So does `stack.sh`: a stale doc crosses no threshold and trips no alarm,
 so the stack is stated every session rather than only when something looks
 wrong. It pays for the exemption by being at most six lines.
 

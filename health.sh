@@ -196,10 +196,18 @@ fi
 # live-less indefinitely with nothing to notice it. On 2026-07-18 four PRs sat
 # undeployed for about eight hours while work continued on top of them.
 #
-# This block NEVER stays silent. If it cannot tell — no URL configured, offline,
-# endpoint unreachable, unparseable response — it says so. A check that quietly
-# reports nothing teaches you it looked and found nothing wrong, which is worse
-# than no check at all.
+# Once configured, this block never stays silent: offline, unreachable, or an
+# unparseable response all get said out loud. A check that quietly reports
+# nothing teaches you it looked and found nothing wrong, which is worse than no
+# check at all.
+#
+# The one thing it does NOT do is nag a repo that has no deploy at all. An
+# unconfigured repo used to get "Deploy state UNKNOWN" every single session --
+# but scry itself is a plugin, threadtask is a service, and only one of those
+# has anything listening to ask. An unactionable warning that repeats forever
+# is the wallpaper this tool exists to avoid, and it trains you to skim the
+# lines next to it that DO matter (Matt, 2026-08-22). Configure the URL and the
+# check speaks; leave it unset and it stays out of the way.
 #
 # Config is optional so Scry stays drop-in for any repo. Put this in the
 # project's .claude/scry.env (parsed as plain KEY=VALUE, never sourced, so a
@@ -221,7 +229,7 @@ if [ -z "$health_url" ] && [ -f "$scry_env" ]; then
 fi
 
 if [ -z "$health_url" ]; then
-  lines+=("- Deploy state UNKNOWN: no health URL configured, so this session cannot tell whether merged work is actually live. Set SCRY_HEALTH_URL in $scry_env to enable.")
+  : # No deploy surface configured — say nothing. See the note above.
 elif [ "$offline" -eq 1 ]; then
   lines+=("- Deploy state UNKNOWN: could not reach origin, so there is nothing trustworthy to compare production against.")
 else
