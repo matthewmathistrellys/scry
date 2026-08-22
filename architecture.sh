@@ -43,29 +43,23 @@ quick_layout() {
     | sort)"
   [ -n "$listing" ] || return 0
   local body
-  body="Quick layout of $base (no mix.exs — or other recognized project marker — found above this directory):
+  body="Quick layout of $base (no mix.exs — or other recognized project marker — found in this repository):
 $(printf '%s\n' "$listing" | sed 's/^/  /')"
   emit_context "$body"
 }
 
-dir="$PWD"
-mix_root=""
-while [ "$dir" != "/" ]; do
-  if [ -f "$dir/mix.exs" ]; then
-    mix_root="$dir"
-    break
-  fi
-  dir="$(dirname "$dir")"
-done
-
-if [ -z "$mix_root" ]; then
-  quick_layout
-  exit 0
-fi
+# Search DOWN from the repo root, not UP from cwd. An upward walk only
+# finds a project marker sitting at or above the session's directory, so
+# in a monorepo whose mix.exs files live in apps/* it finds nothing and
+# the domain map goes silently missing — in exactly the repo that most
+# needs it. The scanner prunes vendored trees during its walk, so this
+# stays fast (a naive find over the same repo returns 2,512 mix.exs from
+# deps/ alone, and takes ~2s; the pruned walk avoids entering them).
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || root="$PWD"
 
 script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scanners/elixir_ash.py"
 if [ -f "$script" ]; then
-  out="$(python3 "$script" --path "$mix_root/lib" --mix-root "$mix_root")"
+  out="$(python3 "$script" --repo-root "$root" 2>/dev/null)"
   [ -n "$out" ] && printf '%s\n' "$out" || quick_layout
 else
   quick_layout

@@ -245,13 +245,60 @@ class ScryHookTests(unittest.TestCase):
             report = context(missing)
             self.assertIn("Elixir deps not fetched", report)
             self.assertIn("mix deps.get", report)
-            self.assertIn("Ash domains (1)", report)
+            self.assertIn("Ash domains (1, 0 resources)", report)
 
             (repo / "deps").mkdir()
             fetched = run_hook("architecture.sh", repo, {}, {"HOME": str(base)})
             fetched_report = context(fetched)
             self.assertNotIn("Elixir deps not fetched", fetched_report)
-            self.assertIn("Ash domains (1)", fetched_report)
+            self.assertIn("Ash domains (1, 0 resources)", fetched_report)
+
+    def test_architecture_finds_mix_projects_below_cwd_not_only_above(self):
+        """The monorepo gap: mix.exs in apps/* was invisible to an upward walk.
+
+        architecture.sh used to walk UP from cwd for a project marker, so a
+        repo whose mix projects live in apps/* reported a bare folder list
+        and the domain map went silently missing. Also pins the pruning:
+        a vendored copy under deps/ must not be reported as first-party.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            for app, domain in (("engine", "Engine.Cases"), ("web", "Web.Accounts")):
+                lib = repo / "apps" / app / "lib" / app
+                lib.mkdir(parents=True)
+                (repo / "apps" / app / "mix.exs").write_text("defmodule M do\nend\n")
+                (repo / "apps" / app / "deps").mkdir()
+                (lib / "domain.ex").write_text(
+                    f'defmodule {domain} do\n'
+                    '  @moduledoc """\n  Real first-party domain.\n  """\n'
+                    "  use Ash.Domain\n  resource Foo\n  resource Bar\nend\n"
+                )
+            # A vendored dependency that must be pruned, not reported.
+            vend = repo / "apps/engine/deps/ash/lib"
+            vend.mkdir(parents=True)
+            (repo / "apps/engine/deps/ash/mix.exs").write_text("defmodule A do\nend\n")
+            (vend / "vendored.ex").write_text(
+                'defmodule Ash.Vendored do\n  use Ash.Domain\nend\n'
+            )
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+
+            report = context(run_hook("architecture.sh", repo, {}, {"HOME": td}))
+            self.assertIn("Engine.Cases", report)
+            self.assertIn("Web.Accounts", report)
+            self.assertIn("apps/engine", report)
+            self.assertIn("Real first-party domain.", report)  # descriptions kept
+            self.assertIn("2 resources", report)
+            self.assertNotIn("Ash.Vendored", report)  # deps/ pruned
+            self.assertNotIn("Quick layout", report)  # no longer falls back
+
+    def test_architecture_falls_back_to_layout_with_no_mix_project(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            (repo / "src").mkdir(parents=True)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            report = context(run_hook("architecture.sh", repo, {}, {"HOME": td}))
+            self.assertIn("Quick layout", report)
+            self.assertIn("src", report)
 
     def test_fleet_is_silent_for_only_current_codex_session(self):
         with tempfile.TemporaryDirectory() as td:

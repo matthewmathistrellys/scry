@@ -19,14 +19,27 @@ machine is carrying. Six independent checks fill that in.
 | **`fleet.sh`** | What else is happening *right now*? |
 | **`pressure.sh`** | What shape is this machine in? |
 
-- **`architecture.sh`** — a one-line map of the codebase. It is a *dispatcher*,
-  not a language scanner: it detects the stack and hands off to `scanners/`
+- **`architecture.sh`** — a map of the codebase. It is a *dispatcher*, not a
+  language scanner: it detects the stack and hands off to `scanners/`
   (Elixir/Ash today, others to follow), so one hook works in every repo
-  including a polyglot tree. Outside a recognised project it falls back to a
-  directory layout. The Elixir/Ash scanner also flags a worktree whose
-  dependencies were never fetched (no `deps/` directory) — the fastest way to
-  turn a fresh worktree's first `mix compile` into a bare `Mix.Error` into a
-  heads-up instead.
+  including a polyglot tree. It searches **down from the repo root**, not up
+  from the session's directory — an upward walk only finds a project marker at
+  or above cwd, so a monorepo whose `mix.exs` files live in `apps/*` reported a
+  bare folder list and the domain map went silently missing, in exactly the
+  repo that most needed it. Every mix project found is reported, each with its
+  domains, resource counts, and `@moduledoc` first sentences.
+
+  The search prunes vendored trees as it walks rather than filtering after —
+  a naive repo-wide search of a real monorepo returned **2,512** `mix.exs`
+  files, almost all under `deps/`, which would have reported Ash's own domains
+  as the application's. Excluding `deps/`, `_build/` and `node_modules/` left
+  62; excluding `.worktrees/` (~20 checkouts of the same projects) left the
+  real 3. Pruned, it runs in ~240ms where a naive `find` takes ~2s.
+
+  Outside a recognised project it falls back to a directory layout. The
+  Elixir/Ash scanner also flags a worktree whose dependencies were never
+  fetched (no `deps/` directory) — the fastest way to turn a fresh worktree's
+  first `mix compile` from a bare `Mix.Error` into a heads-up instead.
 - **`stack.sh`** — the stack the system actually runs on, read from live
   config and never from documentation: managed-database provider, hosting
   units, runtime and frameworks, and the third-party services that are wired
@@ -115,6 +128,7 @@ industrialise that problem.
 | Branch age | recent | ≥3 days since last commit |
 | Orphan files (primary or session worktree) | none | a file exists in no commit on any branch |
 | Elixir/Ash worktree deps | `deps/` present | `deps/` missing — `mix deps.get` needed |
+| Ash domains | no mix project in the repo | every project found, with descriptions |
 | Open PRs | none, or `gh` unavailable | any open PR exists |
 | Stack | no config found | always — see below |
 
@@ -130,9 +144,13 @@ wrong. It pays for the exemption by being at most six lines.
 ## Example output
 
 ```
-Ash domains (4):
+Ash domains [apps/engine] (36, 122 resources):
   MyApp.Accounts (3 resources) — Users, sessions, and API tokens.
   MyApp.Billing (5 resources) — Subscriptions, invoices, and usage metering.
+  ... every domain, with its @moduledoc first sentence
+
+Ash domains [apps/exhibits] (1, 2 resources):
+  Exhibits.Jobs (2 resources)
 ```
 
 ```
