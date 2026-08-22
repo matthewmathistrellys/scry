@@ -90,10 +90,19 @@ if not mix_root:
     sys.exit(0)
 
 # ── Two-strike state ───────────────────────────────────────────────────────
-# Keyed on the command AND the directory, so clearing one project's build does
-# not silently pre-authorise clearing another's.
+# Keyed on the project and the INTENT, never the raw command string. Keying on
+# the string looked right and was wrong: an agent that retries almost never
+# repeats itself byte-for-byte. `mix compile --force`, `mix compile --force
+# 2>&1 | tail`, `mix  compile  --force` and `cd apps/foo && mix compile
+# --force` are four strings but one intention, so a string key denied the
+# retry a SECOND time -- turning "run it again and it goes through" into
+# exactly the thrash this gate exists to avoid. Caught by the Grimoire
+# advisory council and confirmed by test (2026-08-22).
+#
+# Still scoped per project, so clearing one project's build never silently
+# pre-authorises clearing another's.
 window = int(os.environ.get("SCRY_BUILD_GUARD_WINDOW", "300") or 300)
-key = hashlib.sha256(f"{mix_root}\x00{command.strip()}".encode()).hexdigest()[:32]
+key = hashlib.sha256(f"{mix_root}\x00{matched}".encode()).hexdigest()[:32]
 state_dir = os.path.join(os.environ.get("TMPDIR", "/tmp"), "scry-build-guard")
 
 try:
@@ -117,7 +126,8 @@ except OSError:
     dep_count = 0
 
 project = os.path.basename(mix_root)
-scale = f"{dep_count} dependencies" if dep_count else "every dependency"
+scale = (f"{dep_count} dependenc" + ("y" if dep_count == 1 else "ies")
+         ) if dep_count else "every dependency"
 uses_ash = uses_tidewave = False
 try:
     with open(os.path.join(mix_root, "mix.lock"), encoding="utf-8") as f:
@@ -143,7 +153,7 @@ Try these first:
   • Stale-artifact symptoms usually mean a compile-time dependency cascade, not a corrupt build. `mix xref graph --format stats` and `mix compile --profile time` find the real culprit; forcing a rebuild only hides it until next time.
   • For exploring or checking behaviour, keep a session running (`iex -S mix phx.server`) and evaluate against it instead of recompiling.{tidewave_note}
 
-If you genuinely need the full rebuild, run the exact same command again and it will go through — this gate only stops the first, reflexive attempt."""
+If you genuinely need the full rebuild, run it again and it will go through — this gate only stops the first, reflexive attempt."""
 
 print(json.dumps({
     "hookSpecificOutput": {

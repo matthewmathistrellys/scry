@@ -73,8 +73,11 @@ machine is carrying. Six independent checks fill that in.
 
   Because the harm is time rather than damage, it is a **two-strike gate**, not
   a block: the first attempt is denied with the cost stated and the cheaper
-  options named; running the same command again within the window (default 5
-  minutes) lets it through untouched. A reflex becomes a decision, and nothing
+  options named; retrying within the window (default 5 minutes) lets it through
+  untouched. The window is keyed on the project and the *intent*, never the raw
+  command string — an agent's retry is almost never byte-identical, so a string
+  key would deny the retry a second time and produce exactly the thrash the
+  design exists to avoid. A reflex becomes a decision, and nothing
   is ever truly blocked. A plain `mix compile` — which is already incremental,
   and is the thing we want people running — never fires it.
 

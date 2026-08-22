@@ -328,6 +328,7 @@ class ScryHookTests(unittest.TestCase):
                 "tool_input": {"command": command}}
 
     def _mix_project(self, base, with_deps=True, with_build=True):
+        base.mkdir(parents=True, exist_ok=True)
         repo = base / "proj"
         (repo / "lib").mkdir(parents=True)
         (repo / "mix.exs").write_text("defmodule M do\nend\n")
@@ -352,7 +353,7 @@ class ScryHookTests(unittest.TestCase):
             self.assertEqual(
                 payload["hookSpecificOutput"]["permissionDecision"], "deny")
             reason = payload["hookSpecificOutput"]["permissionDecisionReason"]
-            self.assertIn("run the exact same command again", reason)
+            self.assertIn("run it again and it will go through", reason)
             self.assertIn("incremental", reason)
 
             second = run_hook("elixir_build_guard.sh", repo,
@@ -416,6 +417,55 @@ class ScryHookTests(unittest.TestCase):
             (repo / "_build" / "dev").mkdir(parents=True)
             warm = context(run_hook("architecture.sh", repo, {}, {"HOME": td}))
             self.assertNotIn("COLD", warm)
+
+    def test_build_guard_second_strike_survives_command_variants(self):
+        """The retry is almost never byte-identical, so the key must be intent.
+
+        Keying the window on the raw command string looked right and was
+        wrong: `mix compile --force 2>&1 | tail`, doubled whitespace, and a
+        `cd ... &&` prefix are all one intention to an agent but four distinct
+        strings, so the retry got denied a SECOND time -- the exact thrash the
+        two-strike design exists to avoid. Found by the Grimoire advisory
+        council, 2026-08-22.
+        """
+        variants = [
+            "mix compile --force 2>&1 | tail -20",
+            "mix  compile  --force",
+            "cd . && mix compile --force",
+            "mix do compile --force",
+        ]
+        for variant in variants:
+            with tempfile.TemporaryDirectory() as td:
+                base = Path(td)
+                repo = self._mix_project(base)
+                env = {"TMPDIR": str(base / "state")}
+                (base / "state").mkdir()
+
+                first = run_hook("elixir_build_guard.sh", repo,
+                                 self._bash_payload(repo, "mix compile --force"), env)
+                self.assertTrue(first.stdout.strip(), "first strike should deny")
+
+                second = run_hook("elixir_build_guard.sh", repo,
+                                  self._bash_payload(repo, variant), env)
+                self.assertEqual(second.stdout.strip(), "",
+                                 f"variant denied twice: {variant}")
+
+    def test_build_guard_window_is_scoped_per_project(self):
+        """Clearing one project must not pre-authorise clearing another."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            env = {"TMPDIR": str(base / "state")}
+            (base / "state").mkdir()
+            a = self._mix_project(base / "a")
+            b = self._mix_project(base / "b")
+            (base / "a").mkdir(exist_ok=True)
+            cmd = "mix compile --force"
+
+            run_hook("elixir_build_guard.sh", a, self._bash_payload(a, cmd), env)
+            other = run_hook("elixir_build_guard.sh", b,
+                             self._bash_payload(b, cmd), env)
+            self.assertTrue(other.stdout.strip(),
+                            "a strike in project a must not clear project b")
 
     def test_fleet_is_silent_for_only_current_codex_session(self):
         with tempfile.TemporaryDirectory() as td:
