@@ -11,6 +11,12 @@
           },
           {
             "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/stack.sh",
+            "statusMessage": "Reading stack...",
+            "timeout": 30
+          },
+          {
+            "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/health.sh",
             "statusMessage": "Checking repo health...",
             "timeout": 60

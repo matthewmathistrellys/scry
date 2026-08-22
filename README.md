@@ -4,16 +4,17 @@
 [Codex](https://developers.openai.com/codex/) `SessionStart` checks that give a
 fresh agent session — or a fresh you — the state of the world the instant it
 starts, instead of making it dig or making you remember to ask. Both clients
-run the same four scripts from this repository; only their package manifests
+run the same six scripts from this repository; only their package manifests
 are client-specific.
 
 A session is told its working directory and a git snapshot, and nothing else.
 Not what else is running, not what the last session was doing, not what the
-machine is carrying. Four independent checks fill that in.
+machine is carrying. Six independent checks fill that in.
 
 | | Answers |
 |---|---|
 | **`architecture.sh`** | What *is* this codebase? |
+| **`stack.sh`** | What is it built *on*? |
 | **`health.sh`** | Is this repo in good shape? |
 | **`fleet.sh`** | What else is happening *right now*? |
 | **`pressure.sh`** | What shape is this machine in? |
@@ -26,6 +27,29 @@ machine is carrying. Four independent checks fill that in.
   dependencies were never fetched (no `deps/` directory) — the fastest way to
   turn a fresh worktree's first `mix compile` into a bare `Mix.Error` into a
   heads-up instead.
+- **`stack.sh`** — the stack the system actually runs on, read from live
+  config and never from documentation: managed-database provider, hosting
+  units, runtime and frameworks, and the third-party services that are wired
+  up. It exists because an instruction file described the app's database as
+  Fly.io managed Postgres months after it became Neon, and a session believed
+  it. Two rules make it trustworthy where prose was not:
+  - **Role-bound, never name-counted.** A provider is reported for a role only
+    when the variable owning that role resolves to it. Counting brand names
+    reproduces the original bug instead of catching it — in the repo that
+    produced it, `.flycast` outnumbered `neon.tech` 25 files to 11 while the
+    database was unambiguously Neon; every Fly hit was an unrelated *service*
+    address and most Neon hits were migration plans in `docs/`.
+  - **Config only, never prose.** `docs/` is excluded outright. Prose is the
+    thing that was wrong; reading it back would launder the error.
+
+  It reads `.env` because that is where a database variable's binding is
+  actually resolvable, and it emits **no secrets** — connection strings are
+  reduced to a provider label and region during parsing, and credentials are
+  discarded before any value is retained. A `localhost` binding on a
+  non-default port is reported as a tunnel with the provider undetermined,
+  rather than as "local", which is literally true and actively misleading.
+  Service names come from env var *names*, so they prove a service is *wired*,
+  not that it is in use.
 - **`health.sh`** — the repo's health from this session's perspective:
   - **Primary worktree state:** on main? dirty? stranded on a merged branch?
     How long parked? Files that exist in no commit on any branch?
@@ -72,7 +96,7 @@ deploy-drift check and the PR/CI lookup (via `gh`, when installed). On a busy
 The hard part is not gathering signals — it is not drowning you in them. A
 correct warning that prints identically at every session start stops carrying
 information: being told the same true thing on day 15 as on day 1 gives you no
-reason to act. Four checks reporting healthy state every session would
+reason to act. Six checks reporting healthy state every session would
 industrialise that problem.
 
 **So a signal speaks only when it would change a decision.**
@@ -92,12 +116,16 @@ industrialise that problem.
 | Orphan files (primary or session worktree) | none | a file exists in no commit on any branch |
 | Elixir/Ash worktree deps | `deps/` present | `deps/` missing — `mix deps.get` needed |
 | Open PRs | none, or `gh` unavailable | any open PR exists |
+| Stack | no config found | always — see below |
 
 Silence is the default and the feature. A check that reports nothing is
 reporting something: *nothing here needs your attention.* Every threshold is
 overridable — see [Tuning](#tuning).
 
-The one exception is deploy drift, which never stays silent — see below.
+Two signals are deliberate exceptions. Deploy drift never stays silent — see
+below. So does `stack.sh`: a stale doc crosses no threshold and trips no alarm,
+so the stack is stated every session rather than only when something looks
+wrong. It pays for the exemption by being at most six lines.
 
 ## Example output
 
@@ -105,6 +133,17 @@ The one exception is deploy drift, which never stays silent — see below.
 Ash domains (4):
   MyApp.Accounts (3 resources) — Users, sessions, and API tokens.
   MyApp.Billing (5 resources) — Subscriptions, invoices, and usage metering.
+```
+
+```
+Stack (SessionStart, read from live config — fly.toml, .env, manifests; docs
+deliberately not consulted):
+- Data: Neon (us-east-2) [KB_DATABASE_URL]; tunnel via localhost:5433 —
+  provider NOT determinable offline (likely `fly proxy`/ssh to a remote DB)
+  [DATABASE_URL]
+- Hosting: Fly.io, 7 app(s) (myapp-engine, myapp-ingress, myapp-ocr, myapp-web, +3)
+- Runtime: Elixir/Ash/Phoenix (3 mix project(s)); Python; Node; FastAPI; Docker
+- Services wired: Anthropic, Hatchet, Logfire, Outseta, Stripe, Stytch, Zep
 ```
 
 ```
@@ -196,7 +235,7 @@ codex plugin marketplace add matthewmathistrellys/scry
 codex plugin add scry@scry
 ```
 
-Review and trust the four bundled hooks when Codex asks. Codex deliberately
+Review and trust the six bundled hooks when Codex asks. Codex deliberately
 does not run newly installed, non-managed plugin hooks until their definitions
 have been trusted. Updating the marketplace snapshot and reinstalling refreshes
 the cached plugin:
@@ -210,7 +249,7 @@ The Codex package uses `.codex-plugin/plugin.json`; Claude uses
 `.claude-plugin/plugin.json`. Both discover the same `hooks/hooks.json`, skill,
 scripts, and scanners, so there is no copied implementation to drift.
 
-All four checks are worth having everywhere, not just in the repos you
+All six checks are worth having everywhere, not just in the repos you
 remembered to wire up: `fleet.sh` and `pressure.sh` are about the machine, and
 every check degrades to silence where it doesn't apply. `architecture.sh` falls
 back to a directory listing, `health.sh` skips a directory that isn't a git
@@ -225,7 +264,7 @@ claude --plugin-dir /path/to/scry
 <details>
 <summary>Manual install, without the plugin system</summary>
 
-Copy the four scripts plus `scanners/` into `~/.claude/hooks/`, `chmod +x` them
+Copy the six scripts plus `scanners/` into `~/.claude/hooks/`, `chmod +x` them
 — a non-executable hook is a **silent no-op** — and wire them into the
 `SessionStart` block of `~/.claude/settings.json`:
 
@@ -262,7 +301,7 @@ derived from only the first `session_meta` record and mtime of rollouts under
 `${CODEX_HOME:-~/.codex}/sessions`. Scry does not inspect Codex conversation
 content.
 
-All four emit the `hookSpecificOutput.additionalContext` envelope supported by
+All six emit the `hookSpecificOutput.additionalContext` envelope supported by
 both clients. Each exits `0` unconditionally: a session-start hook that fails,
 or that hangs, is worse than one that skips.
 

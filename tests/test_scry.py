@@ -46,7 +46,7 @@ class ScryHookTests(unittest.TestCase):
             for group in hooks["hooks"]["SessionStart"]
             for item in group["hooks"]
         ]
-        self.assertEqual(len(commands), 4)
+        self.assertEqual(len(commands), 6)
         self.assertTrue(all("PLUGIN_ROOT" in command for command in commands))
         self.assertTrue(all("CLAUDE_PLUGIN_ROOT" in command for command in commands))
         entry = marketplace["plugins"][0]
@@ -279,6 +279,110 @@ class ScryHookTests(unittest.TestCase):
                 {"CODEX_HOME": str(codex_home), "HOME": str(base)},
             )
             self.assertNotIn("Codex session(s)", context(result))
+
+    # ---- stack scanner -------------------------------------------------
+    #
+    # The bug this scanner exists to prevent (2026-08-21): an instruction
+    # file named Fly.io managed Postgres months after the database became
+    # Neon. The obvious implementation -- count provider names across the
+    # tree -- reproduces the bug rather than catching it, because in the
+    # real repo Fly strings outnumbered Neon strings 25 files to 11 while
+    # the database was unambiguously Neon. These tests pin the behaviour
+    # that difference depends on.
+
+    def _stack_repo(self, base, db_url, extra_files=None):
+        (base / ".env").write_text(f"DATABASE_URL={db_url}\n")
+        for rel, body in (extra_files or {}).items():
+            path = base / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body)
+        subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+        return base
+
+    def test_stack_binds_db_provider_to_role_not_to_name_frequency(self):
+        """Fly strings can outnumber Neon and the answer must still be Neon."""
+        with tempfile.TemporaryDirectory() as td:
+            base = self._stack_repo(
+                Path(td),
+                "postgres://u:pw@ep-x1.us-east-2.aws.neon.tech/db?sslmode=require",
+                {
+                    # Fly appears far more often -- but never as the DB role.
+                    "apps/ocr/fly.toml": 'app = "svc-ocr"\n# reached via svc-ocr.flycast\n',
+                    "apps/api/fly.toml": 'app = "svc-api"\n# talks to svc-ocr.flycast\n',
+                    "config/runtime.exs": 'base_url: "http://svc-ocr.flycast"\n# flycast flycast\n',
+                },
+            )
+            out = context(run_hook("stack.sh", base, {}))
+            self.assertIn("Neon", out)
+            self.assertRegex(out, r"- Data:[^\n]*Neon")
+            # Fly is reported as HOSTING, never as the database provider.
+            self.assertNotRegex(out, r"- Data:[^\n]*Fly")
+            self.assertIn("svc-ocr", out)
+
+    def test_stack_ignores_stale_prose_in_docs(self):
+        """docs/ is excluded outright -- prose is what was wrong to begin with."""
+        with tempfile.TemporaryDirectory() as td:
+            base = self._stack_repo(
+                Path(td),
+                "postgres://u:pw@ep-x1.us-east-2.aws.neon.tech/db",
+                {
+                    "docs/architecture.md": "The database is Fly.io managed Postgres.\n" * 40,
+                    "CLAUDE.md": "We run Supabase for everything.\n",
+                },
+            )
+            out = context(run_hook("stack.sh", base, {}))
+            self.assertIn("Neon", out)
+            self.assertNotIn("Supabase", out)
+            self.assertRegex(out, r"- Data:[^\n]*Neon")
+
+    def test_stack_never_emits_credentials(self):
+        with tempfile.TemporaryDirectory() as td:
+            secret = "sup3rs3cr3tpassw0rd"
+            base = self._stack_repo(
+                Path(td),
+                f"postgres://admin:{secret}@ep-x1.us-east-2.aws.neon.tech/db",
+            )
+            (base / ".env").write_text(
+                f"DATABASE_URL=postgres://admin:{secret}@ep-x1.us-east-2.aws.neon.tech/db\n"
+                f"STRIPE_API_KEY=sk_live_{secret}\n"
+            )
+            result = run_hook("stack.sh", base, {})
+            self.assertNotIn(secret, result.stdout + result.stderr)
+            out = context(result)
+            self.assertIn("Neon", out)
+            self.assertIn("Stripe", out)  # name only, never the value
+
+    def test_stack_refuses_to_call_a_tunnel_local(self):
+        """localhost on a non-default port is a proxy; saying 'local' misleads."""
+        with tempfile.TemporaryDirectory() as td:
+            base = self._stack_repo(Path(td), "postgres://u:pw@localhost:5433/app")
+            out = context(run_hook("stack.sh", base, {}))
+            self.assertIn("NOT determinable", out)
+            self.assertIn("5433", out)
+
+    def test_stack_reads_plain_local_postgres_as_local(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = self._stack_repo(Path(td), "postgres://u:pw@localhost:5432/app")
+            out = context(run_hook("stack.sh", base, {}))
+            self.assertIn("local", out)
+            self.assertNotIn("NOT determinable", out)
+
+    def test_stack_ignores_env_example_placeholders(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            (base / ".env.example").write_text(
+                "DATABASE_URL=postgres://user:pass@db.supabase.co/postgres\n"
+            )
+            subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+            out = context(run_hook("stack.sh", base, {}))
+            self.assertNotIn("Supabase", out)
+
+    def test_stack_is_silent_with_no_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+            (base / "notes.txt").write_text("nothing to see")
+            self.assertEqual(context(run_hook("stack.sh", base, {})), "")
 
 
 if __name__ == "__main__":
