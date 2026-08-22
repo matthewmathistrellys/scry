@@ -124,6 +124,19 @@ POLLING_WORKERS = [
     ("celery", "Celery"), ("apscheduler", "APScheduler"),
 ]
 
+# Dev tooling that changes HOW an agent should work, not just what the project
+# is made of. Announced at session start because the alternative is an agent
+# that never learns the tool exists: trellys-app has depended on Tidewave since
+# 2026-08 and it was named in no instruction file anywhere, so every session
+# recompiled instead of evaluating against the running app. The build guard
+# names it too, but only once someone reaches for --force -- too late for the
+# agent that just recompiles slowly forever (Matt, 2026-08-22).
+DEV_TOOLING = [
+    ("tidewave", "Tidewave (evaluate against the running app instead of recompiling)"),
+    ("livebook", "Livebook"),
+    ("phoenix_live_reload", "LiveReload (code changes apply without a restart)"),
+]
+
 # Transaction-mode pooler fingerprints. A pooler is the right default for app
 # traffic and the wrong one for migrations: DDL locking and prepared
 # statements do not survive transaction-mode multiplexing.
@@ -231,7 +244,8 @@ def walk_config(root: str) -> dict:
     """Collect operational config markers. Never descends into SKIP_DIRS."""
     facts = {"fly_apps": [], "always_on_apps": [], "mix": 0, "python": False,
              "node": False, "docker": False, "ash": False, "phoenix": False,
-             "frameworks": set(), "ci": False, "workers": set()}
+             "frameworks": set(), "ci": False, "workers": set(),
+             "dev_tools": set()}
     for cur, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".venv")]
         # Depth guard: config lives near the top, not 8 levels down.
@@ -266,6 +280,9 @@ def walk_config(root: str) -> dict:
                     for dep, label in POLLING_WORKERS:
                         if f'"{dep}"' in lock:
                             facts["workers"].add(label)
+                    for dep, label in DEV_TOOLING:
+                        if f'"{dep}"' in lock:
+                            facts["dev_tools"].add(label)
                 except OSError:
                     pass
             elif name == "mix.exs":
@@ -416,6 +433,10 @@ def render(db_roles: dict, env_names: set, facts: dict) -> str:
         runtime.append("Docker")
     if runtime:
         lines.append("- Runtime: " + "; ".join(runtime))
+
+    # DEV TOOLING -- what this project gives an agent that it may not know it has.
+    if facts["dev_tools"]:
+        lines.append("- Dev tooling available: " + "; ".join(sorted(facts["dev_tools"])))
 
     # SERVICES -- from env var NAMES. Wired, which is not the same as live.
     services = set()

@@ -168,6 +168,7 @@ industrialise that problem.
 | Ash domains | no mix project in the repo | every project found, with descriptions |
 | Scale-to-zero conflict | machine can actually stop | a polling worker + a pinned machine make it inert |
 | Pooler for migrations | direct URL configured | DDL pointed at a transaction pooler |
+| Dev tooling | none depended on | Tidewave / Livebook / LiveReload present |
 | Elixir build state | `_build` populated | `_build` cold — next compile is a FULL build |
 | Force-rebuild command | any ordinary command | first `--force`/`rm -rf _build` attempt |
 | Open PRs | none, or `gh` unavailable | any open PR exists |

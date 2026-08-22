@@ -1,7 +1,7 @@
 {
   "name": "scry",
   "description": "SessionStart checks that tell an agent session the true state of the world: what this codebase is, the stack it actually runs on, whether the repo is in good shape, what else is running, and what the machine is carrying. Also adds a PreToolUse speed bump that denies a first attempt at an expensive Elixir force-rebuild (the retry passes). Available on demand via /scry.",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "author": {
     "name": "Matthew Mathis"
   },

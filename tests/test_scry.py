@@ -606,6 +606,25 @@ class ScryHookTests(unittest.TestCase):
             out = context(run_hook("stack.sh", base, {}))
             self.assertNotIn("MIGRATIONS:", out)
 
+    def test_stack_announces_dev_tooling_the_agent_may_not_know_it_has(self):
+        """A tool nothing names is a tool nobody uses.
+
+        trellys-app depended on Tidewave for months while it appeared in no
+        instruction file, so every session recompiled instead of evaluating
+        against the running app. The build guard names it too, but only once
+        someone reaches for --force -- too late for the agent that simply
+        recompiles slowly forever.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            base = self._stack_repo_full(
+                Path(td) / "r",
+                "DATABASE_URL=postgres://u:p@ep-x.us-east-2.aws.neon.tech/db\n",
+                [("engine", "min_machines_running = 0")],
+                lock='"tidewave": {:hex, :tidewave, "0.4.0"},\n')
+            out = context(run_hook("stack.sh", base, {}))
+            self.assertIn("Dev tooling available", out)
+            self.assertIn("Tidewave", out)
+
     def test_fleet_is_silent_for_only_current_codex_session(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
