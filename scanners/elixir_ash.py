@@ -20,17 +20,10 @@ import argparse
 import json
 import os
 import re
+import sys
 
-# Directories that never hold a FIRST-PARTY mix project. Pruned during the
-# walk rather than filtered after it: a naive repo-wide search of a real
-# monorepo found 2,512 mix.exs files, almost all vendored under deps/ --
-# which would report Ash's own domains as the app's. Excluding deps/,
-# _build/ and node_modules/ left 62; excluding .worktrees/ (~20 checkouts
-# of the same 3 projects) left the real 3.
-PRUNE_DIRS = {
-    ".git", "deps", "_build", "node_modules", ".worktrees", "worktrees",
-    ".venv", "venv", "__pycache__", "dist", "build", "target", "cover",
-}
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import projects  # noqa: E402  (path set above so hooks can run from anywhere)
 
 MODULE_RE = re.compile(r"^\s*defmodule\s+([\w.]+)\s+do")
 MODULEDOC_RE = re.compile(r'@moduledoc\s+"""\s*\n(.*?)\n\s*"""', re.DOTALL)
@@ -47,28 +40,15 @@ def first_sentence(doc: str) -> str:
     return (match.group(0) if match else paragraph).strip()
 
 
-def find_mix_projects(root: str, limit: int = 12) -> list[str]:
-    """Every first-party mix project at or below root, nearest first.
-
-    Prunes rather than filters, so the vendored trees are never entered.
-    """
-    found = []
-    for cur, dirs, files in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in PRUNE_DIRS)
-        if "mix.exs" in files:
-            found.append(cur)
-            # An umbrella's children are projects too, but their domains
-            # are reached through apps/ below; keep descending.
-        if len(found) >= limit:
-            break
-    found.sort(key=lambda d: (d.count(os.sep), d))
-    return found
+def find_mix_projects(root: str) -> list[str]:
+    """Every first-party mix project at or below root, shallowest first."""
+    return projects.find_project_roots(root, "mix.exs")
 
 
 def find_domains(base_path: str) -> list[dict]:
     domains = []
     for root, dirs, files in os.walk(base_path):
-        dirs[:] = [d for d in dirs if d not in {"_build", "deps"}]
+        dirs[:] = projects.prune(dirs)
         for file in files:
             if not file.endswith(".ex"):
                 continue

@@ -541,6 +541,71 @@ class ScryHookTests(unittest.TestCase):
         self.assertNotIn("quiet, advisory session-start context",
                          codex["interface"]["longDescription"])
 
+    def _stack_repo_full(self, base, env_lines, fly_apps, lock=""):
+        base.mkdir(parents=True, exist_ok=True)
+        (base / ".env").write_text(env_lines)
+        for app, extra in fly_apps:
+            d = base / "apps" / app
+            d.mkdir(parents=True)
+            (d / "fly.toml").write_text(f'app = "{app}"\n{extra}\n')
+            if lock:
+                (d / "mix.lock").write_text(lock)
+                (d / "mix.exs").write_text("defmodule M do\nend\n")
+        subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+        return base
+
+    def test_stack_warns_when_scale_to_zero_can_never_fire(self):
+        """Neon + a polling worker + a pinned machine = always-on Postgres.
+
+        A compute suspends only after N seconds with ZERO connections. Oban
+        polls continuously and a pinned machine keeps it up, so the database's
+        own suspend setting is inert -- reading that setting would produce a
+        confidently wrong "this one is fine."
+        """
+        with tempfile.TemporaryDirectory() as td:
+            base = self._stack_repo_full(
+                Path(td) / "r",
+                "DATABASE_URL=postgres://u:p@ep-x.us-east-2.aws.neon.tech/db\n",
+                [("engine", "min_machines_running = 1")],
+                lock='"oban": {:hex, :oban, "2.0.0"},\n')
+            out = context(run_hook("stack.sh", base, {}))
+            self.assertIn("COST:", out)
+            self.assertIn("Oban", out)
+            self.assertIn("engine", out)
+            self.assertIn("machine lifecycle", out)
+
+    def test_stack_stays_quiet_when_the_machine_can_actually_stop(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = self._stack_repo_full(
+                Path(td) / "r",
+                "DATABASE_URL=postgres://u:p@ep-x.us-east-2.aws.neon.tech/db\n",
+                [("engine", "min_machines_running = 0")],
+                lock='"oban": {:hex, :oban, "2.0.0"},\n')
+            out = context(run_hook("stack.sh", base, {}))
+            self.assertNotIn("COST:", out)
+
+    def test_stack_warns_on_migrations_over_a_transaction_pooler(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td) / "r"
+            base.mkdir(parents=True)
+            (base / ".env").write_text(
+                "DATABASE_URL=postgres://u:p@ep-x-pooler.us-east-2.aws.neon.tech/db\n")
+            subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+            out = context(run_hook("stack.sh", base, {}))
+            self.assertIn("MIGRATIONS:", out)
+            self.assertIn("DIRECT", out)
+
+    def test_stack_pooler_warning_clears_once_a_direct_url_exists(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td) / "r"
+            base.mkdir(parents=True)
+            (base / ".env").write_text(
+                "DATABASE_URL=postgres://u:p@ep-x-pooler.us-east-2.aws.neon.tech/db\n"
+                "DIRECT_DATABASE_URL=postgres://u:p@ep-x.us-east-2.aws.neon.tech/db\n")
+            subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+            out = context(run_hook("stack.sh", base, {}))
+            self.assertNotIn("MIGRATIONS:", out)
+
     def test_fleet_is_silent_for_only_current_codex_session(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

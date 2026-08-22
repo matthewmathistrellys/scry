@@ -39,7 +39,7 @@ case "$payload" in
   *) exit 0 ;;
 esac
 
-BUILD_PAYLOAD="$payload" python3 - <<'PY'
+BUILD_PAYLOAD="$payload" SCRY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scanners" python3 - <<'PY'
 import hashlib
 import json
 import os
@@ -82,66 +82,18 @@ if not matched:
     sys.exit(0)
 
 
-def nearest_mix_root(start):
-    """Walk up for mix.exs. Generic -- no hardcoded project paths."""
-    cur = os.path.abspath(start)
-    while cur != "/":
-        if os.path.isfile(os.path.join(cur, "mix.exs")):
-            return cur
-        cur = os.path.dirname(cur)
-    return ""
-
-
-def cd_prefix_target(command, cwd):
-    """Resolve a leading `cd <path> &&` so the guard sees the real project.
-
-    Compound commands are the normal shape an agent emits, and `cd apps/engine
-    && mix compile --force` from a repo root that has no mix.exs of its own
-    walked up to nothing and was silently ALLOWED -- the guard failing to
-    guard the exact monorepo layout that motivated this evening's work. Same
-    up-from-cwd assumption commit ebc4aed removed from architecture.sh.
-    Found by Fable review, 2026-08-22.
-    """
-    m = re.match(r"""\s*cd\s+(?:'([^']+)'|"([^"]+)"|([^\s;&|]+))\s*(?:&&|;)""", command)
-    if not m:
-        return ""
-    target = m.group(1) or m.group(2) or m.group(3)
-    target = os.path.expanduser(target)
-    resolved = target if os.path.isabs(target) else os.path.join(cwd, target)
-    return os.path.abspath(resolved)
-
-
-def any_mix_project_below(root, limit_depth=3):
-    """Last resort: an Elixir project somewhere under the repo root."""
-    root = os.path.abspath(root)
-    skip = {".git", "deps", "_build", "node_modules", ".worktrees", "worktrees"}
-    for cur, dirs, files in os.walk(root):
-        dirs[:] = [x for x in dirs if x not in skip]
-        if cur[len(root):].count(os.sep) > limit_depth:
-            dirs[:] = []
-            continue
-        if "mix.exs" in files:
-            return cur
-    return ""
-
-
 cwd = d.get("cwd") or os.getcwd()
 
-# Prefer the directory the command actually runs in.
-cd_target = cd_prefix_target(command, cwd)
-mix_root = nearest_mix_root(cd_target) if cd_target else ""
-if not mix_root:
-    mix_root = nearest_mix_root(cwd)
-if not mix_root:
-    git_root = ""
-    cur = os.path.abspath(cwd)
-    while cur != "/":
-        if os.path.isdir(os.path.join(cur, ".git")):
-            git_root = cur
-            break
-        cur = os.path.dirname(cur)
-    if git_root:
-        mix_root = any_mix_project_below(git_root)
+# One shared resolver, so a fix to project resolution reaches every scanner.
+# This hook previously carried its own upward walk and re-introduced the exact
+# monorepo bug architecture.sh had just been fixed for.
+sys.path.insert(0, os.environ.get("SCRY_DIR", ""))
+try:
+    import projects
+except ImportError:
+    sys.exit(0)                    # cannot resolve -> never block
+
+mix_root = projects.resolve_project(command, cwd, "mix.exs")
 if not mix_root:
     # `rm -rf _build` outside an Elixir project is somebody else's business.
     sys.exit(0)

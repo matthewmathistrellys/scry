@@ -64,6 +64,20 @@ machine is carrying. Six independent checks fill that in.
   rather than as "local", which is literally true and actively misleading.
   Service names come from env var *names*, so they prove a service is *wired*,
   not that it is in use.
+
+  It also correlates the database against the workload and the machine, and
+  speaks only when they conflict:
+  - **Scale-to-zero that cannot fire.** A Neon/Supabase compute suspends only
+    after N seconds with *zero* connections. A scheduler that polls every
+    minute never lets the count reach zero, and a machine pinned with
+    `min_machines_running` never lets the app go down — so the database's own
+    suspend setting is inert while the bill accrues. Reading that setting would
+    produce a confidently wrong "this one is fine"; the machine lifecycle is
+    what decides.
+  - **Migrations over a transaction pooler.** A pooler is right for
+    application traffic and wrong for DDL — advisory locks and prepared
+    statements do not survive transaction-mode multiplexing — so a pooled
+    `DATABASE_URL` with no `DIRECT_*` counterpart is flagged.
 - **`elixir_build_guard.sh`** — a `PreToolUse` speed bump in front of the
   commands that throw away compiled Elixir artifacts: `mix compile --force`,
   `mix deps.compile --force`, `mix clean --deps`, `rm -rf _build`, `rm -rf
@@ -152,6 +166,8 @@ industrialise that problem.
 | Orphan files (primary or session worktree) | none | a file exists in no commit on any branch |
 | Elixir/Ash worktree deps | `deps/` present | `deps/` missing — `mix deps.get` needed |
 | Ash domains | no mix project in the repo | every project found, with descriptions |
+| Scale-to-zero conflict | machine can actually stop | a polling worker + a pinned machine make it inert |
+| Pooler for migrations | direct URL configured | DDL pointed at a transaction pooler |
 | Elixir build state | `_build` populated | `_build` cold — next compile is a FULL build |
 | Force-rebuild command | any ordinary command | first `--force`/`rm -rf _build` attempt |
 | Open PRs | none, or `gh` unavailable | any open PR exists |

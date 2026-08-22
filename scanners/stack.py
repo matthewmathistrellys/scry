@@ -38,14 +38,14 @@ import argparse
 import json
 import os
 import re
+import sys
 
-# Directories that never carry authoritative config. docs/ is excluded on
-# purpose and not as noise-trimming: see rule 2 above.
-SKIP_DIRS = {
-    ".git", "node_modules", "deps", "_build", "dist", "build", "target",
-    ".venv", "venv", "__pycache__", ".next", "coverage", ".worktrees",
-    ".pytest_cache", "docs", ".terraform", "vendor", "site-packages",
-}
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import projects  # noqa: E402  (path set above so hooks can run from anywhere)
+
+# Shared prune list, plus docs/ -- excluded on purpose and not as
+# noise-trimming: see rule 2 above. Prose is the thing that was wrong.
+SKIP_DIRS = projects.PRUNE_DIRS | {"docs"}
 
 # Host fingerprint -> provider. Matched against the HOST of a role variable,
 # never against free text anywhere in the repo.
@@ -110,6 +110,25 @@ SERVICE_VARS = [
     (r"^REDIS_", "Redis"),
     (r"^ELASTIC_|^OPENSEARCH_", "Elasticsearch"),
 ]
+
+# Hosts that bill by ACTIVITY rather than by the hour -- the providers where a
+# compute suspends itself once connections drop to zero.
+SCALE_TO_ZERO_PROVIDERS = {"Neon", "Supabase"}
+
+# Libraries that hold a database connection open and poll continuously. Their
+# presence is what makes a scale-to-zero setting inert: the compute only
+# suspends after N seconds with ZERO connections, and a scheduler that wakes
+# every minute never lets the count reach zero.
+POLLING_WORKERS = [
+    ("oban", "Oban"), ("quantum", "Quantum"), ("broadway", "Broadway"),
+    ("celery", "Celery"), ("apscheduler", "APScheduler"),
+]
+
+# Transaction-mode pooler fingerprints. A pooler is the right default for app
+# traffic and the wrong one for migrations: DDL locking and prepared
+# statements do not survive transaction-mode multiplexing.
+POOLER_FINGERPRINTS = ["-pooler.", "pooler.supabase.com"]
+POOLER_PORTS = {"6543"}
 
 # A role variable is one whose NAME declares it points at a database.
 DB_VAR_RE = re.compile(r"^[A-Z0-9_]*(DATABASE_URL|DATABASE_DSN|DB_URL|DB_DSN|POSTGRES_URL)$")
@@ -210,9 +229,9 @@ def read_env(paths: list[str]) -> tuple[dict, set]:
 
 def walk_config(root: str) -> dict:
     """Collect operational config markers. Never descends into SKIP_DIRS."""
-    facts = {"fly_apps": [], "mix": 0, "python": False, "node": False,
-             "docker": False, "ash": False, "phoenix": False,
-             "frameworks": set(), "ci": False}
+    facts = {"fly_apps": [], "always_on_apps": [], "mix": 0, "python": False,
+             "node": False, "docker": False, "ash": False, "phoenix": False,
+             "frameworks": set(), "ci": False, "workers": set()}
     for cur, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".venv")]
         # Depth guard: config lives near the top, not 8 levels down.
@@ -224,11 +243,29 @@ def walk_config(root: str) -> dict:
             if name == "fly.toml":
                 try:
                     with open(path, encoding="utf-8", errors="replace") as f:
-                        for line in f:
-                            m = re.match(r"""^\s*app\s*=\s*['"]([^'"]+)['"]""", line)
-                            if m:
-                                facts["fly_apps"].append(m.group(1))
-                                break
+                        body = f.read()
+                except OSError:
+                    continue
+                m = re.search(r"""^\s*app\s*=\s*['"]([^'"]+)['"]""", body, re.M)
+                if not m:
+                    continue
+                app = m.group(1)
+                facts["fly_apps"].append(app)
+                # The machine lifecycle is what actually bills. A machine
+                # pinned up keeps a connection pool alive, which keeps a
+                # scale-to-zero database awake -- the cost follows the
+                # machine, not the database setting.
+                mmr = re.search(r"^\s*min_machines_running\s*=\s*(\d+)", body, re.M)
+                asm = re.search(r"""^\s*auto_stop_machines\s*=\s*['"]?(\w+)""", body, re.M)
+                if (mmr and int(mmr.group(1)) > 0) or (asm and asm.group(1) == "off"):
+                    facts["always_on_apps"].append(app)
+            elif name == "mix.lock":
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as f:
+                        lock = f.read().lower()
+                    for dep, label in POLLING_WORKERS:
+                        if f'"{dep}"' in lock:
+                            facts["workers"].add(label)
                 except OSError:
                     pass
             elif name == "mix.exs":
@@ -250,6 +287,9 @@ def walk_config(root: str) -> dict:
                     for lib in ("fastapi", "django", "flask", "litestar"):
                         if lib in body:
                             facts["frameworks"].add(lib.capitalize() if lib != "fastapi" else "FastAPI")
+                    for dep, label in POLLING_WORKERS:
+                        if dep in body:
+                            facts["workers"].add(label)
                 except OSError:
                     pass
             elif name == "package.json":
@@ -269,6 +309,62 @@ def walk_config(root: str) -> dict:
     if os.path.isdir(os.path.join(root, ".github", "workflows")):
         facts["ci"] = True
     return facts
+
+
+def is_pooled(host: str, port: str) -> bool:
+    return any(f in host for f in POOLER_FINGERPRINTS) or port in POOLER_PORTS
+
+
+def cost_and_correctness_warnings(db_roles, env_names, facts) -> list[str]:
+    """Conflicts between the database, the workload, and the machine lifecycle.
+
+    Both checks below are genuinely thresholded -- they say nothing unless the
+    conflicting combination is actually present -- so they cost nothing on the
+    repos where they do not apply.
+    """
+    warnings = []
+    providers = {provider_for(h) for h, _ in db_roles.values()}
+
+    # 1. Scale-to-zero that cannot ever fire.
+    #
+    # A Neon/Supabase compute suspends only after N seconds with ZERO
+    # connections. A scheduler that polls every minute never lets the count
+    # reach zero, so the suspend timeout is inert for as long as the app is
+    # up -- and a machine pinned with min_machines_running keeps it up
+    # forever. The database setting looks like thrift while the machine
+    # lifecycle quietly buys always-on Postgres. Reading the database's own
+    # config here would produce a confidently wrong "this one is fine";
+    # the machine is the thing that decides.
+    scale_to_zero = providers & SCALE_TO_ZERO_PROVIDERS
+    if scale_to_zero and facts["workers"] and facts["always_on_apps"]:
+        apps = sorted(set(facts["always_on_apps"]))
+        pinned = ", ".join(apps[:4]) + (f", +{len(apps) - 4}" if len(apps) > 4 else "")
+        verb = "is" if len(apps) == 1 else "are"
+        warnings.append(
+            f"COST: {'/'.join(sorted(scale_to_zero))} scale-to-zero cannot fire here. "
+            f"{', '.join(sorted(facts['workers']))} holds a connection and polls "
+            f"continuously, and {pinned} {verb} pinned up (min_machines_running > 0 or "
+            "auto_stop_machines off) — so the compute never sees zero connections "
+            "and never suspends. This is always-on Postgres whether or not that was "
+            "the intent. The fix is the machine lifecycle, not the database timeout."
+        )
+
+    # 2. Migrations over a transaction pooler.
+    #
+    # A pooler is the right default for application traffic and the wrong one
+    # for DDL: transaction-mode multiplexing does not preserve the advisory
+    # locks and prepared statements migrations rely on.
+    pooled = [v for v, (h, port) in db_roles.items() if is_pooled(h, port)]
+    if pooled and not any(n.startswith("DIRECT_") or "DIRECT_DATABASE" in n
+                          for n in env_names):
+        warnings.append(
+            f"MIGRATIONS: {', '.join(sorted(pooled))} points at a transaction pooler and "
+            "no DIRECT_* URL is set. Application traffic belongs on the pooler; DDL does "
+            "not — advisory locks and prepared statements do not survive transaction-mode "
+            "multiplexing, so migrations run over it can hang or half-apply. Point "
+            "migrations at the direct (non-pooler) endpoint."
+        )
+    return warnings
 
 
 def render(db_roles: dict, env_names: set, facts: dict) -> str:
@@ -332,6 +428,8 @@ def render(db_roles: dict, env_names: set, facts: dict) -> str:
         shown = ", ".join(ordered[:12])
         more = f", +{len(ordered) - 12}" if len(ordered) > 12 else ""
         lines.append(f"- Services wired: {shown}{more}")
+
+    lines.extend(cost_and_correctness_warnings(db_roles, env_names, facts))
 
     if not lines:
         return ""
