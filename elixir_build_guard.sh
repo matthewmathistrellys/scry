@@ -118,15 +118,21 @@ except OSError:
 
 project = os.path.basename(mix_root)
 scale = f"{dep_count} dependencies" if dep_count else "every dependency"
-uses_ash = False
+uses_ash = uses_tidewave = False
 try:
     with open(os.path.join(mix_root, "mix.lock"), encoding="utf-8") as f:
-        uses_ash = '"ash"' in f.read()
+        lock = f.read()
+    uses_ash = '"ash"' in lock
+    uses_tidewave = '"tidewave"' in lock
 except OSError:
     pass
 ash_note = (" This project uses Ash, whose Spark DSL does heavy compile-time "
             "work, so a cold rebuild is far slower than the dependency count "
             "alone suggests.") if uses_ash else ""
+
+tidewave_note = (" This project already depends on Tidewave — connect to the "
+                 "running app and evaluate there rather than rebuilding."
+                 ) if uses_tidewave else ""
 
 reason = f"""SCRY: `{matched}` discards compiled artifacts in {project} and forces a cold rebuild of {scale}.{ash_note}
 
@@ -135,7 +141,7 @@ Nothing is corrupted by this and nothing needs repairing — the entire cost is 
 Try these first:
   • `mix compile` on its own is already incremental — it rebuilds only what changed.
   • Stale-artifact symptoms usually mean a compile-time dependency cascade, not a corrupt build. `mix xref graph --format stats` and `mix compile --profile time` find the real culprit; forcing a rebuild only hides it until next time.
-  • For exploring or checking behaviour, keep a session running (`iex -S mix phx.server`) and evaluate against it instead of recompiling. Tidewave, if this project has it, is built for exactly that.
+  • For exploring or checking behaviour, keep a session running (`iex -S mix phx.server`) and evaluate against it instead of recompiling.{tidewave_note}
 
 If you genuinely need the full rebuild, run the exact same command again and it will go through — this gate only stops the first, reflexive attempt."""
 
