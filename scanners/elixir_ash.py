@@ -104,7 +104,12 @@ def deps_not_fetched(mix_root: str) -> bool:
     return bool(mix_root) and os.path.isdir(mix_root) and not os.path.isdir(os.path.join(mix_root, "deps"))
 
 
-BUILD_TIME_CONFIGS = ("config.exs", "dev.exs", "prod.exs", "test.exs")
+# Everything in config/ is evaluated at BUILD time EXCEPT runtime.exs. dev.exs
+# and test.exs are excluded because they never ship in a release. Expressed as
+# a denylist rather than an allowlist of known names: a project's own
+# staging.exs / appsignal.exs imported from config.exs is build-time too, and
+# an allowlist silently misses it (Fable review, 2026-08-22).
+NOT_BUILD_TIME = {"runtime.exs", "dev.exs", "test.exs"}
 ENV_READ_RE = re.compile(r"System\.(get_env|fetch_env)")
 
 
@@ -122,7 +127,13 @@ def build_time_env_reads(mix_root: str) -> list[str]:
     cfg = os.path.join(mix_root, "config")
     if not os.path.isdir(cfg):
         return hits
-    for name in sorted(BUILD_TIME_CONFIGS):
+    try:
+        names = sorted(os.listdir(cfg))
+    except OSError:
+        return hits
+    for name in names:
+        if not name.endswith(".exs") or name in NOT_BUILD_TIME:
+            continue
         path = os.path.join(cfg, name)
         if not os.path.isfile(path):
             continue
@@ -130,10 +141,6 @@ def build_time_env_reads(mix_root: str) -> list[str]:
             with open(path, encoding="utf-8", errors="replace") as f:
                 body = f.read()
         except OSError:
-            continue
-        # dev.exs and test.exs never ship in a release, so they are not the
-        # trap -- only config.exs (and prod.exs, which config.exs imports).
-        if name in ("dev.exs", "test.exs"):
             continue
         count = len(ENV_READ_RE.findall(body))
         if count:

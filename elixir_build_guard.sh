@@ -84,6 +84,7 @@ PATTERNS = [
 MIGRATE_PATTERNS = [
     (r"\bmix\s+(?:do\s+)?ecto\.migrate\b", "mix ecto.migrate"),
     (r"\bmix\s+(?:do\s+)?ash[._]migrate\b", "mix ash.migrate"),
+    (r"\bmix\s+(?:do\s+)?ash_postgres\.migrate\b", "mix ash_postgres.migrate"),
     (r"\bmix\s+(?:do\s+)?ecto\.reset\b", "mix ecto.reset"),
 ]
 
@@ -122,7 +123,10 @@ if not mix_root:
 # ── Migration staleness ────────────────────────────────────────────────────
 # Pure mtime comparison: no parsing, no compile, no BEAM. If no resource file
 # is newer than the newest migration, this command is fine and we say nothing.
-def newest_mtime(root, subpaths, suffixes):
+def newest_mtime(root, subpaths, suffixes, path_filter=None, newer_than=0.0):
+    """Newest matching file. `path_filter` is applied only to candidates that
+    already beat `newer_than`, so an expensive filter (reading file contents)
+    runs on a handful of files rather than the whole tree."""
     newest = 0.0
     newest_name = ""
     for sub in subpaths:
@@ -139,8 +143,11 @@ def newest_mtime(root, subpaths, suffixes):
                     mtime = os.path.getmtime(path)
                 except OSError:
                     continue
-                if mtime > newest:
-                    newest, newest_name = mtime, os.path.relpath(path, root)
+                if mtime <= newest or mtime <= newer_than:
+                    continue
+                if path_filter and not path_filter(path):
+                    continue
+                newest, newest_name = mtime, os.path.relpath(path, root)
     return newest, newest_name
 
 
@@ -154,9 +161,30 @@ if matched_kind == "migrate":
     except OSError:
         sys.exit(0)
 
-    res_mtime, res_name = newest_mtime(mix_root, ["lib"], (".ex",))
-    mig_mtime, _ = newest_mtime(mix_root, ["priv"], (".exs",))
-    if not res_mtime or not mig_mtime or res_mtime <= mig_mtime:
+    # Only migrations count on the priv/ side: priv/repo/seeds.exs is edited
+    # routinely, and letting it set the bar masks genuine staleness.
+    mig_mtime, _ = newest_mtime(mix_root, ["priv"], (".exs",),
+                                path_filter=lambda p: "migrations" in p.split(os.sep))
+    if not mig_mtime:
+        sys.exit(0)
+
+    # And only RESOURCE files count on the lib/ side. Comparing against ALL of
+    # lib/ made any edit to a LiveView, worker or plain module arm the gate --
+    # verified live: the newest lib file in the target repo is an events
+    # bridge, not a resource, so every `mix ecto.migrate` today would eat a
+    # denial that means nothing. Reading `use Ash.Resource` is only done for
+    # the handful of files newer than the migration, so it stays cheap.
+    def is_resource(path):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                return "use Ash.Resource" in f.read()
+        except OSError:
+            return False
+
+    res_mtime, res_name = newest_mtime(mix_root, ["lib"], (".ex",),
+                                       path_filter=is_resource,
+                                       newer_than=mig_mtime)
+    if not res_mtime or res_mtime <= mig_mtime:
         sys.exit(0)
 
 # ── Two-strike state ───────────────────────────────────────────────────────

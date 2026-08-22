@@ -171,8 +171,7 @@ industrialise that problem.
 | Pooler for migrations | direct URL configured | DDL pointed at a transaction pooler |
 | Dev tooling | none depended on | Tidewave / Livebook / LiveReload present |
 | Build-time config | env reads only in `runtime.exs` | `System.get_env` in `config.exs` |
-| Stale migration | migrations newer than resources | a resource changed since the last codegen |
-| Tenantless Ash call | `tenant:` passed, or no multitenancy | an Ash call outside a resource omits it |
+| Stale migration | migrations newer than any RESOURCE file | a resource changed since the last codegen |
 | Spark extension edit | ordinary module | a DSL extension / transformer / verifier |
 | Elixir build state | `_build` populated | `_build` cold — next compile is a FULL build |
 | Force-rebuild command | any ordinary command | first `--force`/`rm -rf _build` attempt |

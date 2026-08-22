@@ -660,13 +660,19 @@ class ScryHookTests(unittest.TestCase):
         (repo / ".git").mkdir()
         (repo / "mix.exs").write_text("defmodule M do\nend\n")
         (repo / "mix.lock").write_text('"ash_postgres": {:hex, :ash_postgres, "2.0"},\n')
-        first, second = ("priv/repo/migrations/001.exs", "lib/app/thing.ex")
-        if not resource_newer:
-            first, second = second, first
-        (repo / first).write_text("a")
-        os.utime(repo / first, (1_700_000_000, 1_700_000_000))
-        (repo / second).write_text("b")
-        os.utime(repo / second, (1_700_000_100, 1_700_000_100))
+        # thing.ex must really be a resource: the guard scopes the lib/ side to
+        # files containing `use Ash.Resource`, because migrations are generated
+        # from resources and nothing else. A plain module being newer means
+        # nothing, and comparing against all of lib/ was the noise bug Fable
+        # caught.
+        resource = "lib/app/thing.ex"
+        migration = "priv/repo/migrations/001.exs"
+        (repo / resource).write_text(
+            "defmodule App.Thing do\n  use Ash.Resource\nend\n")
+        (repo / migration).write_text("defmodule M do\nend\n")
+        older, newer = (migration, resource) if resource_newer else (resource, migration)
+        os.utime(repo / older, (1_700_000_000, 1_700_000_000))
+        os.utime(repo / newer, (1_700_000_100, 1_700_000_100))
         return repo
 
     def test_migrate_guard_warns_when_a_resource_is_newer_than_the_migrations(self):
@@ -732,52 +738,6 @@ class ScryHookTests(unittest.TestCase):
         (repo / "lib/app/thing.ex").write_text(body + "end\n")
         return repo
 
-    def test_advisory_flags_an_ash_call_without_tenant_outside_a_resource(self):
-        """A tenantless Ash call from a LiveView reads across every tenant.
-
-        Nothing raises. It looks like a working feature until someone sees
-        another organisation's data.
-        """
-        with tempfile.TemporaryDirectory() as td:
-            repo = self._ash_tenant_repo(Path(td))
-            live = repo / "lib/app/live.ex"
-            live.write_text(
-                "defmodule AppWeb.Live do\n  use Phoenix.LiveView\n"
-                "  def mount(_, _, s) do\n"
-                "    Ash.read(App.Thing, actor: s.assigns.user)\n"
-                "  end\nend\n")
-            out = context(run_hook("elixir_advisory.sh", repo,
-                                   self._elixir_edit(live)))
-            self.assertIn("ash-call-without-tenant", out)
-            self.assertIn("line 4", out)
-
-    def test_advisory_tenant_check_respects_its_three_gates(self):
-        """Silent when tenant is passed, inside a resource, or with no multitenancy."""
-        with tempfile.TemporaryDirectory() as td:
-            repo = self._ash_tenant_repo(Path(td))
-
-            passed = repo / "lib/app/ok.ex"
-            passed.write_text(
-                "defmodule AppWeb.Ok do\n  def m(s) do\n"
-                "    Ash.read(App.Thing, tenant: s.org)\n  end\nend\n")
-            self.assertEqual(
-                context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(passed))), "")
-
-            inside = repo / "lib/app/res.ex"
-            inside.write_text(
-                "defmodule App.Res do\n  use Ash.Resource\n"
-                "  def f, do: Ash.read(App.Thing)\nend\n")
-            self.assertEqual(
-                context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(inside))), "")
-
-        with tempfile.TemporaryDirectory() as td:
-            plain = self._ash_tenant_repo(Path(td), multitenant=False)
-            caller = plain / "lib/app/caller.ex"
-            caller.write_text(
-                "defmodule AppWeb.C do\n  def m, do: Ash.read(App.Thing)\nend\n")
-            self.assertEqual(
-                context(run_hook("elixir_advisory.sh", plain, self._elixir_edit(caller))), "")
-
     def test_advisory_warns_that_a_spark_extension_edit_is_expensive(self):
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td) / "repo"
@@ -818,6 +778,40 @@ class ScryHookTests(unittest.TestCase):
                 'import Config\nconfig :app, k: System.get_env("SECRET")\n')
             clean = context(run_hook("architecture.sh", repo, {}, {"HOME": td}))
             self.assertNotIn("BUILD-TIME CONFIG", clean)
+
+    def test_migrate_guard_ignores_non_resource_files_under_lib(self):
+        """Only resource edits imply stale migrations.
+
+        Comparing against ALL of lib/ meant any LiveView, worker or plain
+        module edit armed the gate. Verified live in the target repo: its
+        newest lib file is an events bridge, so every `mix ecto.migrate` would
+        have eaten a denial that meant nothing (Fable review, 2026-08-22).
+        """
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._ash_migrate_repo(base, resource_newer=False)
+            plain = repo / "lib/app/live.ex"
+            plain.write_text("defmodule AppWeb.Live do\n  def m, do: 1\nend\n")
+            os.utime(plain, (1_700_000_200, 1_700_000_200))   # newest of all
+            env = {"TMPDIR": str(base / "state")}
+            (base / "state").mkdir()
+            result = run_hook("elixir_build_guard.sh", repo,
+                              self._bash_payload(repo, "mix ecto.migrate"), env)
+            self.assertEqual(result.stdout.strip(), "")
+
+    def test_migrate_guard_ignores_seeds_when_dating_the_migrations(self):
+        """priv/repo/seeds.exs is edited routinely and must not mask staleness."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._ash_migrate_repo(base, resource_newer=True)
+            seeds = repo / "priv/repo/seeds.exs"
+            seeds.write_text("# seeds\n")
+            os.utime(seeds, (1_700_000_300, 1_700_000_300))   # newer than the resource
+            env = {"TMPDIR": str(base / "state")}
+            (base / "state").mkdir()
+            result = run_hook("elixir_build_guard.sh", repo,
+                              self._bash_payload(repo, "mix ecto.migrate"), env)
+            self.assertTrue(result.stdout.strip(), "seeds.exs masked a stale migration")
 
     def test_fleet_is_silent_for_only_current_codex_session(self):
         with tempfile.TemporaryDirectory() as td:

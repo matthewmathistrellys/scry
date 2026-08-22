@@ -1,6 +1,6 @@
 {
   "name": "scry",
-  "version": "1.13.0",
+  "version": "1.13.1",
   "description": "Session-start checks for codebase architecture, the running stack, repository health, concurrent agent activity, and machine pressure, plus a two-strike guard on expensive Elixir force-rebuilds.",
   "author": {
     "name": "Matthew Mathis",
