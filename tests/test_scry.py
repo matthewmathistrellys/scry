@@ -625,6 +625,34 @@ class ScryHookTests(unittest.TestCase):
             self.assertIn("Dev tooling available", out)
             self.assertIn("Tidewave", out)
 
+    def test_health_reports_a_stash_on_an_otherwise_clean_tree(self):
+        """A stash is invisible exactly when nobody is looking for it.
+
+        `git status` is clean with a stash sitting there, so every other
+        signal reports "nothing to see" while real work waits in a stack on
+        no branch and in no commit. Unlike an orphan file it is not destroyed
+        by cleanup -- it is forgotten, which is the failure mode.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            repo.mkdir(parents=True)
+            git = ["git", "-C", str(repo)]
+            subprocess.run(git + ["init", "-q", "-b", "main"], check=True)
+            subprocess.run(git + ["config", "user.email", "t@t"], check=True)
+            subprocess.run(git + ["config", "user.name", "t"], check=True)
+            (repo / "f.txt").write_text("one")
+            subprocess.run(git + ["add", "-A"], check=True)
+            subprocess.run(git + ["commit", "-qm", "init"], check=True)
+
+            clean = context(run_hook("health.sh", repo, {}, {"HOME": td}))
+            self.assertNotIn("stash", clean.lower())
+
+            (repo / "f.txt").write_text("two")
+            subprocess.run(git + ["stash", "-q"], check=True)
+            stashed = context(run_hook("health.sh", repo, {}, {"HOME": td}))
+            self.assertIn("1 stash entry", stashed)
+            self.assertIn("no branch", stashed)
+
     def test_fleet_is_silent_for_only_current_codex_session(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

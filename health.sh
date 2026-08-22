@@ -100,6 +100,22 @@ content_is_in_main() {
 # primary one — the 2026-08-10 incident's stranded brief lived in a linked
 # worktree, not the primary, which the original primary-only version of this
 # check would have missed entirely.
+stash_exposure() {
+  # A stash is the orphan file's sibling: work that exists on no branch, in no
+  # commit, and in no worktree listing. `git status` is clean with a stash
+  # sitting there, so every other signal in this file reports "nothing to see"
+  # while real work waits in a stack nobody looks at. Worktree removal and
+  # branch cleanup do not touch it, so it does not get destroyed -- it gets
+  # FORGOTTEN, which is the failure mode here. Reported with its age, because
+  # a stash from this morning is a pause and a stash from March is a leak.
+  local wt="$1" count oldest
+  count="$(git -C "$wt" stash list 2>/dev/null | wc -l | tr -d ' ')"
+  [ "${count:-0}" -gt 0 ] || return 0
+  oldest="$(git -C "$wt" log -g --format=%cr stash@{$((count - 1))} -1 2>/dev/null)"
+  [ -n "$oldest" ] && oldest=" (oldest: $oldest)"
+  echo "- $count stash entr$([ "$count" -eq 1 ] && echo y || echo ies) here$oldest — work that exists on no branch and in no commit, and that a clean \`git status\` will never mention. Inspect before assuming this tree is empty: git -C $wt stash list"
+}
+
 orphan_file_exposure() {
   local wt="$1" cands total deadline checked orphans f scope
   cands="$( { git -C "$wt" diff --cached --name-only --diff-filter=A 2>/dev/null
@@ -134,8 +150,12 @@ fi
 
 if [ "$branch" = "main" ]; then
   lines+=("- On main. Modified: $modified, untracked: $untracked.")
+  stash_line="$(stash_exposure "$main_wt")"
+  [ -n "$stash_line" ] && lines+=("$stash_line")
 else
   lines+=("- WARNING: on branch '$branch', not main. The primary worktree should stay on main as the stable reference for the repo. Modified: $modified, untracked: $untracked.")
+  stash_line="$(stash_exposure "$main_wt")"
+  [ -n "$stash_line" ] && lines+=("$stash_line")
 
   # ── Why this warning carries its receipts ────────────────────────────────
   # The bare warning above is not enough on its own. On one project it was
@@ -277,6 +297,8 @@ if [ "$in_primary" -eq 0 ]; then
   # Solo work in a linked worktree is fine; orchestrating from one is not.
   lines+=("- THIS SESSION IS INSIDE A LINKED WORKTREE — fine for solo work in this tree, but do NOT orchestrate from here: subagents inherit this session's worktree isolation (cross-worktree git refused, compound commands refused, sibling-worktree builders cannot commit; 2026-08-14 incident). Orchestrate from a normal directory and give agents their own worktrees via Agent(..., isolation: worktree). If this session becomes an orchestrator, ExitWorktree first.")
   lines+=("- Branch: $sw_branch. Modified: $sw_modified, untracked: $sw_untracked.")
+  sw_stash="$(stash_exposure "$session_wt")"
+  [ -n "$sw_stash" ] && lines+=("$sw_stash")
 
   exp="$(orphan_file_exposure "$session_wt")"
   [ -n "$exp" ] && lines+=("$exp")

@@ -164,6 +164,7 @@ industrialise that problem.
 | Unpushed commits | all pushed | commits only on disk |
 | Branch age | recent | ≥3 days since last commit |
 | Orphan files (primary or session worktree) | none | a file exists in no commit on any branch |
+| Stashes | none | any stash entry exists, with its age |
 | Elixir/Ash worktree deps | `deps/` present | `deps/` missing — `mix deps.get` needed |
 | Ash domains | no mix project in the repo | every project found, with descriptions |
 | Scale-to-zero conflict | machine can actually stop | a polling worker + a pinned machine make it inert |
