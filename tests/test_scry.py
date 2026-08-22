@@ -813,6 +813,70 @@ class ScryHookTests(unittest.TestCase):
                               self._bash_payload(repo, "mix ecto.migrate"), env)
             self.assertTrue(result.stdout.strip(), "seeds.exs masked a stale migration")
 
+    def _policy_repo(self, base):
+        repo = base / "repo"
+        (repo / "lib/app").mkdir(parents=True)
+        (repo / "mix.exs").write_text("defmodule M do\nend\n")
+        (repo / "mix.lock").write_text('"ash": {:hex, :ash, "3.0"},\n')
+        (repo / "lib/app/secret.ex").write_text(
+            "defmodule App.Secret do\n  use Ash.Resource\n  policies do\n"
+            "    policy always() do\n      authorize_if actor_present()\n"
+            "    end\n  end\nend\n")
+        (repo / "lib/app/plain.ex").write_text(
+            "defmodule App.Plain do\n  use Ash.Resource\nend\n")
+        return repo
+
+    def _caller(self, repo, body):
+        path = repo / "lib/app/c.ex"
+        path.write_text("defmodule AppWeb.C do\n" + body + "\nend\n")
+        return path
+
+    def test_actor_check_fires_only_when_the_resource_has_policies(self):
+        """The gate that turned 93-of-93 noise into a real signal.
+
+        Measured on a live Ash app: ungated, this flagged every for_read call
+        site in the project -- 93 of 93, across 67 files -- because only 5 of
+        ~189 resources declare policies, so for the rest the actor would be
+        discarded unread. Passing an actor only matters where a rule exists to
+        consult it (2026-08-22).
+        """
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._policy_repo(Path(td))
+
+            # The real mistake: policy-bearing resource, no actor, no bypass.
+            bad = self._caller(repo, "  def f do\n    App.Secret\n"
+                                     "    |> Ash.Query.for_read(:read)\n"
+                                     "    |> Ash.read()\n  end")
+            out = context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(bad)))
+            self.assertIn("ash-for-read-without-actor", out)
+            self.assertIn("declares policies", out)
+
+            # Same shape against a resource with no policies: nothing to check.
+            ok = self._caller(repo, "  def f do\n    App.Plain\n"
+                                    "    |> Ash.Query.for_read(:read)\n"
+                                    "    |> Ash.read()\n  end")
+            self.assertEqual(
+                context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(ok))), "")
+
+    def test_actor_check_respects_an_explicit_authorization_bypass(self):
+        """`authorize?: false` is a reviewed decision, not an oversight."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._policy_repo(Path(td))
+            bypass = self._caller(repo, "  def f do\n    App.Secret\n"
+                                        "    |> Ash.Query.for_read(:read)\n"
+                                        "    |> Ash.read(authorize?: false)\n  end")
+            self.assertEqual(
+                context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(bypass))), "")
+
+    def test_actor_check_fails_quiet_on_an_unresolvable_target(self):
+        """A guess here would be the confident-wrong-answer this tool exists to stop."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._policy_repo(Path(td))
+            odd = self._caller(repo, "  def f(q) do\n"
+                                     "    q |> Ash.Query.for_read(:read) |> Ash.read()\n  end")
+            self.assertEqual(
+                context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(odd))), "")
+
     def test_fleet_is_silent_for_only_current_codex_session(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

@@ -182,7 +182,7 @@ check_ash_for_read_without_actor() {
   mix_has_dep "ash" || return 0
   local out
   out="$(python3 -c '
-import re, sys
+import os, re, sys
 
 path = sys.argv[1]
 try:
@@ -207,6 +207,55 @@ def line_of(idx):
             hi = mid - 1
     return lo + 1
 
+
+LIB_ROOT = sys.argv[2] if len(sys.argv) > 2 else ""
+
+PIPED = re.compile(r"([A-Z][\w.]*)\s*(?:\n\s*)?\|>\s*Ash\.Query\.$")
+
+
+def target_module(content, call_start):
+    """The module piped into Ash.Query.for_read, or "" if not determinable."""
+    m = PIPED.search(content[:call_start])
+    return m.group(1) if m else ""
+
+
+_policy_cache = {}
+
+
+def resource_has_policies(module):
+    """Does the Ash resource named `module` declare a policies block?
+
+    Resolved by the Elixir file-naming convention (Foo.BarBaz -> bar_baz.ex) so
+    only a handful of candidate files are ever opened -- walking and reading
+    the whole lib/ tree on every file edit would be far too slow for a
+    PostToolUse hook.
+    """
+    if module in _policy_cache:
+        return _policy_cache[module]
+    result = False
+    if LIB_ROOT and os.path.isdir(LIB_ROOT):
+        last = module.split(".")[-1]
+        snake = re.sub(r"(?<!^)(?=[A-Z])", "_", last).lower() + ".ex"
+        for cur, dirs, files in os.walk(LIB_ROOT):
+            dirs[:] = [d for d in dirs if d not in ("_build", "deps")]
+            if snake not in files:
+                continue
+            path = os.path.join(cur, snake)
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    body = f.read()
+            except OSError:
+                continue
+            if not re.search(r"^defmodule\s+[\w.]*\b" + re.escape(last) + r"\s+do", body, re.M):
+                continue
+            if "use Ash.Resource" not in body:
+                continue
+            result = bool(re.search(r"^\s*policies do", body, re.M))
+            break
+    _policy_cache[module] = result
+    return result
+
+
 findings = []
 for m in re.finditer(r"\bfor_read\(", content):
     start = m.end()
@@ -226,13 +275,37 @@ for m in re.finditer(r"\bfor_read\(", content):
         args_text = content[start:min(start + 400, n)]
     if "actor:" in args_text:
         continue
+
+    # An explicit `authorize?: false` is a reviewed decision, not an
+    # oversight. Checked on the whole surrounding pipeline, since it lands on
+    # the downstream read rather than on for_read itself.
     lineno = line_of(m.start())
+    window = "\n".join(lines[max(0, lineno - 4):lineno + 6])
+    if "authorize?: false" in window:
+        continue
+
+    # THE GATE. Passing an actor only matters if the resource being queried
+    # has rules that would consult it. Measured on a real Ash app: without
+    # this, 93 of 93 for_read sites flagged -- every edit to any of 67 files
+    # produced the advisory, which is no signal at all. Only 5 of ~189
+    # resources there declare policies; for the rest the actor would be
+    # discarded. With the gate: 1 site, and that one was an explicit
+    # `authorize?: false` caught by the check above. Silent on a healthy
+    # codebase, loud on the real mistake (2026-08-22).
+    #
+    # Deliberately fails QUIET: an unresolvable module name says nothing,
+    # because a guess here is exactly the confident-wrong-answer failure this
+    # whole tool exists to avoid.
+    target = target_module(content, m.start())
+    if not target or not resource_has_policies(target):
+        continue
+
     snippet = lines[lineno - 1].strip() if lineno - 1 < len(lines) else ""
-    findings.append(f"  line {lineno}: {snippet}")
+    findings.append("  line %d: %s   (%s declares policies)" % (lineno, snippet, target))
 
 if findings:
     print("\n".join(findings))
-' "$file_path")"
+' "$file_path" "$mix_root/lib")"
   [ -n "$out" ] || return 0
   findings+=("[ash-for-read-without-actor] $(basename "$file_path"):
 $out

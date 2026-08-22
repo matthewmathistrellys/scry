@@ -172,6 +172,7 @@ industrialise that problem.
 | Dev tooling | none depended on | Tidewave / Livebook / LiveReload present |
 | Build-time config | env reads only in `runtime.exs` | `System.get_env` in `config.exs` |
 | Stale migration | migrations newer than any RESOURCE file | a resource changed since the last codegen |
+| Ash read without an actor | target resource has no policies, or an explicit bypass | a policy-bearing resource is read with no actor |
 | Spark extension edit | ordinary module | a DSL extension / transformer / verifier |
 | Elixir build state | `_build` populated | `_build` cold — next compile is a FULL build |
 | Force-rebuild command | any ordinary command | first `--force`/`rm -rf _build` attempt |
