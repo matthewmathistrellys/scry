@@ -2,7 +2,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -353,7 +355,7 @@ class ScryHookTests(unittest.TestCase):
             self.assertEqual(
                 payload["hookSpecificOutput"]["permissionDecision"], "deny")
             reason = payload["hookSpecificOutput"]["permissionDecisionReason"]
-            self.assertIn("run it again and it will go through", reason)
+            self.assertIn("run it again within", reason)
             self.assertIn("incremental", reason)
 
             second = run_hook("elixir_build_guard.sh", repo,
@@ -466,6 +468,78 @@ class ScryHookTests(unittest.TestCase):
                              self._bash_payload(b, cmd), env)
             self.assertTrue(other.stdout.strip(),
                             "a strike in project a must not clear project b")
+
+    def test_stack_provider_fingerprints_are_ordered_most_specific_first(self):
+        """A confidently WRONG provider label is the bug this scanner kills.
+
+        `internal` sat above `host.docker.internal` as a substring match, so
+        the docker entry was dead code and any host merely containing the
+        word -- `db.internal.mycorp.com` -- was labelled Fly. Found by Fable
+        review, 2026-08-22.
+        """
+        sys.path.insert(0, str(ROOT / "scanners"))
+        import stack as stack_mod
+
+        self.assertEqual(stack_mod.provider_for("host.docker.internal"),
+                         "local (docker)")
+        self.assertEqual(stack_mod.provider_for("myapp.flycast"),
+                         "Fly.io (internal)")
+        self.assertEqual(stack_mod.provider_for("ep-x.aws.neon.tech"), "Neon")
+        # An unrelated host containing the word must NOT be claimed as Fly.
+        self.assertEqual(stack_mod.provider_for("db.internal.mycorp.com"), "")
+        self.assertEqual(stack_mod.provider_for("internal-db.neon.tech"), "Neon")
+
+    def test_build_guard_sees_through_a_cd_prefix_in_a_monorepo(self):
+        """The guard must guard the layout that motivated it.
+
+        nearest_mix_root walked UP from cwd, so `cd apps/engine && mix compile
+        --force` issued from a repo root with no mix.exs of its own resolved to
+        nothing and was silently ALLOWED -- the same up-from-cwd assumption
+        commit ebc4aed removed from architecture.sh. Found by Fable review.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = base / "repo"
+            (repo / "apps/engine/lib").mkdir(parents=True)
+            (repo / "apps/engine/deps").mkdir(parents=True)
+            (repo / "apps/engine/mix.exs").write_text("defmodule M do\nend\n")
+            (repo / ".git").mkdir()
+            env = {"TMPDIR": str(base / "state")}
+            (base / "state").mkdir()
+
+            for command in ("cd apps/engine && mix compile --force",
+                            "cd 'apps/engine' && mix compile --force",
+                            "mix compile --force"):
+                shutil.rmtree(base / "state", ignore_errors=True)
+                (base / "state").mkdir()
+                result = run_hook("elixir_build_guard.sh", repo,
+                                  self._bash_payload(repo, command), env)
+                self.assertTrue(result.stdout.strip(),
+                                f"guard missed from repo root: {command}")
+
+    def test_build_guard_states_the_retry_window(self):
+        """"Run it again" without a deadline invites a denial after the window."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._mix_project(base)
+            env = {"TMPDIR": str(base / "state")}
+            (base / "state").mkdir()
+            result = run_hook("elixir_build_guard.sh", repo,
+                              self._bash_payload(repo, "mix compile --force"), env)
+            reason = json.loads(result.stdout)["hookSpecificOutput"][
+                "permissionDecisionReason"]
+            self.assertIn("within 5 minutes", reason)
+
+    def test_manifests_disclose_the_deny_hook(self):
+        """A plugin that denies tool calls may not describe itself as advisory."""
+        codex = json.loads((ROOT / ".codex-plugin/plugin.json").read_text())
+        claude = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
+        self.assertIn("DENIES", codex["interface"]["longDescription"])
+        self.assertIn("SCRY_BUILD_GUARD=0", codex["interface"]["longDescription"])
+        self.assertIn("DenyToolCall", codex["interface"]["capabilities"])
+        self.assertIn("denies", claude["description"])
+        self.assertNotIn("quiet, advisory session-start context",
+                         codex["interface"]["longDescription"])
 
     def test_fleet_is_silent_for_only_current_codex_session(self):
         with tempfile.TemporaryDirectory() as td:

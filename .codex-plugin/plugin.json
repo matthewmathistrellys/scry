@@ -1,7 +1,7 @@
 {
   "name": "scry",
-  "version": "1.9.1",
-  "description": "Session-start checks for codebase architecture, the running stack, repository health, concurrent agent activity, and machine pressure.",
+  "version": "1.9.2",
+  "description": "Session-start checks for codebase architecture, the running stack, repository health, concurrent agent activity, and machine pressure, plus a two-strike guard on expensive Elixir force-rebuilds.",
   "author": {
     "name": "Matthew Mathis",
     "url": "https://github.com/matthewmathistrellys"
@@ -19,11 +19,12 @@
   "interface": {
     "displayName": "Scry",
     "shortDescription": "See repository and machine state at session start",
-    "longDescription": "Adds quiet, advisory session-start context about codebase architecture, the stack the system actually runs on (read from live config, not from documentation), repository hygiene, concurrent Claude and Codex activity, and local machine pressure.",
+    "longDescription": "Adds session-start context about codebase architecture, the stack the system actually runs on (read from live config, not from documentation), repository hygiene, concurrent Claude and Codex activity, and local machine pressure. Also installs one PreToolUse hook that DENIES a first attempt at an artifact-discarding Elixir rebuild (`mix compile --force`, `rm -rf _build`) and states its cost; running the command again within five minutes passes through untouched. Set SCRY_BUILD_GUARD=0 to disable that hook.",
     "developerName": "Matthew Mathis",
     "category": "Developer Tools",
     "capabilities": [
-      "Read"
+      "Read",
+      "DenyToolCall"
     ],
     "websiteURL": "https://github.com/matthewmathistrellys/scry",
     "defaultPrompt": [

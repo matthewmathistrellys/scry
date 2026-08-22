@@ -161,9 +161,16 @@ Silence is the default and the feature. A check that reports nothing is
 reporting something: *nothing here needs your attention.* Every threshold is
 overridable — see [Tuning](#tuning).
 
-Two signals are deliberate exceptions. Deploy drift never stays silent **once
-configured** — see below; unconfigured, it says nothing, since a plugin with no
-running service can never satisfy it. So does `stack.sh`: a stale doc crosses no threshold and trips no alarm,
+Four signals are deliberate exceptions, and the list is meant to be exhaustive —
+a doctrine that quietly accumulates unlisted exceptions is just a preference.
+Deploy drift never stays silent **once configured** (unconfigured it says
+nothing, since a repo with no running service can never satisfy it); the doc
+provenance census reports whenever instruction files exist; the stack summary
+reports whenever it finds config; and the Ash domain map reports whenever a mix
+project exists. The first two were granted exemptions previously; the last two
+were added deliberately (Matt, 2026-08-21/22) on the grounds that a stale doc
+crosses no threshold and trips no alarm, so orientation facts have to be stated
+rather than waited for. So does `stack.sh`: a stale doc crosses no threshold and trips no alarm,
 so the stack is stated every session rather than only when something looks
 wrong. It pays for the exemption by being at most six lines.
 

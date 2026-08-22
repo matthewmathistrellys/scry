@@ -47,8 +47,16 @@ SKIP_DIRS = {
     ".pytest_cache", "docs", ".terraform", "vendor", "site-packages",
 }
 
-# Host fingerprint -> provider. Matched against the HOST of a role
-# variable, never against free text anywhere in the repo.
+# Host fingerprint -> provider. Matched against the HOST of a role variable,
+# never against free text anywhere in the repo.
+#
+# Entries are tried IN ORDER and most-specific must come first, because a
+# substring match is greedy: `internal` sitting above `host.docker.internal`
+# made the docker entry dead code and labelled ANY host containing the
+# substring -- `db.internal.mycorp.com` -- as Fly. A confidently wrong
+# provider label is the exact failure this scanner was built to kill, so the
+# two ambiguous fingerprints now match as SUFFIXES (leading ".") rather than
+# as substrings. Found by Fable review, 2026-08-22.
 DB_HOSTS = [
     ("neon.tech", "Neon"),
     ("supabase.co", "Supabase"),
@@ -64,11 +72,11 @@ DB_HOSTS = [
     ("mongodb.net", "MongoDB Atlas"),
     ("upstash.io", "Upstash"),
     ("azure.com", "Azure"),
-    ("flycast", "Fly.io (internal)"),
-    ("internal", "Fly.io (internal)"),
+    ("host.docker.internal", "local (docker)"),   # before .internal
+    (".flycast", "Fly.io (internal)"),             # suffix
+    (".internal", "Fly.io (internal)"),            # suffix
     ("localhost", "local"),
     ("127.0.0.1", "local"),
-    ("host.docker.internal", "local (docker)"),
 ]
 
 # Env var NAMES that bind a provider to a role. Value never read.
@@ -132,8 +140,17 @@ def host_of(value: str) -> tuple[str, str]:
 
 
 def provider_for(host: str) -> str:
+    """First matching fingerprint wins, so DB_HOSTS order is load-bearing.
+
+    A fingerprint starting with "." matches only as a suffix; anything else
+    matches as a substring. Suffix mode exists because `.internal` and
+    `.flycast` are ordinary words that appear inside unrelated hostnames.
+    """
     for fingerprint, name in DB_HOSTS:
-        if fingerprint in host:
+        if fingerprint.startswith("."):
+            if host == fingerprint[1:] or host.endswith(fingerprint):
+                return name
+        elif fingerprint in host:
             return name
     return ""
 
@@ -321,9 +338,10 @@ def render(db_roles: dict, env_names: set, facts: dict) -> str:
 
     header = ("Stack (SessionStart, read from live config — fly.toml, .env, manifests; "
               "docs deliberately not consulted):")
-    footer = ("Database provider is bound to the variable that owns the role, so it reflects "
-              "what the app connects to today. Service list comes from env var NAMES — proof a "
-              "service is WIRED, not that it is in use.")
+    footer = ("Database provider is bound to the variable that owns the role — this is what THIS "
+              "MACHINE connects to, read from local .env; production's binding lives in the deploy "
+              "platform's secrets and is not readable offline. Service list comes from env var "
+              "NAMES — proof a service is WIRED, not that it is in use.")
     return "\n".join([header] + lines + [footer])
 
 

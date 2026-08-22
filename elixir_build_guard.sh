@@ -30,6 +30,15 @@ set -uo pipefail
 payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 
+# This hook matches every Bash call in every repo, so the overwhelmingly
+# common case -- a command that could not possibly be a force-rebuild -- must
+# not pay for a Python interpreter launch. Cheap substring gate first; the
+# real (anchored, false-positive-resistant) matching still happens below.
+case "$payload" in
+  *--force*|*_build*|*clean*|*deps*) ;;
+  *) exit 0 ;;
+esac
+
 BUILD_PAYLOAD="$payload" python3 - <<'PY'
 import hashlib
 import json
@@ -83,8 +92,56 @@ def nearest_mix_root(start):
     return ""
 
 
+def cd_prefix_target(command, cwd):
+    """Resolve a leading `cd <path> &&` so the guard sees the real project.
+
+    Compound commands are the normal shape an agent emits, and `cd apps/engine
+    && mix compile --force` from a repo root that has no mix.exs of its own
+    walked up to nothing and was silently ALLOWED -- the guard failing to
+    guard the exact monorepo layout that motivated this evening's work. Same
+    up-from-cwd assumption commit ebc4aed removed from architecture.sh.
+    Found by Fable review, 2026-08-22.
+    """
+    m = re.match(r"""\s*cd\s+(?:'([^']+)'|"([^"]+)"|([^\s;&|]+))\s*(?:&&|;)""", command)
+    if not m:
+        return ""
+    target = m.group(1) or m.group(2) or m.group(3)
+    target = os.path.expanduser(target)
+    resolved = target if os.path.isabs(target) else os.path.join(cwd, target)
+    return os.path.abspath(resolved)
+
+
+def any_mix_project_below(root, limit_depth=3):
+    """Last resort: an Elixir project somewhere under the repo root."""
+    root = os.path.abspath(root)
+    skip = {".git", "deps", "_build", "node_modules", ".worktrees", "worktrees"}
+    for cur, dirs, files in os.walk(root):
+        dirs[:] = [x for x in dirs if x not in skip]
+        if cur[len(root):].count(os.sep) > limit_depth:
+            dirs[:] = []
+            continue
+        if "mix.exs" in files:
+            return cur
+    return ""
+
+
 cwd = d.get("cwd") or os.getcwd()
-mix_root = nearest_mix_root(cwd)
+
+# Prefer the directory the command actually runs in.
+cd_target = cd_prefix_target(command, cwd)
+mix_root = nearest_mix_root(cd_target) if cd_target else ""
+if not mix_root:
+    mix_root = nearest_mix_root(cwd)
+if not mix_root:
+    git_root = ""
+    cur = os.path.abspath(cwd)
+    while cur != "/":
+        if os.path.isdir(os.path.join(cur, ".git")):
+            git_root = cur
+            break
+        cur = os.path.dirname(cur)
+    if git_root:
+        mix_root = any_mix_project_below(git_root)
 if not mix_root:
     # `rm -rf _build` outside an Elixir project is somebody else's business.
     sys.exit(0)
@@ -153,7 +210,7 @@ Try these first:
   • Stale-artifact symptoms usually mean a compile-time dependency cascade, not a corrupt build. `mix xref graph --format stats` and `mix compile --profile time` find the real culprit; forcing a rebuild only hides it until next time.
   • For exploring or checking behaviour, keep a session running (`iex -S mix phx.server`) and evaluate against it instead of recompiling.{tidewave_note}
 
-If you genuinely need the full rebuild, run it again and it will go through — this gate only stops the first, reflexive attempt."""
+If you genuinely need the full rebuild, run it again within {window // 60} minutes and it will go through untouched — this gate only stops the first, reflexive attempt."""
 
 print(json.dumps({
     "hookSpecificOutput": {
