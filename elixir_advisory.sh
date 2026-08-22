@@ -240,7 +240,100 @@ $out
 Ash.Query.for_read (or for_read/2,3) called without an actor: option. This maps to a real, documented Ash security advisory — GHSA-pcxq-fjp3-r752 (github.com/ash-project/ash/security/advisories/GHSA-pcxq-fjp3-r752). Calling for_read without the actor, then passing the actor later (e.g. only on the downstream read/read! call), can let policies evaluate without actor context — silently skipping authorization. The correct form is for_read(:action, %{}, actor: current_user) |> read!() — actor goes on for_read itself, not (only) on the downstream call.")
 }
 
-EXTRA_CHECKS=(check_credo check_ash_for_read_without_actor)
+# Ash write/read calls issued from OUTSIDE a resource or domain module without
+# a `tenant:` option, in a project that actually declares multitenancy.
+#
+# Why this and not a general "always pass tenant" rule: inside a resource or
+# domain the tenant is carried by the surrounding Ash context, so requiring it
+# there would fire constantly and mean nothing. The dangerous shape is the
+# call site in a LiveView, controller, Oban worker or plain module, where
+# nothing supplies the tenant implicitly and omitting it silently widens the
+# query to every tenant. That is a cross-tenant read, and it looks exactly
+# like a working feature until someone sees another firm's data.
+#
+# Gated three ways to keep it quiet: the project must depend on ash, it must
+# contain at least one `multitenancy` block (otherwise the concept does not
+# apply), and the edited file must not itself be a resource or domain.
+check_ash_call_without_tenant() {
+  mix_has_dep "ash" || return 0
+  grep -rqE "^\\s*multitenancy\\b" "$mix_root/lib" 2>/dev/null || return 0
+  grep -qE "^\\s*use\\s+Ash\\.(Resource|Domain)\\b" "$file_path" 2>/dev/null && return 0
+
+  local out
+  out="$(python3 -c '
+import re, sys
+
+try:
+    content = open(sys.argv[1], "r", errors="replace").read()
+except OSError:
+    sys.exit(0)
+
+lines = content.splitlines()
+starts, pos = [], 0
+for line in lines:
+    starts.append(pos)
+    pos += len(line) + 1
+
+def line_of(idx):
+    lo, hi = 0, len(starts) - 1
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if starts[mid] <= idx:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo + 1
+
+# Ash.read/create/update/destroy and their bang forms, plus bulk variants.
+CALL = re.compile(r"\bAsh\.(read|create|update|destroy|bulk_create|bulk_update|bulk_destroy)!?\(")
+
+found = []
+for m in CALL.finditer(content):
+    i, depth, n = m.end(), 1, len(content)
+    while i < n and depth > 0:
+        c = content[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        i += 1
+    args = content[m.end():i - 1] if depth == 0 else content[m.end():min(m.end() + 400, n)]
+    if "tenant:" in args:
+        continue
+    lineno = line_of(m.start())
+    snippet = lines[lineno - 1].strip() if lineno - 1 < len(lines) else ""
+    found.append("  line %d: %s" % (lineno, snippet))
+
+if found:
+    print("\n".join(found))
+' "$file_path")"
+  [ -n "$out" ] || return 0
+  findings+=("[ash-call-without-tenant] $(basename "$file_path"):
+$out
+
+This project declares multitenancy, and these Ash calls are made from a module that is neither a resource nor a domain — so nothing supplies the tenant implicitly. Without an explicit tenant: option the query is not scoped to a tenant at all: a read returns rows across every tenant, and a write can land against the wrong one. Nothing raises; it looks like a working feature until someone sees another organisation's data. Pass tenant: explicitly (e.g. Ash.read(query, actor: current_user, tenant: current_tenant)), or set it on the query/changeset upstream with Ash.Query.set_tenant/2 or Ash.Changeset.set_tenant/2. If this call is deliberately cross-tenant (an admin or system path), make that explicit and reviewed rather than implicit.")
+}
+
+# Editing a Spark compile-time extension (a DSL extension, transformer or
+# verifier). Ash resources ARE Spark DSLs, and an extension's work happens at
+# COMPILE time, so every resource that uses it carries a compile-time
+# dependency on this module. Touching it invalidates all of them at once and
+# the next `mix compile` walks the whole resource graph — minutes, not
+# seconds, on a large domain set.
+#
+# Deliberately does not try to count the affected resources. Doing that needs
+# an index that has to be built and kept correct, and the number is not what
+# changes the decision: knowing the edit is expensive BEFORE running compile is
+# the whole value. Cheap, exact, and it cannot drift.
+check_spark_extension_edit() {
+  mix_has_dep "spark" || return 0
+  grep -qE "use[[:space:]]+Spark\\.Dsl\\.(Extension|Transformer|Verifier)|use[[:space:]]+Ash\\.Resource\\.(Transformer|Verifier)|use[[:space:]]+Spark\\.Dsl\\.Fragment" "$file_path" 2>/dev/null || return 0
+  findings+=("[spark-extension-edit] $(basename "$file_path"):
+
+This file is a Spark compile-time extension (a DSL extension, transformer or verifier). Every resource or domain that uses it depends on it at COMPILE time, so this edit invalidates all of them at once — the next \`mix compile\` or \`mix test\` rebuilds the whole resource graph, which is minutes rather than seconds on a large domain set. That is expected here, not a fault: budget for it rather than discovering it mid-command, and batch other extension edits into the same compile instead of paying the cost once per change.")
+}
+
+EXTRA_CHECKS=(check_credo check_ash_for_read_without_actor check_ash_call_without_tenant check_spark_extension_edit)
 
 # To add anti-pattern #4 (or beyond) that needs more than a regex: write a
 # check_<name> function above this line, then list its name here.

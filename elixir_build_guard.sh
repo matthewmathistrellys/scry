@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # elixir_build_guard.sh — Claude Code PreToolUse hook (Bash): a speed bump in
-# front of the commands that throw away compiled Elixir artifacts.
+# front of two classes of expensive Elixir mistake — commands that throw away
+# compiled artifacts (cost: 20+ minutes), and migrations run against a schema
+# the resources have already moved past (cost: a bug that reaches production).
 #
 # `mix compile --force`, `mix deps.compile --force`, `mix clean --deps` and
 # `rm -rf _build` are not destructive -- nothing is corrupted and nothing needs
@@ -35,7 +37,7 @@ payload="$(cat 2>/dev/null || true)"
 # not pay for a Python interpreter launch. Cheap substring gate first; the
 # real (anchored, false-positive-resistant) matching still happens below.
 case "$payload" in
-  *--force*|*_build*|*clean*|*deps*) ;;
+  *--force*|*_build*|*clean*|*deps*|*migrate*|*ecto.reset*) ;;
   *) exit 0 ;;
 esac
 
@@ -73,8 +75,27 @@ PATTERNS = [
     (r"\brm\s+(?:-[a-zA-Z]+\s+)+[^|;&]*(?<!\w)deps\b", "rm -rf deps"),
 ]
 
+# Migrations run against a stale schema. In Ash, the migration files are
+# GENERATED from the resources by `mix ash.codegen`; editing a resource's
+# attributes/relationships/identities and then migrating without regenerating
+# applies yesterday's schema. Nothing fails locally -- the resource compiles
+# against a column that does not exist yet, and the break surfaces in CI or
+# production instead of in the dev loop.
+MIGRATE_PATTERNS = [
+    (r"\bmix\s+(?:do\s+)?ecto\.migrate\b", "mix ecto.migrate"),
+    (r"\bmix\s+(?:do\s+)?ash[._]migrate\b", "mix ash.migrate"),
+    (r"\bmix\s+(?:do\s+)?ecto\.reset\b", "mix ecto.reset"),
+]
+
 matched = ""
+matched_kind = "rebuild"
+for pattern, label in MIGRATE_PATTERNS:
+    if re.search(pattern, command):
+        matched, matched_kind = label, "migrate"
+        break
 for pattern, label in PATTERNS:
+    if matched:
+        break
     if re.search(pattern, command):
         matched = label
         break
@@ -97,6 +118,46 @@ mix_root = projects.resolve_project(command, cwd, "mix.exs")
 if not mix_root:
     # `rm -rf _build` outside an Elixir project is somebody else's business.
     sys.exit(0)
+
+# ── Migration staleness ────────────────────────────────────────────────────
+# Pure mtime comparison: no parsing, no compile, no BEAM. If no resource file
+# is newer than the newest migration, this command is fine and we say nothing.
+def newest_mtime(root, subpaths, suffixes):
+    newest = 0.0
+    newest_name = ""
+    for sub in subpaths:
+        base = os.path.join(root, sub)
+        if not os.path.isdir(base):
+            continue
+        for cur, dirs, files in os.walk(base):
+            dirs[:] = [x for x in dirs if x not in projects.PRUNE_DIRS]
+            for name in files:
+                if not name.endswith(suffixes):
+                    continue
+                path = os.path.join(cur, name)
+                try:
+                    mtime = os.path.getmtime(path)
+                except OSError:
+                    continue
+                if mtime > newest:
+                    newest, newest_name = mtime, os.path.relpath(path, root)
+    return newest, newest_name
+
+
+if matched_kind == "migrate":
+    # Only meaningful in an Ash project -- plain Ecto migrations are written by
+    # hand, not generated, so "newer resource" implies nothing there.
+    try:
+        with open(os.path.join(mix_root, "mix.lock"), encoding="utf-8") as f:
+            if '"ash_postgres"' not in f.read():
+                sys.exit(0)
+    except OSError:
+        sys.exit(0)
+
+    res_mtime, res_name = newest_mtime(mix_root, ["lib"], (".ex",))
+    mig_mtime, _ = newest_mtime(mix_root, ["priv"], (".exs",))
+    if not res_mtime or not mig_mtime or res_mtime <= mig_mtime:
+        sys.exit(0)
 
 # ── Two-strike state ───────────────────────────────────────────────────────
 # Keyed on the project and the INTENT, never the raw command string. Keying on
@@ -163,6 +224,18 @@ Try these first:
   • For exploring or checking behaviour, keep a session running (`iex -S mix phx.server`) and evaluate against it instead of recompiling.{tidewave_note}
 
 If you genuinely need the full rebuild, run it again within {window // 60} minutes and it will go through untouched — this gate only stops the first, reflexive attempt."""
+
+if matched_kind == "migrate":
+    reason = f"""SCRY: `{matched}` is about to run, but {res_name} was modified more recently than any file under priv/.
+
+In Ash the migrations are GENERATED from the resources. If a resource's attributes, relationships or identities changed since the last generation, migrating now applies yesterday's schema — the resource then compiles against a column that does not exist, and the break surfaces in CI or production rather than here.
+
+Do this first:
+  • `mix ash.codegen --check` — tells you whether anything is actually pending, and exits clean if not.
+  • `mix ash.codegen <name>` — generates the migration for what changed.
+  • If the edit was behavioural only (a policy, an action body, a calculation), nothing needs generating and this warning is noise.
+
+Run the same command again within {window // 60} minutes and it will go through untouched."""
 
 print(json.dumps({
     "hookSpecificOutput": {

@@ -104,6 +104,43 @@ def deps_not_fetched(mix_root: str) -> bool:
     return bool(mix_root) and os.path.isdir(mix_root) and not os.path.isdir(os.path.join(mix_root, "deps"))
 
 
+BUILD_TIME_CONFIGS = ("config.exs", "dev.exs", "prod.exs", "test.exs")
+ENV_READ_RE = re.compile(r"System\.(get_env|fetch_env)")
+
+
+def build_time_env_reads(mix_root: str) -> list[str]:
+    """config/*.exs files that read env vars — the release configuration trap.
+
+    Everything except runtime.exs is evaluated at BUILD time, so a
+    `System.get_env` there captures whatever was set on the build machine or
+    CI runner and bakes it into the release. `mix phx.server` works locally,
+    CI passes, and the value is wrong only in the compiled release, where it
+    presents as "the env var is definitely set on the box but the app cannot
+    see it". Purely textual and entirely offline.
+    """
+    hits = []
+    cfg = os.path.join(mix_root, "config")
+    if not os.path.isdir(cfg):
+        return hits
+    for name in sorted(BUILD_TIME_CONFIGS):
+        path = os.path.join(cfg, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                body = f.read()
+        except OSError:
+            continue
+        # dev.exs and test.exs never ship in a release, so they are not the
+        # trap -- only config.exs (and prod.exs, which config.exs imports).
+        if name in ("dev.exs", "test.exs"):
+            continue
+        count = len(ENV_READ_RE.findall(body))
+        if count:
+            hits.append(f"config/{name} ({count})")
+    return hits
+
+
 def build_is_cold(mix_root: str) -> bool:
     """True when deps are fetched but nothing is compiled yet.
 
@@ -165,7 +202,19 @@ def main():
                     f"found under {project}) — run `mix deps.get` before anything here "
                     "compiles."
                 )
-            elif build_is_cold(project):
+            env_traps = build_time_env_reads(project)
+            if env_traps:
+                body.append(
+                    f"BUILD-TIME CONFIG READS ENV in {project}: {', '.join(env_traps)}. "
+                    "Everything outside config/runtime.exs is evaluated when the release "
+                    "is BUILT, so these capture the build machine's environment (or nil) "
+                    "and bake it in. It works under `mix phx.server` and passes CI; it is "
+                    "wrong only in the compiled release, where it looks like a missing "
+                    "env var that is definitely set. Move them to config/runtime.exs, or "
+                    "guard with Application.compile_env/3 so a mismatch crashes at boot "
+                    "instead of running on a stale value."
+                )
+            if build_is_cold(project):
                 body.append(
                     f"Elixir build is COLD in {project} (deps fetched, nothing compiled "
                     "yet) — the next `mix compile`/`mix test` is a FULL build of every "

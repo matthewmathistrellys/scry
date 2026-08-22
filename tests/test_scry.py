@@ -653,6 +653,172 @@ class ScryHookTests(unittest.TestCase):
             self.assertIn("1 stash entry", stashed)
             self.assertIn("no branch", stashed)
 
+    def _ash_migrate_repo(self, base, resource_newer):
+        repo = base / "repo"
+        (repo / "lib/app").mkdir(parents=True)
+        (repo / "priv/repo/migrations").mkdir(parents=True)
+        (repo / ".git").mkdir()
+        (repo / "mix.exs").write_text("defmodule M do\nend\n")
+        (repo / "mix.lock").write_text('"ash_postgres": {:hex, :ash_postgres, "2.0"},\n')
+        first, second = ("priv/repo/migrations/001.exs", "lib/app/thing.ex")
+        if not resource_newer:
+            first, second = second, first
+        (repo / first).write_text("a")
+        os.utime(repo / first, (1_700_000_000, 1_700_000_000))
+        (repo / second).write_text("b")
+        os.utime(repo / second, (1_700_000_100, 1_700_000_100))
+        return repo
+
+    def test_migrate_guard_warns_when_a_resource_is_newer_than_the_migrations(self):
+        """In Ash the migrations are GENERATED, so a newer resource means stale DDL.
+
+        Migrating without regenerating applies yesterday's schema; the resource
+        then compiles against a column that does not exist and the break lands
+        in CI or production rather than in the dev loop.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._ash_migrate_repo(base, resource_newer=True)
+            env = {"TMPDIR": str(base / "state")}
+            (base / "state").mkdir()
+
+            first = run_hook("elixir_build_guard.sh", repo,
+                             self._bash_payload(repo, "mix ecto.migrate"), env)
+            payload = json.loads(first.stdout)
+            reason = payload["hookSpecificOutput"]["permissionDecisionReason"]
+            self.assertEqual(
+                payload["hookSpecificOutput"]["permissionDecision"], "deny")
+            self.assertIn("ash.codegen", reason)
+            self.assertIn("thing.ex", reason)
+
+            # Second strike passes, same as the rebuild guard.
+            second = run_hook("elixir_build_guard.sh", repo,
+                              self._bash_payload(repo, "mix ecto.migrate"), env)
+            self.assertEqual(second.stdout.strip(), "")
+
+    def test_migrate_guard_is_silent_when_nothing_is_pending(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._ash_migrate_repo(base, resource_newer=False)
+            env = {"TMPDIR": str(base / "state")}
+            (base / "state").mkdir()
+            result = run_hook("elixir_build_guard.sh", repo,
+                              self._bash_payload(repo, "mix ecto.migrate"), env)
+            self.assertEqual(result.stdout.strip(), "")
+
+    def test_migrate_guard_never_fires_outside_ash_postgres(self):
+        """Plain Ecto migrations are hand-written, so 'newer resource' means nothing."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._ash_migrate_repo(base, resource_newer=True)
+            (repo / "mix.lock").write_text('"ecto": {:hex, :ecto, "3.0"},\n')
+            env = {"TMPDIR": str(base / "state")}
+            (base / "state").mkdir()
+            result = run_hook("elixir_build_guard.sh", repo,
+                              self._bash_payload(repo, "mix ecto.migrate"), env)
+            self.assertEqual(result.stdout.strip(), "")
+
+    def _elixir_edit(self, path):
+        return {"tool_name": "Edit", "tool_input": {"file_path": str(path)}}
+
+    def _ash_tenant_repo(self, base, multitenant=True):
+        repo = base / "repo"
+        (repo / "lib/app").mkdir(parents=True)
+        (repo / "mix.exs").write_text("defmodule M do\nend\n")
+        (repo / "mix.lock").write_text('"ash": {:hex, :ash, "3.0"},\n')
+        body = "defmodule App.Thing do\n  use Ash.Resource\n"
+        if multitenant:
+            body += "  multitenancy do\n    strategy :attribute\n  end\n"
+        (repo / "lib/app/thing.ex").write_text(body + "end\n")
+        return repo
+
+    def test_advisory_flags_an_ash_call_without_tenant_outside_a_resource(self):
+        """A tenantless Ash call from a LiveView reads across every tenant.
+
+        Nothing raises. It looks like a working feature until someone sees
+        another organisation's data.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._ash_tenant_repo(Path(td))
+            live = repo / "lib/app/live.ex"
+            live.write_text(
+                "defmodule AppWeb.Live do\n  use Phoenix.LiveView\n"
+                "  def mount(_, _, s) do\n"
+                "    Ash.read(App.Thing, actor: s.assigns.user)\n"
+                "  end\nend\n")
+            out = context(run_hook("elixir_advisory.sh", repo,
+                                   self._elixir_edit(live)))
+            self.assertIn("ash-call-without-tenant", out)
+            self.assertIn("line 4", out)
+
+    def test_advisory_tenant_check_respects_its_three_gates(self):
+        """Silent when tenant is passed, inside a resource, or with no multitenancy."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._ash_tenant_repo(Path(td))
+
+            passed = repo / "lib/app/ok.ex"
+            passed.write_text(
+                "defmodule AppWeb.Ok do\n  def m(s) do\n"
+                "    Ash.read(App.Thing, tenant: s.org)\n  end\nend\n")
+            self.assertEqual(
+                context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(passed))), "")
+
+            inside = repo / "lib/app/res.ex"
+            inside.write_text(
+                "defmodule App.Res do\n  use Ash.Resource\n"
+                "  def f, do: Ash.read(App.Thing)\nend\n")
+            self.assertEqual(
+                context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(inside))), "")
+
+        with tempfile.TemporaryDirectory() as td:
+            plain = self._ash_tenant_repo(Path(td), multitenant=False)
+            caller = plain / "lib/app/caller.ex"
+            caller.write_text(
+                "defmodule AppWeb.C do\n  def m, do: Ash.read(App.Thing)\nend\n")
+            self.assertEqual(
+                context(run_hook("elixir_advisory.sh", plain, self._elixir_edit(caller))), "")
+
+    def test_advisory_warns_that_a_spark_extension_edit_is_expensive(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            (repo / "lib").mkdir(parents=True)
+            (repo / "mix.exs").write_text("defmodule M do\nend\n")
+            (repo / "mix.lock").write_text('"spark": {:hex, :spark, "2.0"},\n')
+            ext = repo / "lib/ext.ex"
+            ext.write_text("defmodule App.Ext do\n  use Spark.Dsl.Transformer\nend\n")
+            out = context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(ext)))
+            self.assertIn("spark-extension-edit", out)
+            self.assertIn("COMPILE time", out)
+
+            plain = repo / "lib/plain.ex"
+            plain.write_text("defmodule App.P do\n  def f, do: 1\nend\n")
+            self.assertEqual(
+                context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(plain))), "")
+
+    def test_architecture_flags_env_reads_in_build_time_config(self):
+        """config.exs is evaluated at BUILD time; env read there bakes in CI's value."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            (repo / "lib").mkdir(parents=True)
+            (repo / "config").mkdir(parents=True)
+            (repo / "deps").mkdir()
+            (repo / "_build").mkdir()
+            (repo / "mix.exs").write_text("defmodule M do\nend\n")
+            (repo / "config/config.exs").write_text(
+                'import Config\nconfig :app, k: System.get_env("SECRET")\n')
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+
+            out = context(run_hook("architecture.sh", repo, {}, {"HOME": td}))
+            self.assertIn("BUILD-TIME CONFIG READS ENV", out)
+            self.assertIn("runtime.exs", out)
+
+            # Correct placement is silent.
+            (repo / "config/config.exs").write_text("import Config\n")
+            (repo / "config/runtime.exs").write_text(
+                'import Config\nconfig :app, k: System.get_env("SECRET")\n')
+            clean = context(run_hook("architecture.sh", repo, {}, {"HOME": td}))
+            self.assertNotIn("BUILD-TIME CONFIG", clean)
+
     def test_fleet_is_silent_for_only_current_codex_session(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
