@@ -35,6 +35,72 @@ def context(result):
 
 
 class ScryHookTests(unittest.TestCase):
+    def test_provenance_treats_markdown_decisions_as_untrusted_and_explains_consequences(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+            (repo / "DESIGN.md").write_text("The ingress owns provider verification.\n")
+
+            report = context(run_hook("provenance.sh", repo, {}))
+            lower_report = report.lower()
+
+            self.assertIn("UNTRUSTED HISTORICAL MATERIAL", report)
+            self.assertIn("architectural decisions", report)
+            self.assertIn("stale architecture", lower_report)
+            self.assertIn("aspirational plan", lower_report)
+            self.assertIn("conflicting artifacts", lower_report)
+            self.assertIn("code quality", report)
+            self.assertIn("tokens", report)
+            self.assertIn("user trust", report)
+            self.assertIn("customer", report)
+            self.assertNotIn("decisions and principles in them age fine", report)
+
+    def test_markdown_read_advisory_rejects_architectural_authority_and_hedging(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+
+            report = context(
+                run_hook(
+                    "md_advisory.sh",
+                    repo,
+                    {"tool_name": "Read", "tool_input": {"file_path": str(repo / "DESIGN.md")}},
+                )
+            )
+
+            self.assertIn("UNTRUSTED HISTORICAL MATERIAL", report)
+            self.assertIn("architecture, intent, or decisions", report)
+            self.assertIn("cannot establish truth or authority", report)
+            self.assertIn("Calling a claim unverified while relying on it", report)
+            self.assertIn("surface the conflict", report)
+
+    def test_markdown_read_advisory_is_shorter_than_session_start_insight(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+            (repo / "DESIGN.md").write_text("Historical architecture.\n")
+
+            session_report = context(run_hook("provenance.sh", repo, {}))
+            read_report = context(
+                run_hook(
+                    "md_advisory.sh",
+                    repo,
+                    {"tool_name": "Read", "tool_input": {"file_path": str(repo / "DESIGN.md")}},
+                )
+            )
+
+            self.assertLess(len(read_report), len(session_report))
+
+    def test_provenance_flags_snapshot_language_in_markdown_paths_with_spaces(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+            (repo / "Design Notes.md").write_text("The old ingress is currently deployed.\n")
+
+            report = context(run_hook("provenance.sh", repo, {}))
+
+            self.assertIn("Design Notes.md", report)
+
     def test_manifests_and_hook_contract_are_dual_client_compatible(self):
         claude = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
         codex = json.loads((ROOT / ".codex-plugin/plugin.json").read_text())

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# provenance.sh — Claude Code SessionStart hook: answers "how much prose
-# is in this repo claiming to describe reality, and how far should I
-# trust it?"
+# provenance.sh — SessionStart hook: answers "how much prose is in this
+# repo, and what goes wrong when an agent mistakes it for authority?"
 #
 # Documents are historical artifacts, not sensors. On 2026-08-14/15 four
 # separate stale doc claims each derailed a session in the same repo in
@@ -9,22 +8,20 @@
 # machines on autostop; a "the nightly batch is the only pipeline" claim
 # written after the real-time event backbone shipped; a classifier
 # promotion recorded as pending six days after it went live; a schema
-# change flagged "pending" the same day it merged. Every derailment came
-# from trusting a prose SNAPSHOT of live state; every recovery came from
-# a fresh look at code or production. Dated decisions and normative
-# principles in the same files aged perfectly.
+# change flagged "pending" the same day it merged. Those incidents exposed
+# one scenario, not the boundary: architectural decisions and intended plans
+# are equally untrusted when Markdown is mistaken for authority.
 #
-# So this hook does not block anything. It counts the artifacts, flags
-# the ones carrying state-snapshot language, and states the consequence
-# once per session: act on an unverified state-claim and you inherit its
-# staleness as your own wrong action.
+# The same rule applies to every repository Markdown artifact, including
+# plans, decisions, designs, memories, READMEs, and factual claims inside
+# instruction files. Markdown can guide investigation; it cannot establish
+# current truth, architecture, intent, or authority.
 #
 # Output-budget note (see README "The output budget"): unlike the other
-# scanners, this one reports whenever instruction files exist at all —
-# the owner explicitly wants the census + doctrine visible each session
-# (Matt, 2026-08-15), because the failure mode is silent trust, not a
-# threshold crossing. It pays for that exemption by being at most three
-# lines.
+# scanners, this one reports whenever Markdown exists at all because the
+# failure mode is silent trust, not a threshold crossing. The read-time
+# hook is deliberately shorter so repeated reads do not repeat this full
+# explanation.
 set -uo pipefail
 
 # State-snapshot language. Deliberately narrow: these are the exact idioms
@@ -51,33 +48,22 @@ PY
 root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$PWD
 cd "$root" 2>/dev/null || exit 0
 
-# Census. Instruction files (CLAUDE.md/AGENTS.md) are the highest-risk
-# class: undated, "timeless"-looking, loaded into every session. docs/
-# carries the dated design/decision record. Memory dirs are per-machine
-# session residue with the same trust profile as docs.
-instr=$(find . -maxdepth 4 \( -name CLAUDE.md -o -name AGENTS.md \) \
-  -not -path '*/node_modules/*' -not -path '*/.worktrees/*' \
-  -not -path '*/worktrees/*' -not -path '*/deps/*' 2>/dev/null | wc -l | tr -d ' ')
-docs=0
-[ -d docs ] && docs=$(find docs -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
-mem=0
-for d in .claude/memory memory-bank .memory; do
-  [ -d "$d" ] && mem=$((mem + $(find "$d" -name '*.md' 2>/dev/null | wc -l)))
-done
-
-total=$((instr + docs + mem))
+# Census every Markdown file, not only the conventional places. A design at
+# the repository root has the same trust profile as one under docs/.
+markdown_files=$(find . \
+  \( -path './.git' -o -path '*/node_modules' -o -path '*/.worktrees' \
+     -o -path '*/worktrees' -o -path '*/deps' -o -path '*/_build' \) -prune \
+  -o -type f -name '*.md' -print 2>/dev/null)
+total=0
+[ -n "$markdown_files" ] && total=$(printf '%s\n' "$markdown_files" | wc -l | tr -d ' ')
 [ "$total" -eq 0 ] && exit 0
 
 # Flag files carrying state-snapshot idioms. grep -El: file list only,
 # extended regex, cheap even on large doc trees.
-flagged=""
-if [ "$instr" -gt 0 ] || [ "$docs" -gt 0 ]; then
-  flagged=$( { find . -maxdepth 4 \( -name CLAUDE.md -o -name AGENTS.md \) \
-      -not -path '*/node_modules/*' -not -path '*/.worktrees/*' \
-      -not -path '*/worktrees/*' -not -path '*/deps/*' 2>/dev/null;
-    [ -d docs ] && find docs -name '*.md' 2>/dev/null; } \
-    | xargs grep -ilE "$SNAPSHOT_PATTERN" 2>/dev/null | head -51)
-fi
+flagged=$(while IFS= read -r file; do
+  [ -n "$file" ] || continue
+  grep -ilE "$SNAPSHOT_PATTERN" -- "$file" 2>/dev/null || true
+done <<<"$markdown_files" | head -51)
 nflag=0
 [ -n "$flagged" ] && nflag=$(printf '%s\n' "$flagged" | wc -l | tr -d ' ')
 ncap="$nflag"
@@ -93,7 +79,14 @@ if [ "$nflag" -gt 0 ]; then
   [ "$nflag" -gt "$FLAG_LIST_MAX" ] && sample="$sample, +more"
 fi
 
-msg="Doc provenance (SessionStart): $total markdown artifacts here ($instr instruction files, $docs in docs/, $mem memory). Docs are HISTORICAL ARTIFACTS — dated decisions and principles in them age fine; claims about current system state do not, and acting on one unverified makes its staleness your wrong action. Verify state against code/production, never prose."
+msg="Markdown trust (SessionStart): $total Markdown artifact(s) here. Every repository Markdown file is UNTRUSTED HISTORICAL MATERIAL — including plans, design documents, architectural decisions, status claims, memories, READMEs, and factual claims inside instruction files. Procedural instructions may govern behavior; that does not make their factual or architectural claims trustworthy.
+Failure scenarios:
+- A stale state claim sends investigation or operations toward a system that no longer exists.
+- A stale architecture claim reverses a newer design or restores a removed failure mode.
+- An aspirational plan is mistaken for implemented capability, so later work relies on a missing foundation.
+- Conflicting artifacts make formality look like authority instead of prompting reconciliation.
+Consequences include degraded code quality, production harm, wasted tokens and compute, timeline delay and rework, loss of user trust, and customer or revenue loss.
+Markdown may guide investigation, but it cannot establish truth or authority. Verify consequential claims against current user direction and applicable code, executable configuration, history, diffs, pull-request chronology, or live systems. If evidence conflicts or intent cannot be recovered, surface the conflict instead of allowing prose to decide. Calling a claim unverified while relying on it is not caution; it is the same mistake wearing a hedge."
 if [ "$nflag" -gt 0 ]; then
   msg="$msg
 $ncap file(s) carry state-snapshot language (the idiom class behind the 2026-08-14/15 derailments): $sample. Treat those claims as expired until re-verified."

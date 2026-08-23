@@ -4,12 +4,12 @@
 [Codex](https://developers.openai.com/codex/) `SessionStart` checks that give a
 fresh agent session — or a fresh you — the state of the world the instant it
 starts, instead of making it dig or making you remember to ask. Both clients
-run the same six scripts from this repository; only their package manifests
+run the same shared scripts from this repository; only their package manifests
 are client-specific.
 
 A session is told its working directory and a git snapshot, and nothing else.
 Not what else is running, not what the last session was doing, not what the
-machine is carrying. Six independent checks fill that in.
+machine is carrying. Independent checks and advisories fill that in.
 
 | | Answers |
 |---|---|
@@ -19,6 +19,7 @@ machine is carrying. Six independent checks fill that in.
 | **`health.sh`** | Is this repo in good shape? |
 | **`fleet.sh`** | What else is happening *right now*? |
 | **`pressure.sh`** | What shape is this machine in? |
+| **Markdown trust** | What goes wrong when repository prose is mistaken for authority? |
 
 - **`architecture.sh`** — a map of the codebase. It is a *dispatcher*, not a
   language scanner: it detects the stack and hands off to `scanners/`
@@ -78,6 +79,15 @@ machine is carrying. Six independent checks fill that in.
     application traffic and wrong for DDL — advisory locks and prepared
     statements do not survive transaction-mode multiplexing — so a pooled
     `DATABASE_URL` with no `DIRECT_*` counterpart is flagged.
+- **Markdown trust** — `provenance.sh` establishes at session start that every
+  repository Markdown file is untrusted historical material, including plans,
+  design documents, architectural decisions, status claims, memories, READMEs,
+  and factual claims inside instruction files. It names the main failure
+  scenarios and their consequences for code quality, production, tokens,
+  timelines, user trust, and customers. `md_advisory.sh` repeats the invariant
+  concisely when the dedicated Read tool opens a Markdown file. The session
+  warning is primary because shell commands and other access paths cannot all
+  be intercepted reliably.
 - **`elixir_build_guard.sh`** — a `PreToolUse` speed bump in front of the
   commands that throw away compiled Elixir artifacts: `mix compile --force`,
   `mix deps.compile --force`, `mix clean --deps`, `rm -rf _build`, `rm -rf
@@ -186,15 +196,16 @@ overridable — see [Tuning](#tuning).
 Four signals are deliberate exceptions, and the list is meant to be exhaustive —
 a doctrine that quietly accumulates unlisted exceptions is just a preference.
 Deploy drift never stays silent **once configured** (unconfigured it says
-nothing, since a repo with no running service can never satisfy it); the doc
-provenance census reports whenever instruction files exist; the stack summary
+nothing, since a repo with no running service can never satisfy it); the
+Markdown trust census reports whenever repository Markdown exists; the stack summary
 reports whenever it finds config; and the Ash domain map reports whenever a mix
 project exists. The first two were granted exemptions previously; the last two
 were added deliberately (Matt, 2026-08-21/22) on the grounds that a stale doc
 crosses no threshold and trips no alarm, so orientation facts have to be stated
 rather than waited for. So does `stack.sh`: a stale doc crosses no threshold and trips no alarm,
 so the stack is stated every session rather than only when something looks
-wrong. It pays for the exemption by being at most six lines.
+wrong. Markdown trust pays for its fuller session-start insight with a concise
+read-time reminder, avoiding a repeated token-heavy explanation.
 
 ## Example output
 
@@ -337,7 +348,7 @@ claude --plugin-dir /path/to/scry
 <details>
 <summary>Manual install, without the plugin system</summary>
 
-Copy the six scripts plus `scanners/` into `~/.claude/hooks/`, `chmod +x` them
+Copy the scripts plus `scanners/` into `~/.claude/hooks/`, `chmod +x` them
 — a non-executable hook is a **silent no-op** — and wire them into the
 `SessionStart` block of `~/.claude/settings.json`:
 
