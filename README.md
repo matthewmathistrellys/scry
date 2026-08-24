@@ -135,7 +135,8 @@ machine is carrying. Independent checks and advisories fill that in.
   - **Worktree hygiene sweep:** merged worktrees safe to remove, abandoned
     branches quietly aging, missing directories, detached HEADs.
   - **Open PRs and CI status:** every open PR with CI rollup (green, failing,
-    pending) and review state (approved, changes requested, needs review).
+    interrupted, pending, or unknown) and review state (approved, changes
+    requested, needs review).
     The session's own branch is marked. Zero config — derived from the git
     remote via `gh`. Silently skipped if `gh` isn't installed.
 - **`fleet.sh`** — how many other Claude and Codex sessions are live in this repo *and its
@@ -417,6 +418,12 @@ than having no check. The request times out after 3 seconds.
 When `gh` (the GitHub CLI) is installed and authenticated, `health.sh` lists
 every open PR in the repo with a one-line summary: PR number, branch, CI
 rollup, and review state. The session's own branch is marked `<- this session`.
+
+Successful, neutral, and intentionally skipped checks roll up as green. A
+known failure, timeout, action-required result, or startup failure takes
+precedence over checks still running. Cancelled and stale checks are reported
+as interrupted because they ended without a test verdict. Unrecognised or
+malformed completed states are unknown rather than silently healthy.
 
 No configuration needed — the git remote provides the repo. If `gh` isn't
 installed or authentication fails, the block is silently skipped (fails open).
