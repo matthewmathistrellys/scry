@@ -719,6 +719,121 @@ class ScryHookTests(unittest.TestCase):
             self.assertIn("1 stash entry", stashed)
             self.assertIn("no branch", stashed)
 
+    def _health_report_with_pr_checks(self, base, checks):
+        repo = base / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+
+        fake_bin = base / "bin"
+        fake_bin.mkdir()
+        fixture = base / "prs.json"
+        fixture.write_text(json.dumps([{
+            "number": 1141,
+            "headRefName": "fix/document-errors",
+            "statusCheckRollup": checks,
+            "reviewDecision": "",
+            "title": "Normalize document errors",
+            "isDraft": False,
+        }]))
+        gh = fake_bin / "gh"
+        gh.write_text("#!/bin/sh\ncat \"$GH_FIXTURE\"\n")
+        gh.chmod(0o755)
+
+        return context(run_hook("health.sh", repo, {}, {
+            "GH_FIXTURE": str(fixture),
+            "HOME": str(base),
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        }))
+
+    def test_health_treats_path_gated_skips_as_green(self):
+        """A skipped lane is not a mixed CI verdict when every run is healthy."""
+        with tempfile.TemporaryDirectory() as td:
+            report = self._health_report_with_pr_checks(Path(td), [
+                {"status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"status": "COMPLETED", "conclusion": "SKIPPED"},
+                {"status": "COMPLETED", "conclusion": "NEUTRAL"},
+            ])
+
+            self.assertIn("#1141 fix/document-errors -- CI green", report)
+            self.assertNotIn("CI mixed", report)
+
+    def test_health_reports_a_known_failure_before_pending_checks(self):
+        """A running lane must not hide a failure that already needs attention."""
+        with tempfile.TemporaryDirectory() as td:
+            report = self._health_report_with_pr_checks(Path(td), [
+                {"status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"status": "COMPLETED", "conclusion": "TIMED_OUT"},
+                {"status": "IN_PROGRESS", "conclusion": ""},
+            ])
+
+            self.assertIn("#1141 fix/document-errors -- CI failing (1/3)", report)
+            self.assertNotIn("CI pending", report)
+
+    def test_health_distinguishes_interrupted_checks_from_failures(self):
+        """Cancellation is terminal without claiming that tested code failed."""
+        with tempfile.TemporaryDirectory() as td:
+            report = self._health_report_with_pr_checks(Path(td), [
+                {"status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"status": "COMPLETED", "conclusion": "CANCELLED"},
+                {"status": "COMPLETED", "conclusion": "STALE"},
+            ])
+
+            self.assertIn("#1141 fix/document-errors -- CI interrupted (2/3)", report)
+            self.assertNotIn("CI failing", report)
+
+    def test_health_reports_unknown_completed_conclusions_honestly(self):
+        """A new GitHub conclusion must not be implied healthy or understood."""
+        with tempfile.TemporaryDirectory() as td:
+            report = self._health_report_with_pr_checks(Path(td), [
+                {"status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"status": "COMPLETED", "conclusion": "FUTURE_STATE"},
+            ])
+
+            self.assertIn("#1141 fix/document-errors -- CI unknown", report)
+            self.assertNotIn("CI mixed", report)
+
+    def test_health_classifies_legacy_status_contexts(self):
+        """GitHub's older state-shaped rollups must share the same PR verdicts."""
+        cases = (
+            ("SUCCESS", "CI green"),
+            ("FAILURE", "CI failing (1/1)"),
+            ("ERROR", "CI failing (1/1)"),
+            ("PENDING", "CI pending (1/1)"),
+            ("EXPECTED", "CI pending (1/1)"),
+        )
+        for state, expected in cases:
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as td:
+                report = self._health_report_with_pr_checks(
+                    Path(td), [{"__typename": "StatusContext", "state": state}]
+                )
+
+                self.assertIn(f"#1141 fix/document-errors -- {expected}", report)
+
+    def test_health_uses_the_latest_attempt_of_each_logical_check(self):
+        """A superseded cancelled or failed run must not poison a successful rerun."""
+        for old_conclusion in ("CANCELLED", "FAILURE"):
+            with self.subTest(old_conclusion=old_conclusion), tempfile.TemporaryDirectory() as td:
+                report = self._health_report_with_pr_checks(Path(td), [
+                    {
+                        "__typename": "CheckRun",
+                        "workflowName": "Validate",
+                        "name": "Test engine",
+                        "startedAt": "2026-08-24T04:00:00Z",
+                        "status": "COMPLETED",
+                        "conclusion": old_conclusion,
+                    },
+                    {
+                        "__typename": "CheckRun",
+                        "workflowName": "Validate",
+                        "name": "Test engine",
+                        "startedAt": "2026-08-24T05:00:00Z",
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS",
+                    },
+                ])
+
+                self.assertIn("#1141 fix/document-errors -- CI green", report)
+
     def _ash_migrate_repo(self, base, resource_newer):
         repo = base / "repo"
         (repo / "lib/app").mkdir(parents=True)

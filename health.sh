@@ -467,18 +467,80 @@ for pr in sorted(prs, key=lambda p: p.get("number", 0)):
     if not checks:
         ci = "no CI"
     else:
+        # The gh statusCheckRollup payload can retain an older cancelled
+        # or failed Actions run beside its successful rerun. The GitHub PR UI
+        # uses the latest logical check; counting both resurrects a result the
+        # rerun superseded. Only collapse entries with an unambiguous identity
+        # and timestamp -- otherwise preserving both is safer than hiding a
+        # distinct check behind a guess.
+        latest_checks = {}
+        undeduplicated_checks = []
+        for index, check in enumerate(checks):
+            if "state" in check:
+                context = check.get("context")
+                identity = ("status", context) if context else None
+            else:
+                workflow = check.get("workflowName")
+                name = check.get("name")
+                identity = ("check", workflow, name) if workflow and name else None
+            started = check.get("startedAt") or check.get("completedAt")
+            if not identity or not started:
+                undeduplicated_checks.append(check)
+                continue
+            candidate = (started, index, check)
+            if candidate[:2] > latest_checks.get(identity, ("", -1))[:2]:
+                latest_checks[identity] = candidate
+
+        checks = undeduplicated_checks + [item[2] for item in latest_checks.values()]
         total = len(checks)
-        passed = sum(1 for c in checks if c.get("conclusion") == "SUCCESS")
-        failed = sum(1 for c in checks if c.get("conclusion") == "FAILURE")
-        pending = sum(1 for c in checks if c.get("status") != "COMPLETED")
-        if pending:
-            ci = "CI pending"
-        elif failed:
+        pass_conclusions = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+        failure_conclusions = {"FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+        interrupted_conclusions = {"CANCELLED", "STALE"}
+        pending_statuses = {"QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"}
+
+        def verdict(check):
+            if "state" in check:  # GraphQL StatusContext, not CheckRun
+                state = check.get("state")
+                if state == "SUCCESS":
+                    return "pass"
+                if state in {"FAILURE", "ERROR"}:
+                    return "fail"
+                if state in {"PENDING", "EXPECTED"}:
+                    return "pending"
+                return "unknown"
+
+            status = check.get("status")
+            if status in pending_statuses:
+                return "pending"
+            if status != "COMPLETED":
+                return "unknown"
+            conclusion = check.get("conclusion")
+            if conclusion in pass_conclusions:
+                return "pass"
+            if conclusion in failure_conclusions:
+                return "fail"
+            if conclusion in interrupted_conclusions:
+                return "interrupted"
+            return "unknown"
+
+        verdicts = [verdict(check) for check in checks]
+        passed = verdicts.count("pass")
+        failed = verdicts.count("fail")
+        interrupted = verdicts.count("interrupted")
+        unknown = verdicts.count("unknown")
+        pending = verdicts.count("pending")
+        if failed:
             ci = f"CI failing ({failed}/{total})"
+        elif interrupted:
+            ci = f"CI interrupted ({interrupted}/{total})"
+        elif unknown:
+            ci = "CI unknown"
+        elif pending:
+            ci = f"CI pending ({pending}/{total})"
         elif passed == total:
             ci = "CI green"
         else:
-            ci = "CI mixed"
+            ci = "CI unknown"
     rv = {"APPROVED": "approved", "CHANGES_REQUESTED": "changes requested",
           "REVIEW_REQUIRED": "needs review"}.get(review, "no reviews")
     tag = "draft, " if draft else ""
