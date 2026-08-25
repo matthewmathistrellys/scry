@@ -718,6 +718,43 @@ class ScryHookTests(unittest.TestCase):
             stashed = context(run_hook("health.sh", repo, {}, {"HOME": td}))
             self.assertIn("1 stash entry", stashed)
             self.assertIn("no branch", stashed)
+            # Single worktree: the shared-stack mechanics are inapplicable
+            # noise, so the message stays quiet about them.
+            self.assertNotIn("repository-wide", stashed)
+
+    def test_health_stash_states_shared_stack_mechanics_with_linked_worktrees(self):
+        """The stash stack is repository-wide, and the message must say so.
+
+        `git stash pop` applies the newest entry regardless of which worktree,
+        branch, or session pushed it. The earlier "N stash entries here"
+        phrasing implied locality the stack does not have; that false mental
+        model applied a concurrent session's WIP into an unrelated worktree
+        with merge conflicts (2026-08-25, trellys-app). With linked worktrees
+        present, the report states the sharing mechanics.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            repo.mkdir(parents=True)
+            git = ["git", "-C", str(repo)]
+            subprocess.run(git + ["init", "-q", "-b", "main"], check=True)
+            subprocess.run(git + ["config", "user.email", "t@t"], check=True)
+            subprocess.run(git + ["config", "user.name", "t"], check=True)
+            (repo / "f.txt").write_text("one")
+            subprocess.run(git + ["add", "-A"], check=True)
+            subprocess.run(git + ["commit", "-qm", "init"], check=True)
+            subprocess.run(
+                git + ["worktree", "add", "-q", str(Path(td) / "wt2"), "-b", "feat/x"],
+                check=True,
+            )
+
+            (repo / "f.txt").write_text("two")
+            subprocess.run(git + ["stash", "-q"], check=True)
+            stashed = context(run_hook("health.sh", repo, {}, {"HOME": td}))
+            self.assertIn("1 stash entry in this repository", stashed)
+            self.assertIn("repository-wide", stashed)
+            self.assertIn("2 worktrees", stashed)
+            self.assertIn("regardless of which worktree", stashed)
+            self.assertIn("before any pop", stashed)
 
     def _health_report_with_pr_checks(self, base, checks):
         repo = base / "repo"

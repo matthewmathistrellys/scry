@@ -108,12 +108,26 @@ stash_exposure() {
   # branch cleanup do not touch it, so it does not get destroyed -- it gets
   # FORGOTTEN, which is the failure mode here. Reported with its age, because
   # a stash from this morning is a pause and a stash from March is a leak.
-  local wt="$1" count oldest
+  #
+  # The stack is also REPOSITORY-WIDE, not per-worktree — one pile shared by
+  # the primary checkout and every linked worktree, and `git stash pop` takes
+  # the newest entry regardless of which worktree, branch, or session pushed
+  # it. An earlier version of this message said "N stash entries here", which
+  # implies locality the stack does not have; that false mental model applied
+  # a concurrent session's WIP into an unrelated worktree with merge conflicts
+  # on 2026-08-25 (trellys-app, 11 active agents). With multiple worktrees the
+  # message states the sharing mechanics so the reader can project the race.
+  local wt="$1" count oldest wt_count shared
   count="$(git -C "$wt" stash list 2>/dev/null | wc -l | tr -d ' ')"
   [ "${count:-0}" -gt 0 ] || return 0
   oldest="$(git -C "$wt" log -g --format=%cr stash@{$((count - 1))} -1 2>/dev/null)"
   [ -n "$oldest" ] && oldest=" (oldest: $oldest)"
-  echo "- $count stash entr$([ "$count" -eq 1 ] && echo y || echo ies) here$oldest — work that exists on no branch and in no commit, and that a clean \`git status\` will never mention. Inspect before assuming this tree is empty: git -C $wt stash list"
+  wt_count="$(git -C "$wt" worktree list 2>/dev/null | wc -l | tr -d ' ')"
+  shared=""
+  if [ "${wt_count:-1}" -gt 1 ]; then
+    shared=" The stash stack is repository-wide: all $wt_count worktrees push to and pop from this ONE pile, and \`git stash pop\` applies the newest entry regardless of which worktree, branch, or session created it — a pop in any worktree can apply another session's stashed work into that tree with conflicts, and another session's pop can take work stashed from this one. An entry this session did not push moments ago may not be this session's work."
+  fi
+  echo "- $count stash entr$([ "$count" -eq 1 ] && echo y || echo ies) in this repository$oldest — work that exists on no branch and in no commit, and that a clean \`git status\` will never mention.$shared Inspect before assuming this tree is empty and before any pop: git -C $wt stash list"
 }
 
 orphan_file_exposure() {
