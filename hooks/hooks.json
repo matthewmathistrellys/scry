@@ -50,6 +50,11 @@
             "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/md_advisory.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/code_prose_advisory.sh",
+            "timeout": 5
           }
         ]
       },
