@@ -88,6 +88,23 @@ machine is carrying. Independent checks and advisories fill that in.
   concisely when the dedicated Read tool opens a Markdown file. The session
   warning is primary because shell commands and other access paths cannot all
   be intercepted reliably.
+- **Code-prose trust (atomicity)** — `code_prose_advisory.sh` extends the
+  Markdown doctrine to prose embedded in source files (`.ex`, `.exs`, `.py`):
+  moduledocs, docstrings, doc comments, CRISP blocks. The doctrine is
+  *atomicity*: a file's prose may speak only for its own module. A claim that
+  reaches wider — other modules, the pipeline, production behavior, "the
+  system always/never" — is **stricken**: invalid as evidence no matter how
+  authoritative it reads, usable only as a signal of where to investigate.
+  Injected on every Read of a source file. Born 2026-08-27, after a stale
+  moduledoc claiming "the pipeline is text-only" was re-asserted by four
+  consecutive sessions while the disproving sibling module sat two files away.
+- **Prose drift** — a `check_prose_drift` advisory inside `elixir_advisory.sh`:
+  when an Edit changes function-level code (`def`/`defp` in the edited region)
+  without touching any prose marker, and the file carries a prose block, one
+  advisory notes that the prose was left behind and asks for a conscious look.
+  Deliberately skippable — pressure toward good behavior, not a gate — and
+  quiet by default: full-file Writes, body-only tweaks, prose-touching edits,
+  and files with no prose block all stay silent.
 - **`elixir_build_guard.sh`** — a `PreToolUse` speed bump in front of the
   commands that throw away compiled Elixir artifacts: `mix compile --force`,
   `mix deps.compile --force`, `mix clean --deps`, `rm -rf _build`, `rm -rf

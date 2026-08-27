@@ -973,6 +973,84 @@ class ScryHookTests(unittest.TestCase):
             self.assertEqual(
                 context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(plain))), "")
 
+    def _read_payload(self, path):
+        return {"tool_name": "Read", "tool_input": {"file_path": str(path)}}
+
+    def test_code_prose_advisory_strikes_wider_claims_on_source_reads(self):
+        for name in ("mod.ex", "script.exs", "tool.py"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                repo = Path(td)
+                subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+                f = repo / name
+                f.write_text("# some code\n")
+                report = context(run_hook("code_prose_advisory.sh", repo, self._read_payload(f)))
+                self.assertIn("STRICKEN", report)
+                self.assertIn("only for this module", report)
+                self.assertIn("investigate", report)
+
+    def test_code_prose_advisory_is_silent_for_markdown_and_other_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+            for name in ("notes.md", "data.txt", "conf.json"):
+                f = repo / name
+                f.write_text("content\n")
+                self.assertEqual(
+                    context(run_hook("code_prose_advisory.sh", repo, self._read_payload(f))), "")
+
+    def _prose_drift_edit(self, path, old, new):
+        return {
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(path), "old_string": old, "new_string": new},
+        }
+
+    def test_prose_drift_fires_on_shape_change_that_skips_the_prose_block(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            (repo / "lib").mkdir(parents=True)
+            f = repo / "lib/mod.ex"
+            f.write_text(
+                'defmodule App.M do\n  @moduledoc "Does one thing."\n  def f, do: 2\nend\n')
+            out = context(run_hook(
+                "elixir_advisory.sh", repo,
+                self._prose_drift_edit(f, "def f, do: 1", "def f, do: 2")))
+            self.assertIn("prose-drift", out)
+            self.assertIn("ATOMIC", out)
+            self.assertIn("not a gate", out)
+
+    def test_prose_drift_is_silent_when_the_edit_touches_prose_or_lacks_shape(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            (repo / "lib").mkdir(parents=True)
+            f = repo / "lib/mod.ex"
+            f.write_text(
+                'defmodule App.M do\n  @moduledoc "Does one thing."\n  def f, do: 2\nend\n')
+            # Edit that updates the prose alongside the code: silent.
+            self.assertEqual(
+                context(run_hook(
+                    "elixir_advisory.sh", repo,
+                    self._prose_drift_edit(
+                        f, '@moduledoc "Does one thing."', '@moduledoc "Does two things."'))), "")
+            # Body tweak with no def line in the edited region: silent.
+            self.assertEqual(
+                context(run_hook(
+                    "elixir_advisory.sh", repo,
+                    self._prose_drift_edit(f, "do: 1", "do: 2"))), "")
+            # Payload without old/new strings (synthetic or Write): silent.
+            self.assertEqual(
+                context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(f))), "")
+
+    def test_prose_drift_is_silent_when_the_file_has_no_prose_block(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            (repo / "lib").mkdir(parents=True)
+            f = repo / "lib/bare.ex"
+            f.write_text("defmodule App.B do\n  def f, do: 2\nend\n")
+            self.assertEqual(
+                context(run_hook(
+                    "elixir_advisory.sh", repo,
+                    self._prose_drift_edit(f, "def f, do: 1", "def f, do: 2"))), "")
+
     def test_architecture_flags_env_reads_in_build_time_config(self):
         """config.exs is evaluated at BUILD time; env read there bakes in CI's value."""
         with tempfile.TemporaryDirectory() as td:

@@ -1,7 +1,7 @@
 {
   "name": "scry",
   "description": "SessionStart checks that tell an agent session the true state of the world and establish that repository Markdown is untrusted historical material. Also adds a PreToolUse speed bump that denies a first attempt at an expensive Elixir force-rebuild (the retry passes). Available on demand via /scry.",
-  "version": "1.15.1",
+  "version": "1.16.0",
   "author": {
     "name": "Matthew Mathis"
   },

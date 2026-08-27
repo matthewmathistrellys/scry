@@ -332,7 +332,52 @@ check_spark_extension_edit() {
 This file is a Spark compile-time extension (a DSL extension, transformer or verifier). Every resource or domain that uses it depends on it at COMPILE time, so this edit invalidates all of them at once — the next \`mix compile\` or \`mix test\` rebuilds the whole resource graph, which is minutes rather than seconds on a large domain set. That is expected here, not a fault: budget for it rather than discovering it mid-command, and batch other extension edits into the same compile instead of paying the cost once per change.")
 }
 
-EXTRA_CHECKS=(check_credo check_ash_for_read_without_actor check_spark_extension_edit)
+# Prose drift: this edit changed function-level code, but the file's embedded
+# prose (moduledoc / @doc / CRISP block) was not part of the edit. Prose is
+# atomic — it may describe only this module — and it is trusted only as far
+# as it matches the code beside it, so a shape-level change that leaves the
+# prose untouched deserves one conscious look. (Born 2026-08-27: a moduledoc
+# that said "text-only" survived weeks of sibling-module image work and was
+# re-asserted by four sessions.)
+#
+# Deliberately quiet by default: fires only when the Edit payload carries
+# old_string/new_string (so full-file Writes and synthetic payloads skip),
+# only when the edited region includes a def/defp line (shape change, not a
+# body tweak), only when the edit itself touched no prose marker, and only
+# when the file actually has a prose block to drift. Advisory, skippable —
+# pressure toward good behavior, not a gate.
+check_prose_drift() {
+  local drift
+  drift="$(FILE_PAYLOAD="$payload" python3 -c '
+import json, os, re, sys
+try:
+    d = json.loads(os.environ["FILE_PAYLOAD"])
+except (json.JSONDecodeError, KeyError):
+    sys.exit(0)
+ti = d.get("tool_input") or {}
+old, new = ti.get("old_string"), ti.get("new_string")
+if not isinstance(old, str) or not isinstance(new, str):
+    sys.exit(0)
+PROSE_MARKERS = ("@moduledoc", "@doc", "# CRISP", "# purpose:", "# insights:")
+if any(m in old or m in new for m in PROSE_MARKERS):
+    sys.exit(0)
+if not re.search(r"^\s*defp?\s", old, re.M) and not re.search(r"^\s*defp?\s", new, re.M):
+    sys.exit(0)
+try:
+    content = open(sys.argv[1], "r", errors="replace").read()
+except OSError:
+    sys.exit(0)
+if not any(m in content for m in PROSE_MARKERS):
+    sys.exit(0)
+print("drift")
+' "$file_path")"
+  [ -n "$drift" ] || return 0
+  findings+=("[prose-drift] $(basename "$file_path"):
+
+This edit changed function-level code, and the file's prose (moduledoc / @doc / CRISP block) was not touched. Prose here is ATOMIC — it may describe only this module — and it is trusted only as far as it matches the code it sits next to. If this change altered what the module does or claims, update the prose now; a future reader otherwise inherits testimony the code no longer supports. If the prose still holds, move on — this is a look, not a gate.")
+}
+
+EXTRA_CHECKS=(check_credo check_ash_for_read_without_actor check_spark_extension_edit check_prose_drift)
 
 # To add anti-pattern #4 (or beyond) that needs more than a regex: write a
 # check_<name> function above this line, then list its name here.
