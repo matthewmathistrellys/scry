@@ -1417,5 +1417,92 @@ class ScryHookTests(unittest.TestCase):
             self.assertEqual("", self._scale(repo, moved, session="vendor"))
 
 
+    # ── agent_model_guard.sh ───────────────────────────────────────────────
+    def _guard(self, payload, cwd=None):
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as td:
+            result = run_hook("agent_model_guard.sh", cwd or td, payload)
+        out = result.stdout.strip()
+        if not out:
+            return None
+        return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_agent_guard_denies_a_dispatch_that_would_inherit_the_session_model(self):
+        reason = self._guard({
+            "tool_name": "Agent",
+            "tool_input": {"description": "verify the fix", "prompt": "check it"},
+        })
+        self.assertIsNotNone(reason)
+        self.assertIn("INHERITS", reason)
+        # It must name the cheaper options, or the block is a puzzle rather than a fix.
+        self.assertIn("opus", reason)
+        self.assertIn("sonnet", reason)
+        self.assertIn("haiku", reason)
+
+    def test_agent_guard_allows_an_explicitly_modelled_dispatch(self):
+        for model in ("opus", "sonnet", "haiku"):
+            self.assertIsNone(self._guard({
+                "tool_name": "Agent",
+                "tool_input": {"description": "d", "model": model},
+            }), model)
+
+    def test_agent_guard_allows_one_deliberate_premium_question(self):
+        """Asking the strongest model one bounded question is legitimate and cheap.
+
+        The incident was inheritance times fan-out, never a single explicit call.
+        """
+        self.assertIsNone(self._guard({
+            "tool_name": "Agent",
+            "tool_input": {"description": "architect review", "model": "fable"},
+        }))
+
+    def test_agent_guard_makes_a_fork_a_conscious_choice_but_lets_the_retry_through(self):
+        payload = {
+            "tool_name": "Agent",
+            "tool_input": {"subagent_type": "fork", "description": "carry on here"},
+        }
+        first = self._guard(payload)
+        self.assertIsNotNone(first)
+        self.assertIn("inherits", first.lower())
+        self.assertIsNone(self._guard(payload))   # second strike proceeds
+
+    def test_agent_guard_denies_premium_model_inside_a_workflow_fanout(self):
+        reason = self._guard({
+            "tool_name": "Workflow",
+            "tool_input": {"script": "await agent(p, {label: 'x', model: \'fable\'})"},
+        })
+        self.assertIsNotNone(reason)
+        self.assertIn("fan-out", reason.lower())
+
+    def test_agent_guard_denies_a_workflow_whose_agents_do_not_all_name_a_model(self):
+        reason = self._guard({
+            "tool_name": "Workflow",
+            "tool_input": {"script": "agent(a,{model:'opus'}); agent(b,{}); agent(c,{})"},
+        })
+        self.assertIsNotNone(reason)
+        self.assertIn("3 agent() call(s)", reason)
+
+    def test_agent_guard_allows_a_fully_modelled_workflow(self):
+        self.assertIsNone(self._guard({
+            "tool_name": "Workflow",
+            "tool_input": {"script": "agent(a,{model:'opus'}); agent(b,{model:'sonnet'})"},
+        }))
+
+    def test_agent_guard_ignores_model_names_that_appear_only_in_comments(self):
+        self.assertIsNone(self._guard({
+            "tool_name": "Workflow",
+            "tool_input": {"script": "// never use model: 'fable' here\nagent(a,{model:'opus'})"},
+        }))
+
+    def test_agent_guard_fails_open_rather_than_wedging_a_session(self):
+        """A cost guard that blocks work it cannot parse costs more than it saves."""
+        self.assertIsNone(self._guard({"tool_name": "Bash", "tool_input": {"command": "ls"}}))
+        self.assertIsNone(self._guard({}))
+        self.assertIsNone(self._guard({"tool_name": "Agent"}))
+        self.assertIsNone(self._guard({
+            "tool_name": "Workflow", "tool_input": {"name": "saved-workflow"},
+        }))
+
+
 if __name__ == "__main__":
     unittest.main()
