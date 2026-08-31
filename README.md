@@ -98,6 +98,32 @@ machine is carrying. Independent checks and advisories fill that in.
   Injected on every Read of a source file. Born 2026-08-27, after a stale
   moduledoc claiming "the pipeline is text-only" was re-asserted by four
   consecutive sessions while the disproving sibling module sat two files away.
+- **Scale** — `scale_advisory.sh` speaks on first contact with a source file
+  that is both large *and* actively worked, whether that contact is a Read or
+  an Edit. It reports the file's length, its churn, and — on a Read of a file
+  over 2000 lines — exactly how many lines the Read never returned and did not
+  mark as missing. Then it names what goes wrong silently at that size: a
+  helper you are about to add may already exist hundreds of lines away, and the
+  duplicate compiles, passes review, and diverges later in production; and
+  behavior you never read is behavior you can still break, because a match,
+  guard or default further down may depend on the shape you just changed. The
+  remedy asked for is seconds long — grep *this file* for the name before
+  introducing it — and the advisory explicitly says to finish the assigned work
+  rather than turn the note into a refactor.
+
+  The trigger is deliberately **not** raw line count. Size alone flags the
+  wrong files: the largest source file in the codebase this was built for
+  (3026 lines) is a flat declarative field registry that must not be split,
+  while the file that actually costs the most (2498 lines, 20 commits in six
+  months) is well factored and scores as unremarkable on any density measure.
+  Size is therefore gated on **churn** — a large file nobody touches costs
+  nothing, and warning about it only teaches sessions to skim every advisory.
+  The size threshold self-calibrates to the repository (p95 of that language's
+  own file-length distribution, clamped to 400–1200) rather than importing a
+  folklore constant, so it neither nags a codebase of small files nor goes
+  silent as one bloats. Fires at most once per file per session: the risk is
+  first contact, not sustained work in a file already being reasoned about.
+  Declaration-only files are told they are legitimately long.
 - **Prose drift** — a `check_prose_drift` advisory inside `elixir_advisory.sh`:
   when an Edit changes function-level code (`def`/`defp` in the edited region)
   without touching any prose marker, and the file carries a prose block, one
