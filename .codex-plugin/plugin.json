@@ -1,7 +1,7 @@
 {
   "name": "scry",
-  "version": "1.16.0",
-  "description": "Session-start checks for codebase architecture, running stack, repository health, concurrent activity, machine pressure, and untrusted Markdown, plus a two-strike guard on expensive Elixir force-rebuilds.",
+  "version": "1.17.0",
+  "description": "Session-start checks for codebase architecture, running stack, repository health, concurrent activity, machine pressure, and untrusted Markdown. Requires every subagent dispatch to choose its model rather than silently inherit the session's, warns on first contact with a large and actively-worked source file, and guards expensive Elixir force-rebuilds.",
   "author": {
     "name": "Matthew Mathis",
     "url": "https://github.com/matthewmathistrellys"
