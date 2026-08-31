@@ -1418,90 +1418,96 @@ class ScryHookTests(unittest.TestCase):
 
 
     # ── agent_model_guard.sh ───────────────────────────────────────────────
-    def _guard(self, payload, cwd=None):
+    def _guard(self, payload):
         import tempfile as _tf
         with _tf.TemporaryDirectory() as td:
-            result = run_hook("agent_model_guard.sh", cwd or td, payload)
+            result = run_hook("agent_model_guard.sh", td, payload)
         out = result.stdout.strip()
         if not out:
             return None
-        return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+        h = json.loads(out)["hookSpecificOutput"]
+        return h.get("permissionDecisionReason") or h.get("additionalContext")
 
-    def test_agent_guard_denies_a_dispatch_that_would_inherit_the_session_model(self):
-        reason = self._guard({
-            "tool_name": "Agent",
-            "tool_input": {"description": "verify the fix", "prompt": "check it"},
-        })
+    def _pre(self, tool, tool_input):
+        return self._guard({"tool_name": tool, "hook_event_name": "PreToolUse",
+                            "tool_input": tool_input})
+
+    def _post(self, tool, tool_input):
+        return self._guard({"tool_name": tool, "hook_event_name": "PostToolUse",
+                            "tool_input": tool_input})
+
+    def test_agent_guard_blocks_only_the_absent_choice(self):
+        reason = self._pre("Agent", {"description": "verify the fix"})
         self.assertIsNotNone(reason)
-        self.assertIn("INHERITS", reason)
-        # It must name the cheaper options, or the block is a puzzle rather than a fix.
-        self.assertIn("opus", reason)
-        self.assertIn("sonnet", reason)
-        self.assertIn("haiku", reason)
+        self.assertIn("inherits", reason)
 
-    def test_agent_guard_allows_an_explicitly_modelled_dispatch(self):
-        for model in ("opus", "sonnet", "haiku"):
-            self.assertIsNone(self._guard({
-                "tool_name": "Agent",
-                "tool_input": {"description": "d", "model": model},
-            }), model)
+    def test_agent_guard_does_not_prescribe_which_model_to_use(self):
+        """Model names age out; the rule does not. A roster would rot in months."""
+        reason = self._pre("Agent", {"description": "d"})
+        for rostered in ("opus", "sonnet", "haiku"):
+            self.assertNotIn(rostered, reason.lower())
+        self.assertIn("cheapest model that can actually do this job", reason)
 
-    def test_agent_guard_allows_one_deliberate_premium_question(self):
-        """Asking the strongest model one bounded question is legitimate and cheap.
+    def test_agent_guard_never_objects_to_a_model_that_was_actually_chosen(self):
+        """The guard is against accident, not against any model."""
+        for model in ("fable", "opus", "sonnet", "haiku", "some-future-model"):
+            self.assertIsNone(self._pre("Agent", {"description": "d", "model": model}),
+                              model)
 
-        The incident was inheritance times fan-out, never a single explicit call.
-        """
-        self.assertIsNone(self._guard({
-            "tool_name": "Agent",
-            "tool_input": {"description": "architect review", "model": "fable"},
-        }))
+    def test_agent_guard_allows_a_premium_model_inside_a_workflow_when_chosen(self):
+        """A cheaper session asking the strongest model questions is legitimate."""
+        self.assertIsNone(self._pre("Workflow", {
+            "script": "agent(a,{model:'fable'}); agent(b,{model:'fable'})"}))
 
-    def test_agent_guard_makes_a_fork_a_conscious_choice_but_lets_the_retry_through(self):
-        payload = {
-            "tool_name": "Agent",
-            "tool_input": {"subagent_type": "fork", "description": "carry on here"},
-        }
-        first = self._guard(payload)
-        self.assertIsNotNone(first)
-        self.assertIn("inherits", first.lower())
-        self.assertIsNone(self._guard(payload))   # second strike proceeds
-
-    def test_agent_guard_denies_premium_model_inside_a_workflow_fanout(self):
-        reason = self._guard({
-            "tool_name": "Workflow",
-            "tool_input": {"script": "await agent(p, {label: 'x', model: \'fable\'})"},
-        })
-        self.assertIsNotNone(reason)
-        self.assertIn("fan-out", reason.lower())
-
-    def test_agent_guard_denies_a_workflow_whose_agents_do_not_all_name_a_model(self):
-        reason = self._guard({
-            "tool_name": "Workflow",
-            "tool_input": {"script": "agent(a,{model:'opus'}); agent(b,{}); agent(c,{})"},
-        })
+    def test_agent_guard_denies_a_workflow_whose_agents_do_not_all_choose(self):
+        reason = self._pre("Workflow", {
+            "script": "agent(a,{model:'opus'}); agent(b,{}); agent(c,{})"})
         self.assertIsNotNone(reason)
         self.assertIn("3 agent() call(s)", reason)
 
-    def test_agent_guard_allows_a_fully_modelled_workflow(self):
-        self.assertIsNone(self._guard({
-            "tool_name": "Workflow",
-            "tool_input": {"script": "agent(a,{model:'opus'}); agent(b,{model:'sonnet'})"},
-        }))
+    def test_agent_guard_makes_a_fork_a_conscious_choice_but_lets_the_retry_through(self):
+        payload = {"subagent_type": "fork", "description": "carry on here"}
+        first = self._pre("Agent", payload)
+        self.assertIsNotNone(first)
+        self.assertIn("inherits", first.lower())
+        self.assertIsNone(self._pre("Agent", payload))
 
     def test_agent_guard_ignores_model_names_that_appear_only_in_comments(self):
-        self.assertIsNone(self._guard({
-            "tool_name": "Workflow",
-            "tool_input": {"script": "// never use model: 'fable' here\nagent(a,{model:'opus'})"},
-        }))
+        self.assertIsNone(self._pre("Workflow", {
+            "script": "// consider model: 'fable' here\nagent(a,{model:'opus'})"}))
+
+    def test_agent_guard_reports_the_cost_after_a_premium_model_is_used(self):
+        """Guidance after a legitimate choice -- never a block."""
+        for payload in ({"description": "d", "model": "fable"},):
+            note = self._post("Agent", payload)
+            self.assertIsNotNone(note)
+            self.assertIn("COST", note)
+            self.assertIn("smaller usage allowance", note)
+            # It must not scold: the choice was deliberate and that is the point.
+            self.assertIn("Nothing is wrong here", note)
+
+        note = self._post("Workflow", {"script": "agent(a,{model:'fable'})"})
+        self.assertIsNotNone(note)
+        self.assertIn("COST", note)
+
+    def test_agent_guard_stays_silent_after_an_everyday_model(self):
+        self.assertIsNone(self._post("Agent", {"description": "d", "model": "sonnet"}))
+
+    def test_agent_guard_premium_list_is_configurable_not_hardcoded(self):
+        import tempfile as _tf
+        payload = {"tool_name": "Agent", "hook_event_name": "PostToolUse",
+                   "tool_input": {"description": "d", "model": "opus"}}
+        with _tf.TemporaryDirectory() as td:
+            out = run_hook("agent_model_guard.sh", td, payload,
+                           env={"SCRY_PREMIUM_MODELS": "opus"}).stdout.strip()
+        self.assertIn("COST", out)
 
     def test_agent_guard_fails_open_rather_than_wedging_a_session(self):
-        """A cost guard that blocks work it cannot parse costs more than it saves."""
+        """A cost guard that blocks what it cannot parse costs more than it saves."""
         self.assertIsNone(self._guard({"tool_name": "Bash", "tool_input": {"command": "ls"}}))
         self.assertIsNone(self._guard({}))
-        self.assertIsNone(self._guard({"tool_name": "Agent"}))
-        self.assertIsNone(self._guard({
-            "tool_name": "Workflow", "tool_input": {"name": "saved-workflow"},
-        }))
+        self.assertIsNone(self._pre("Agent", None))
+        self.assertIsNone(self._pre("Workflow", {"name": "saved-workflow"}))
 
 
 if __name__ == "__main__":

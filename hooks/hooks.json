@@ -77,6 +77,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Agent|Workflow",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/agent_model_guard.sh",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PreToolUse": [
