@@ -131,6 +131,29 @@ machine is carrying. Independent checks and advisories fill that in.
   Deliberately skippable — pressure toward good behavior, not a gate — and
   quiet by default: full-file Writes, body-only tweaks, prose-touching edits,
   and files with no prose block all stay silent.
+- **`agent_model_guard.sh`** — a `PreToolUse` gate on `Agent` and `Workflow`
+  dispatch, guarding against **inheritance × fan-out**: a subagent dispatched
+  without an explicit `model` inherits whatever the parent session runs on.
+  That is invisible at the call site, free to write, and multiplies across a
+  fan-out. On 2026-08-31 it consumed most of a week's premium quota in one
+  session — four verifier agents and a builder, none naming a model, none
+  needing the model they silently got; a session the day before had done the
+  same with a sync agent and nobody noticed, because nothing anywhere names
+  the model a subagent will actually use.
+
+  It does **not** ban the expensive model. Asking the strongest model one
+  bounded question is legitimate and cheap, so an explicit premium model on a
+  *single* `Agent` call passes in silence. The distinction is not which model —
+  it is whether the choice was made at the call site, and whether it is being
+  multiplied. So: an `Agent` naming no model is denied with the cheaper options
+  spelled out; a workflow naming the premium model anywhere is denied outright
+  (fan-out × premium is the incident's exact shape); a workflow with `agent()`
+  calls that do not all name a model is denied; and a `fork` — which inherits
+  by design and ignores the override — gets a one-strike speed bump, proceeding
+  if dispatched again. Every internal error fails **open**: an unparseable
+  payload, an unwritable state dir, a missing `python3` all allow the dispatch,
+  because a cost guard that wedges a session costs more than the tokens it
+  saves. `SCRY_PREMIUM_MODELS` (default `fable`) sets which models count.
 - **`elixir_build_guard.sh`** — a `PreToolUse` speed bump in front of the
   commands that throw away compiled Elixir artifacts: `mix compile --force`,
   `mix deps.compile --force`, `mix clean --deps`, `rm -rf _build`, `rm -rf
