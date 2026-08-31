@@ -55,6 +55,11 @@
             "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/code_prose_advisory.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/scale_advisory.sh",
+            "timeout": 10
           }
         ]
       },
@@ -65,6 +70,11 @@
             "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/elixir_advisory.sh",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/scale_advisory.sh",
+            "timeout": 10
           }
         ]
       }

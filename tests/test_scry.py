@@ -1305,5 +1305,117 @@ class ScryHookTests(unittest.TestCase):
             self.assertEqual(context(run_hook("stack.sh", base, {})), "")
 
 
+    # ── scale_advisory.sh ──────────────────────────────────────────────────
+    def _scale_repo(self, td):
+        """A repo with enough small files to calibrate against, plus one big one."""
+        repo = Path(td)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        env = os.environ.copy()
+        env.update({
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        })
+        lib = repo / "lib"
+        lib.mkdir()
+        for i in range(25):
+            (lib / f"small{i}.ex").write_text("defmodule S do\n  def a, do: 1\nend\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True, env=env)
+        return repo, env
+
+    def _big_file(self, repo, env, name="big.ex", lines=900, commits=4, defs=60):
+        body = ["defmodule Big do"]
+        for i in range(defs):
+            body.append(f"  def f{i}, do: :ok")
+        while len(body) < lines:
+            body.append("  # padding line")
+        body.append("end")
+        target = repo / "lib" / name
+        for c in range(commits):
+            target.write_text("\n".join(body) + f"\n# rev {c}\n")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-qm", f"c{c}"], cwd=repo, check=True, env=env)
+        return target
+
+    def _scale(self, repo, path, tool="Edit", session="s1"):
+        state = Path(os.environ.get("TMPDIR", "/tmp")) / "scry-scale-advisory"
+        payload = {
+            "tool_name": tool,
+            "session_id": session,
+            "tool_input": {"file_path": str(path)},
+        }
+        return context(run_hook("scale_advisory.sh", repo, payload))
+
+    def test_scale_advisory_fires_on_a_large_actively_worked_file_and_names_the_failure_modes(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, env = self._scale_repo(td)
+            big = self._big_file(repo, env)
+            report = self._scale(repo, big, session="fires1")
+
+            self.assertIn("SCALE", report)
+            self.assertIn("lib/big.ex", report)
+            # It must state the concrete, silent failure modes -- not just "this file is big".
+            self.assertIn("absence from the part you have seen is not absence from the file", report)
+            self.assertIn("duplicate", report)
+            self.assertIn("production", report)
+            # And it must give the remedy, plus the guard against turning it into a refactor.
+            self.assertIn("grep THIS FILE", report)
+            self.assertIn("This is a look, not a gate", report)
+            self.assertIn("split it by job, not by size", report)
+
+    def test_scale_advisory_stays_silent_on_a_large_file_nobody_touches(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, env = self._scale_repo(td)
+            cold = self._big_file(repo, env, name="cold.ex", commits=1)
+            self.assertEqual("", self._scale(repo, cold, session="cold1"))
+
+    def test_scale_advisory_stays_silent_on_a_small_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, env = self._scale_repo(td)
+            small = self._big_file(repo, env, name="tiny.ex", lines=40, commits=5, defs=10)
+            self.assertEqual("", self._scale(repo, small, session="small1"))
+
+    def test_scale_advisory_fires_once_per_file_per_session_across_read_and_edit(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, env = self._scale_repo(td)
+            big = self._big_file(repo, env, name="once.ex")
+
+            first = self._scale(repo, big, tool="Read", session="dedupe")
+            second = self._scale(repo, big, tool="Edit", session="dedupe")
+            other_session = self._scale(repo, big, tool="Edit", session="dedupe2")
+
+            self.assertIn("SCALE", first)
+            self.assertEqual("", second)          # same session, same file -> quiet
+            self.assertIn("SCALE", other_session)  # a fresh session hears it once
+
+    def test_scale_advisory_reports_the_lines_a_read_never_returned(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, env = self._scale_repo(td)
+            huge = self._big_file(repo, env, name="huge.ex", lines=2400)
+            report = self._scale(repo, huge, tool="Read", session="trunc")
+
+            self.assertIn("2000 lines", report)
+            self.assertIn("nothing marked their absence", report)
+
+    def test_scale_advisory_treats_a_declaration_only_file_as_legitimately_long(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, env = self._scale_repo(td)
+            registry = self._big_file(repo, env, name="registry.ex", defs=0)
+            report = self._scale(repo, registry, session="registry")
+
+            self.assertIn("declarative", report)
+            self.assertIn("splitting it would probably make it worse", report)
+
+    def test_scale_advisory_ignores_generated_and_vendored_trees(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, env = self._scale_repo(td)
+            vendored = repo / "deps" / "dep"
+            vendored.mkdir(parents=True)
+            big = self._big_file(repo, env, name="v.ex")
+            moved = vendored / "v.ex"
+            moved.write_text(big.read_text())
+            self.assertEqual("", self._scale(repo, moved, session="vendor"))
+
+
 if __name__ == "__main__":
     unittest.main()
