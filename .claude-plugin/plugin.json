@@ -1,7 +1,7 @@
 {
   "name": "scry",
-  "description": "SessionStart checks that tell an agent session the true state of the world and establish that repository Markdown is untrusted historical material. Also adds a PreToolUse speed bump that denies a first attempt at an expensive Elixir force-rebuild (the retry passes). Available on demand via /scry.",
-  "version": "1.16.0",
+  "description": "SessionStart checks that tell an agent session the true state of the world and establish that repository Markdown is untrusted historical material. Adds a PreToolUse gate requiring every subagent dispatch to choose its model (a blank model silently inherits the session's, which is how a week of premium allowance goes in one session), an advisory on first contact with a large, actively-worked source file, and a two-strike speed bump on expensive Elixir force-rebuilds. Available on demand via /scry.",
+  "version": "1.17.0",
   "author": {
     "name": "Matthew Mathis"
   },
