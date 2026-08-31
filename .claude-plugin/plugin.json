@@ -1,6 +1,6 @@
 {
   "name": "scry",
-  "description": "SessionStart checks that tell an agent session the true state of the world and establish that repository Markdown is untrusted historical material. Adds a PreToolUse gate requiring every subagent dispatch to choose its model (a blank model silently inherits the session's, which is how a week of premium allowance goes in one session), an advisory on first contact with a large, actively-worked source file, and a two-strike speed bump on expensive Elixir force-rebuilds. Available on demand via /scry.",
+  "description": "SessionStart checks that tell an agent session the true state of the world and establish that repository Markdown is untrusted historical material. Also installs two PreToolUse hooks that deny a tool call: one denies any subagent dispatch that names no model (a blank model silently inherits the session's, which is how a week of premium allowance can go in one session), and one denies a first attempt at an expensive Elixir force-rebuild. Plus an advisory on first contact with a large, actively-worked source file. Available on demand via /scry.",
   "version": "1.17.0",
   "author": {
     "name": "Matthew Mathis"
