@@ -88,6 +88,23 @@ machine is carrying. Independent checks and advisories fill that in.
   concisely when the dedicated Read tool opens a Markdown file. The session
   warning is primary because shell commands and other access paths cannot all
   be intercepted reliably.
+- **Markdown creation** — `md_creation_advisory.sh` is `md_advisory.sh`'s
+  counterpart at write time: it fires when a session creates a Markdown file
+  git doesn't already track, and asks whether it's one of two things —
+  ephemeral/session work (in Claude Code, belongs in a Claude Code Artifact,
+  not a repo file) or an instruction file meant to bind future sessions (the
+  one case a permanent `.md` is correct). Anything else falls to a shared
+  closing line: it's scratch, not a third named home — a markdown file
+  standing in for a task tracker or a decision log isn't given a destination
+  this hook can't verify exists, it's just told it doesn't belong. Client-aware:
+  a Codex session (detected the same way `fleet.sh` tells clients apart) never
+  sees the Artifact line, since Codex CLI has no equivalent — verified against
+  OpenAI's own docs, not assumed — and gets one bullet instead of two. Silent
+  on the standard ecosystem files (README, LICENSE, CHANGELOG,
+  `CLAUDE.md`/`AGENTS.md`, GitHub's community-health files, anything under
+  `.claude/`) and on any repo whose actual product *is* Markdown content — an
+  Astro/Docusaurus-style content site, detected by its config, not by
+  filename. Fires at most once per file per session.
 - **Code-prose trust (atomicity)** — `code_prose_advisory.sh` extends the
   Markdown doctrine to prose embedded in source files (`.ex`, `.exs`, `.py`):
   moduledocs, docstrings, doc comments, CRISP blocks. The doctrine is
