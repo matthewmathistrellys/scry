@@ -87,6 +87,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/md_creation_advisory.sh",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PreToolUse": [
