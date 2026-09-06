@@ -1,7 +1,7 @@
 {
   "name": "scry",
-  "description": "SessionStart checks that tell an agent session the true state of the world and establish that repository Markdown is untrusted historical material. Also installs PreToolUse hooks that deny a tool call: one denies any dispatch that names no model \u2014 a subagent or workflow agent (a blank model silently inherits the session's, which is how a week of premium allowance can go in one session) and a metered agent CLI run through Bash (with no -m flag the CLI's own config default answers, which is how a month's budget went in one night) \u2014 and one denies a first attempt at an expensive Elixir force-rebuild. Plus an advisory on first contact with a large, actively-worked source file. Available on demand via /scry.",
-  "version": "1.18.0",
+  "description": "SessionStart checks that tell an agent session the true state of the world and establish that repository Markdown is untrusted historical material. Also installs PreToolUse hooks that deny a tool call: one denies any dispatch that names no model \u2014 a subagent or workflow agent (a blank model silently inherits the session's, which is how a week of premium allowance can go in one session) and a metered agent CLI run through Bash (with no -m flag the CLI's own config default answers, which is how a month's budget went in one night) \u2014 and one denies a first attempt at an expensive Elixir force-rebuild. It also warns once, before it happens, when a headless `claude -p` run would bill the API account instead of the subscription. Plus an advisory on first contact with a large, actively-worked source file. Available on demand via /scry.",
+  "version": "1.19.0",
   "author": {
     "name": "Matthew Mathis"
   },
