@@ -1640,6 +1640,66 @@ class ScryHookTests(unittest.TestCase):
         self.assertIsNone(self._bash('codex cloud list',
                                      env={"SCRY_METERED_CLI_FREE": "cloud"}))
 
+    # ── agent_model_guard.sh — headless Claude on the API account ──────────
+    def _billing(self, command, env=None, tmp=None):
+        import tempfile as _tf
+        payload = {"tool_name": "Bash", "hook_event_name": "PreToolUse",
+                   "tool_input": {"command": command}}
+        merged = dict(env or {})
+        if tmp:
+            merged["TMPDIR"] = tmp
+        with _tf.TemporaryDirectory() as td:
+            out = run_hook("agent_model_guard.sh", td, payload,
+                           env=merged).stdout.strip()
+        if not out:
+            return None
+        return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_headless_claude_with_an_api_key_says_what_it_will_bill(self):
+        """The charge lands on a different account and is not refundable."""
+        with tempfile.TemporaryDirectory() as tmp:
+            reason = self._billing('claude -p "fix"',
+                                   {"ANTHROPIC_API_KEY": "sk-x"}, tmp)
+        self.assertIsNotNone(reason)
+        self.assertIn("API BILLING", reason)
+        self.assertIn("not refundable", reason)
+        self.assertIn("subscription is not touched", reason)
+
+    def test_headless_claude_is_a_speed_bump_not_a_wall(self):
+        """Billing the API on purpose is legitimate; it just has to be seen."""
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"ANTHROPIC_API_KEY": "sk-x"}
+            self.assertIsNotNone(self._billing('claude -p "fix"', env, tmp))
+            self.assertIsNone(self._billing('claude -p "fix"', env, tmp))
+
+    def test_headless_claude_is_silent_when_no_key_can_bill(self):
+        """With no key the run goes to the subscription, which is the point."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(self._billing('claude -p "fix"', {}, tmp))
+
+    def test_an_interactive_claude_session_is_never_flagged(self):
+        """Only -p/--print bypasses the subscription login."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(self._billing('claude "fix"',
+                                            {"ANTHROPIC_API_KEY": "sk-x"}, tmp))
+
+    def test_a_key_exported_on_the_command_itself_still_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reason = self._billing('ANTHROPIC_API_KEY=sk-y claude -p "fix"',
+                                   {}, tmp)
+        self.assertIsNotNone(reason)
+        self.assertIn("API BILLING", reason)
+
+    def test_the_billing_advisory_can_be_switched_off_on_its_own(self):
+        """Its switch is separate from the metered-CLI switch, both ways."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(self._billing(
+                'claude -p "fix"',
+                {"ANTHROPIC_API_KEY": "sk-x", "SCRY_API_BILLING_GUARD": "0"}, tmp))
+            self.assertIsNotNone(self._billing(
+                'claude -p "fix"',
+                {"ANTHROPIC_API_KEY": "sk-x", "SCRY_METERED_CLI_GUARD": "0"}, tmp))
+
     def test_metered_cli_guard_says_nothing_after_the_call(self):
         """PreToolUse is the only useful moment; a PostToolUse note on every
         Bash call would be noise."""

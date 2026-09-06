@@ -82,6 +82,30 @@ if not isinstance(inp, dict):
 
 event = d.get("hook_event_name") or ""
 
+# A speed bump, not a wall. The first attempt is refused with the cost stated;
+# the same call repeated within five minutes is a conscious decision and goes
+# through untouched. Used where the action is legitimate but its consequence is
+# invisible at the call site — the point is that someone SEES it, not that they
+# are prevented. Any state error allows: a guard that wedges a session on an
+# unwritable temp dir costs more than the thing it is guarding.
+def second_strike(key, window=300):
+    state_dir = os.path.join(os.environ.get("TMPDIR", "/tmp"),
+                             "scry-agent-model-guard")
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        marker = os.path.join(state_dir,
+                              hashlib.sha256(key.encode()).hexdigest()[:32])
+        now = time.time()
+        if os.path.exists(marker) and (now - os.path.getmtime(marker)) < window:
+            os.remove(marker)
+            return True
+        with open(marker, "w") as f:
+            f.write(str(now))
+    except OSError:
+        return True
+    return False
+
+
 # The instruction every surface shares. It names no model: model names age out,
 # the rule does not, and a roster here would be wrong within months.
 CHOOSE = (
@@ -105,16 +129,15 @@ CHOOSE = (
 if tool == "Bash":
     if event and event != "PreToolUse":
         allow()
-    if (os.environ.get("SCRY_METERED_CLI_GUARD") or "").strip() == "0":
-        allow()
 
-    METERED = {
+    def off(name):
+        return (os.environ.get(name) or "").strip() == "0"
+
+    METERED = set() if off("SCRY_METERED_CLI_GUARD") else {
         c.strip().lower()
         for c in (os.environ.get("SCRY_METERED_CLIS") or "codex").split(",")
         if c.strip()
     }
-    if not METERED:
-        allow()
 
     command = inp.get("command")
     if not isinstance(command, str) or not command.strip():
@@ -188,6 +211,44 @@ if tool == "Bash":
             continue
 
         cli = os.path.basename(seg[head]).lower()
+        rest_all = seg[head + 1:]
+
+        # ── Headless Claude bills the API account, never the subscription. ──
+        # `claude -p` bypasses OAuth by design and reads ANTHROPIC_API_KEY, so
+        # with a key in the environment the run is metered per token against a
+        # separate account while the subscription sits unused. Nothing in the
+        # command says so and nothing in the session shows it; people have found
+        # out at $447 and at $1,818, and those charges are not refundable.
+        #
+        # This is legitimate — billing the API on purpose is a real thing to
+        # want — so it is a speed bump, not a wall. Say what is about to happen
+        # once; run it again and it proceeds.
+        if cli == "claude" and not off("SCRY_API_BILLING_GUARD"):
+            headless = any(t in ("-p", "--print") or t.startswith("--print=")
+                           for t in rest_all)
+            inline_key = any(t.startswith("ANTHROPIC_API_KEY=")
+                             for t in seg[:head])
+            if headless and (inline_key or os.environ.get("ANTHROPIC_API_KEY")):
+                if not second_strike("api-billing:" + command[:200]):
+                    deny(
+                        "API BILLING (first pass) — `claude -p` bypasses the "
+                        "subscription login by design: it reads "
+                        "ANTHROPIC_API_KEY, which is set here, so this run is "
+                        "metered per token against that API account. The "
+                        "subscription is not touched and pays for none of it.\n\n"
+                        "Nothing in this command says that, and nothing in the "
+                        "session will show it while it happens — it surfaces on "
+                        "an invoice, and consumed API credit is not refundable. "
+                        "An unattended or looping headless run is where this "
+                        "gets expensive rather than cheap.\n\nIf that is what "
+                        "you meant, run it again and it proceeds. If you meant "
+                        "the work to come out of the subscription, use an "
+                        "interactive session or a scheduled task instead of "
+                        "`-p`, or unset ANTHROPIC_API_KEY for this call.\n\n"
+                        "Set SCRY_API_BILLING_GUARD=0 to stop saying this."
+                    )
+                allow()
+
         if cli not in METERED:
             continue
         rest = seg[head + 1:]
@@ -264,20 +325,7 @@ if tool == "Agent":
     if subagent == "fork":
         # A fork inherits the parent model by definition and ignores `model`,
         # so the choice cannot be expressed — only made consciously.
-        state_dir = os.path.join(os.environ.get("TMPDIR", "/tmp"),
-                                 "scry-agent-model-guard")
-        key = "fork:" + (inp.get("description") or "")[:120]
-        try:
-            os.makedirs(state_dir, exist_ok=True)
-            marker = os.path.join(state_dir,
-                                  hashlib.sha256(key.encode()).hexdigest()[:32])
-            now = time.time()
-            if os.path.exists(marker) and (now - os.path.getmtime(marker)) < 300:
-                os.remove(marker)      # second strike — a conscious choice
-                allow()
-            with open(marker, "w") as f:
-                f.write(str(now))
-        except OSError:
+        if second_strike("fork:" + (inp.get("description") or "")[:120]):
             allow()
         deny(
             "MODEL CHOICE (first pass) — a fork inherits THIS session's model and "

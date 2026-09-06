@@ -199,6 +199,16 @@ machine is carrying. Independent checks and advisories fill that in.
   `SCRY_METERED_CLI_FREE` extends the no-inference verbs, and
   `SCRY_METERED_CLI_GUARD=0` switches the check off.
 
+  One more thing on the same surface, and it is a **speed bump rather than a
+  block**: `claude -p` bypasses the subscription login by design and reads
+  `ANTHROPIC_API_KEY`, so with a key in the environment the run is metered per
+  token against that API account while the subscription pays for none of it.
+  Nothing in the command says so and nothing in the session shows it — people
+  have found out at $447 and at $1,818, and consumed API credit is not
+  refundable. Billing the API deliberately is a legitimate thing to want, so the
+  first attempt is refused with that stated and the same command repeated within
+  five minutes goes through untouched. `SCRY_API_BILLING_GUARD=0` silences it.
+
 - **`elixir_build_guard.sh`** — a `PreToolUse` speed bump in front of the
   commands that throw away compiled Elixir artifacts: `mix compile --force`,
   `mix deps.compile --force`, `mix clean --deps`, `rm -rf _build`, `rm -rf
