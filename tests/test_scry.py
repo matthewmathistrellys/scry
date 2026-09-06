@@ -640,6 +640,28 @@ class ScryHookTests(unittest.TestCase):
         self.assertIn("denies", claude["description"])
         self.assertNotIn("quiet, advisory session-start context",
                          codex["interface"]["longDescription"])
+        # The Bash surface spends real money, so both its existence and its
+        # off switch have to be visible before anyone installs this.
+        self.assertIn("SCRY_METERED_CLI_GUARD=0",
+                      codex["interface"]["longDescription"])
+        for text in (codex["interface"]["longDescription"],
+                     codex["description"], claude["description"]):
+            self.assertIn("CLI", text)
+
+    def test_the_model_guard_is_actually_wired_to_the_bash_surface(self):
+        """A guard nothing invokes is a guard that does not exist.
+
+        Every shape below was verified by hand; none of it runs in a session
+        unless hooks.json points PreToolUse/Bash at the script.
+        """
+        hooks = json.loads((ROOT / "hooks/hooks.json").read_text())
+        bash = [b for b in hooks["hooks"]["PreToolUse"]
+                if b.get("matcher") == "Bash"]
+        self.assertEqual(len(bash), 1)
+        commands = [h["command"] for h in bash[0]["hooks"]]
+        self.assertTrue(any("agent_model_guard.sh" in c for c in commands),
+                        commands)
+        self.assertTrue(all("PLUGIN_ROOT" in c for c in commands))
 
     def _stack_repo_full(self, base, env_lines, fly_apps, lock=""):
         base.mkdir(parents=True, exist_ok=True)
@@ -1535,6 +1557,103 @@ class ScryHookTests(unittest.TestCase):
             out = run_hook("agent_model_guard.sh", td, payload,
                            env={"SCRY_PREMIUM_MODELS": "opus"}).stdout.strip()
         self.assertIn("COST", out)
+
+    # ── agent_model_guard.sh — metered CLI on Bash ─────────────────────────
+    def _bash(self, command, env=None):
+        import tempfile as _tf
+        payload = {"tool_name": "Bash", "hook_event_name": "PreToolUse",
+                   "tool_input": {"command": command}}
+        with _tf.TemporaryDirectory() as td:
+            out = run_hook("agent_model_guard.sh", td, payload, env=env).stdout.strip()
+        if not out:
+            return None
+        return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_metered_cli_guard_blocks_a_call_that_names_no_model(self):
+        for command in ('codex exec "fix the thing"',
+                        'codex "fix the thing"',
+                        '/Users/m/.local/bin/codex exec "fix"',
+                        'cat notes | codex exec'):
+            reason = self._bash(command)
+            self.assertIsNotNone(reason, command)
+            self.assertIn("config default", reason)
+
+    def test_metered_cli_guard_accepts_every_way_of_naming_the_model(self):
+        for command in ('codex exec -m gpt-5.6-terra "fix"',
+                        'codex exec --model=gpt-5.6-terra "fix"',
+                        'codex exec --model gpt-5.6-terra "fix"',
+                        'codex exec -c model=gpt-5.6-terra "fix"',
+                        'ls && codex exec -m gpt-5.6-terra "fix"'):
+            self.assertIsNone(self._bash(command), command)
+
+    def test_metered_cli_guard_does_not_prescribe_which_model_to_use(self):
+        """Model names age out; the rule does not."""
+        reason = self._bash('codex exec "fix"')
+        for rostered in ("gpt-", "astra", "terra", "opus", "sonnet"):
+            self.assertNotIn(rostered, reason.lower(), rostered)
+        self.assertIn("cheapest model that can actually do this job", reason)
+
+    def test_metered_cli_guard_reads_the_segment_not_the_whole_command_line(self):
+        """A `-m` belonging to another command must not vouch for this one.
+
+        The whole-string grep this replaced passed `mkdir -m 755 x && codex
+        exec` — the exact shape that makes a chained call look pinned.
+        """
+        reason = self._bash('mkdir -m 755 x && codex exec "fix"')
+        self.assertIsNotNone(reason)
+        self.assertIn("config default", reason)
+
+    def test_metered_cli_guard_ignores_the_cli_name_where_it_is_not_a_command(self):
+        for command in ('echo "run codex now"',
+                        'cd ~/dev/codex && ls',
+                        'grep -rn codex .',
+                        'ls -la'):
+            self.assertIsNone(self._bash(command), command)
+
+    def test_metered_cli_guard_does_not_split_a_separator_inside_a_prompt(self):
+        self.assertIsNone(self._bash('codex exec -m some-model "run a && b"'))
+
+    def test_metered_cli_guard_lets_management_verbs_through(self):
+        """login, --help and friends run no inference, so they bill nothing."""
+        for command in ('codex login', 'codex logout', 'codex --help',
+                        'codex --version', 'codex mcp list', 'codex doctor'):
+            self.assertIsNone(self._bash(command), command)
+
+    def test_metered_cli_guard_covers_a_call_behind_env_assignments(self):
+        for command in ('FOO=1 codex exec "fix"', 'env FOO=1 codex exec "fix"'):
+            self.assertIsNotNone(self._bash(command), command)
+
+    def test_metered_cli_list_is_configurable_not_hardcoded(self):
+        """A tool that bills today may not tomorrow, and vice versa."""
+        self.assertIsNone(self._bash('gemini "hi"'))
+        self.assertIsNotNone(self._bash('gemini "hi"',
+                                        env={"SCRY_METERED_CLIS": "gemini"}))
+        self.assertIsNone(self._bash('codex exec "fix"',
+                                     env={"SCRY_METERED_CLIS": "gemini"}))
+
+    def test_metered_cli_guard_can_be_switched_off(self):
+        self.assertIsNone(self._bash('codex exec "fix"',
+                                     env={"SCRY_METERED_CLI_GUARD": "0"}))
+
+    def test_metered_cli_free_verbs_are_extensible(self):
+        self.assertIsNotNone(self._bash('codex cloud list'))
+        self.assertIsNone(self._bash('codex cloud list',
+                                     env={"SCRY_METERED_CLI_FREE": "cloud"}))
+
+    def test_metered_cli_guard_says_nothing_after_the_call(self):
+        """PreToolUse is the only useful moment; a PostToolUse note on every
+        Bash call would be noise."""
+        import tempfile as _tf
+        payload = {"tool_name": "Bash", "hook_event_name": "PostToolUse",
+                   "tool_input": {"command": 'codex exec "fix"'}}
+        with _tf.TemporaryDirectory() as td:
+            self.assertEqual("", run_hook("agent_model_guard.sh", td,
+                                          payload).stdout.strip())
+
+    def test_metered_cli_guard_fails_open_on_a_command_it_cannot_lex(self):
+        """Refusing what cannot be parsed wedges a session over a lexing bug."""
+        self.assertIsNone(self._bash('codex exec "unbalanced'))
+        self.assertIsNone(self._bash(""))
 
     def test_agent_guard_fails_open_rather_than_wedging_a_session(self):
         """A cost guard that blocks what it cannot parse costs more than it saves."""

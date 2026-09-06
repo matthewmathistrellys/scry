@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# agent_model_guard.sh — model-selection guard on Agent and Workflow dispatch.
+# agent_model_guard.sh — model-selection guard on every surface that dispatches
+# work to a model: Agent, Workflow, and a metered agent CLI run through Bash.
 #
 # ONE rule: a dispatch must CHOOSE a model. Leaving it blank is the defect,
 # because a blank model is not "the default" — it silently inherits whatever
@@ -8,6 +9,13 @@
 # in a single session: four verifier agents and a builder, none naming a
 # model, none needing the model they got. Nobody typed the expensive model
 # even once; they typed nothing, and got it anyway.
+#
+# An external agent CLI fails the identical way, one layer out: with no model
+# flag the CLI's own config default answers, and a config default is set once
+# and then forgotten. On 2026-09-06 an overnight session ran seventeen design
+# reviews through such a CLI, every one on the premium config default because
+# no run named a model. It drained the month's budget and locked the account
+# out mid-day. Same defect, same fix — name the model at the call site.
 #
 # This guard is NOT against any particular model. A cheaper agent asking the
 # strongest model one hard question is a legitimate, useful thing to do, and
@@ -62,7 +70,7 @@ except Exception:
     allow()
 
 tool = d.get("tool_name") or ""
-if tool not in ("Agent", "Workflow"):
+if tool not in ("Agent", "Workflow", "Bash"):
     allow()
 
 # A payload with no inspectable tool_input is a shape this guard does not
@@ -73,6 +81,135 @@ if not isinstance(inp, dict):
     allow()
 
 event = d.get("hook_event_name") or ""
+
+# The instruction every surface shares. It names no model: model names age out,
+# the rule does not, and a roster here would be wrong within months.
+CHOOSE = (
+    "Choose the cheapest model that can actually do this job — that judgement "
+    "is yours to make per task, and there is no model here that is off-limits "
+    "when it is the right one. What is not allowed is leaving the choice "
+    "unmade, because unmade does not mean cheap: it means whatever default is "
+    "already in place, for the whole run, multiplied by however many are "
+    "launched."
+)
+
+# ── Bash: the same rule where the dispatch leaves this process entirely. ────
+# A metered agent CLI invoked with no model flag falls back to its own config
+# default. That default is chosen once, months before the call, and is usually
+# the strongest model the account can reach — so the cheapest possible call
+# site, the one that names nothing, buys the most expensive possible run.
+#
+# Only the ABSENCE of a choice is refused, exactly as above. Which CLIs are
+# metered is configuration, never a hardcoded roster: a tool that bills today
+# may not tomorrow, and a tool this file has never heard of may bill the most.
+if tool == "Bash":
+    if event and event != "PreToolUse":
+        allow()
+    if (os.environ.get("SCRY_METERED_CLI_GUARD") or "").strip() == "0":
+        allow()
+
+    METERED = {
+        c.strip().lower()
+        for c in (os.environ.get("SCRY_METERED_CLIS") or "codex").split(",")
+        if c.strip()
+    }
+    if not METERED:
+        allow()
+
+    command = inp.get("command")
+    if not isinstance(command, str) or not command.strip():
+        allow()
+
+    # Management verbs that run no inference and so bill nothing. This IS a
+    # roster and it will rot — but the two failure directions are not equal.
+    # A verb that ages off this list costs one clearable speed bump; a spending
+    # verb wrongly on it costs a budget, silently. So it stays short and
+    # errs toward guarding, and SCRY_METERED_CLI_FREE extends it locally.
+    FREE = {
+        "help", "--help", "-h", "--version", "-v", "-V", "login", "logout",
+        "completion", "update", "doctor", "mcp", "mcp-server", "plugin",
+        "app", "app-server", "remote-control", "features", "apply",
+        "archive", "unarchive", "delete", "sandbox", "debug", "agents",
+    }
+    FREE |= {
+        v.strip()
+        for v in (os.environ.get("SCRY_METERED_CLI_FREE") or "").split(",")
+        if v.strip()
+    }
+
+    ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+    PUNCT = set("();<>|&")
+
+    def names_a_model(seg):
+        for i, t in enumerate(seg):
+            if t in ("-m", "--model") and i + 1 < len(seg):
+                return True
+            if t.startswith("--model=") or t.startswith("-m="):
+                return True
+            # `-c model=...` / `--config model=...` is just as explicit.
+            if t in ("-c", "--config") and i + 1 < len(seg) \
+                    and seg[i + 1].startswith("model="):
+                return True
+        return False
+
+    try:
+        import shlex
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except Exception:
+        # An unbalanced quote or a shape shlex will not read. Refusing what
+        # cannot be parsed would wedge a session over a lexing failure.
+        allow()
+
+    # Split into segments on shell separators, so a `-m` belonging to some
+    # OTHER command in the chain cannot vouch for this one — `mkdir -m 755 x
+    # && codex exec` names no model for codex, whatever a whole-string grep
+    # would conclude. Quoted separators stay inside their token, so a
+    # separator in a prompt does not split the call it belongs to.
+    segments, current = [], []
+    for t in tokens:
+        if t and all(ch in PUNCT for ch in t):
+            segments.append(current)
+            current = []
+        else:
+            current.append(t)
+    segments.append(current)
+
+    for seg in segments:
+        head = 0
+        while head < len(seg) and ASSIGNMENT.match(seg[head]):
+            head += 1
+        if head < len(seg) and os.path.basename(seg[head]) == "env":
+            head += 1
+            while head < len(seg) and ASSIGNMENT.match(seg[head]):
+                head += 1
+        if head >= len(seg):
+            continue
+
+        cli = os.path.basename(seg[head]).lower()
+        if cli not in METERED:
+            continue
+        rest = seg[head + 1:]
+        if any(t in FREE for t in rest):
+            continue
+        if names_a_model(rest):
+            continue
+
+        deny(
+            "MODEL CHOICE — this `%s` call names no model, so the CLI's own "
+            "config default answers it. That default was set once and is not "
+            "visible here; when it is the premium model, every unflagged run "
+            "buys the most expensive answer available and nothing at the call "
+            "site says so.\n\nPass the model explicitly (`-m` / `--model`). "
+            "%s\n\nA metered CLI also spends real money rather than a session "
+            "allowance, so the run itself is worth a deliberate go — not just "
+            "the model on it.\n\nSet SCRY_METERED_CLI_GUARD=0 to disable this "
+            "check, or SCRY_METERED_CLIS to change which CLIs it covers."
+            % (cli, CHOOSE)
+        )
+
+    allow()
 
 # Models whose use is worth a word afterwards. Configurable so this survives a
 # rename without a code change, and so it is never a hardcoded roster.
@@ -121,15 +258,6 @@ if event == "PostToolUse":
     )
 
 # ── PreToolUse: the only defect is an absent choice. ────────────────────────
-CHOOSE = (
-    "Name the model on the dispatch itself. Choose the cheapest model that can "
-    "actually do this job — that judgement is yours to make per task, and there "
-    "is no model here that is off-limits when it is the right one. What is not "
-    "allowed is leaving the choice unmade, because unmade does not mean cheap: "
-    "it means whatever this session happens to be running, for the agent's "
-    "entire life, multiplied by however many are launched."
-)
-
 if tool == "Agent":
     subagent = (inp.get("subagent_type") or "").strip().lower()
 
@@ -161,7 +289,8 @@ if tool == "Agent":
 
     if not (inp.get("model") or "").strip():
         deny("MODEL CHOICE — this Agent names no model, so it inherits this "
-             "session's for its entire run.\n\n" + CHOOSE)
+             "session's for its entire run.\n\nName the model on the dispatch "
+             "itself. " + CHOOSE)
     allow()
 
 # ── Workflow: the multiplier. Every agent() must have made the choice. ─────
@@ -175,7 +304,8 @@ if agent_calls > modelled:
     deny(
         "MODEL CHOICE — this workflow has %d agent() call(s) but only %d name a "
         "model. A workflow is the multiplier: each agent() that names none "
-        "inherits this session's model, for its whole run.\n\n%s\n\nIf a helper "
+        "inherits this session's model, for its whole run.\n\nName the model on "
+        "each dispatch itself. %s\n\nIf a helper "
         "builds the options object, put the model there so the choice is visible "
         "at the call site." % (agent_calls, modelled, CHOOSE)
     )

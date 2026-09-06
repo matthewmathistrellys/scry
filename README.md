@@ -148,7 +148,8 @@ machine is carrying. Independent checks and advisories fill that in.
   Deliberately skippable — pressure toward good behavior, not a gate — and
   quiet by default: full-file Writes, body-only tweaks, prose-touching edits,
   and files with no prose block all stay silent.
-- **`agent_model_guard.sh`** — one rule on `Agent` and `Workflow` dispatch:
+- **`agent_model_guard.sh`** — one rule on every surface that dispatches work
+  to a model — `Agent`, `Workflow`, and a metered agent CLI run through `Bash`:
   **the model must be chosen.** A blank model is not "the default" — it
   silently inherits whatever the parent session runs on, invisibly at the call
   site, and a fan-out multiplies it. On 2026-08-31 that consumed most of a
@@ -173,6 +174,30 @@ machine is carrying. Independent checks and advisories fill that in.
   state dir, a missing `python3` all allow the dispatch, because a cost guard
   that wedges a session costs more than the tokens it saves.
   `SCRY_PREMIUM_MODELS` (default `fable`) sets which models draw the note.
+
+  The same rule reaches one layer further out, to an agent CLI invoked through
+  `Bash`. With no model flag the CLI's own config default answers — a value set
+  once, months before the call, invisible at the call site, and usually the
+  strongest model the account can reach. On 2026-09-06 an overnight session ran
+  seventeen design reviews that way, every one on the premium config default,
+  draining the month's budget and locking the account out mid-day. A `codex`
+  call naming no model is denied; `-m`, `--model`, `--model=` and `-c model=`
+  all count as naming one, and management verbs that run no inference
+  (`login`, `--help`, `mcp`, `doctor`, …) pass untouched.
+
+  The command is **lexed and split on shell separators**, not grepped, because
+  a whole-string search gets it wrong in both directions: `mkdir -m 755 x &&
+  codex exec` looks pinned and is not, while `echo "run codex now"` looks like
+  a call and is not. Splitting on separators keeps a `-m` from vouching for a
+  command it does not belong to, and quoted separators stay inside their token
+  so an `&&` in a prompt does not split the call around it. A command shlex
+  cannot read fails **open**, like everything else here.
+
+  Which CLIs are metered is configuration, never a hardcoded roster — a tool
+  that bills today may not tomorrow, and one this file has never heard of may
+  bill the most. `SCRY_METERED_CLIS` (default `codex`) sets the list,
+  `SCRY_METERED_CLI_FREE` extends the no-inference verbs, and
+  `SCRY_METERED_CLI_GUARD=0` switches the check off.
 
 - **`elixir_build_guard.sh`** — a `PreToolUse` speed bump in front of the
   commands that throw away compiled Elixir artifacts: `mix compile --force`,
