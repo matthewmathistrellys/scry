@@ -35,6 +35,40 @@ def context(result):
 
 
 class ScryHookTests(unittest.TestCase):
+    def test_health_reports_stale_main_without_changing_checkout(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            origin = base / "origin"
+            repo = base / "repo"
+
+            def git(cwd, *args):
+                return subprocess.run(
+                    ["git", "-C", str(cwd), *args], check=True,
+                    capture_output=True, text=True,
+                ).stdout.strip()
+
+            origin.mkdir()
+            git(origin, "init", "-q", "-b", "main")
+            git(origin, "config", "user.name", "Scry Test")
+            git(origin, "config", "user.email", "scry@example.test")
+            (origin / "tracked.txt").write_text("original\n")
+            git(origin, "add", ".")
+            git(origin, "commit", "-qm", "Initial")
+            git(base, "clone", "-q", str(origin), str(repo))
+            original_main = git(repo, "rev-parse", "main")
+            (origin / "tracked.txt").write_text("remote update\n")
+            git(origin, "commit", "-qam", "Advance remote")
+
+            report = context(run_hook("health.sh", repo, {"cwd": str(repo)}))
+
+            self.assertIn("Local main is 1 commit(s) behind origin/main", report)
+            self.assertEqual(git(repo, "rev-parse", "origin/main"),
+                             git(origin, "rev-parse", "main"))
+            self.assertEqual(git(repo, "rev-parse", "main"), original_main)
+            self.assertEqual(git(repo, "rev-parse", "HEAD"), original_main)
+            self.assertEqual((repo / "tracked.txt").read_text(), "original\n")
+            self.assertEqual(git(repo, "status", "--porcelain"), "")
+
     def test_provenance_treats_markdown_decisions_as_untrusted_and_explains_consequences(self):
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)

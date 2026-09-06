@@ -3,8 +3,8 @@
 #
 # Reports primary worktree health unconditionally, plus the session's own
 # worktree health when it differs from the primary (branch staleness, base
-# drift, unpushed commits, already-merged status). Fast-forward only for
-# main — it can never rewrite or lose anything.
+# drift, unpushed commits, already-merged status). Fetches remote state for
+# comparison without moving local branches or changing checked-out files.
 #
 # Emits its findings via `additionalContext` so a fresh agent session sees
 # the repo's actual state up front — primary-worktree cleanliness, the
@@ -199,7 +199,7 @@ else
 fi
 
 if [ "$offline" -eq 1 ]; then
-  lines+=("- Could not fetch origin (offline?) — main-sync and staleness checks skipped this session.")
+  lines+=("- Could not fetch origin (offline?) — main-drift and staleness checks skipped this session.")
 else
   # Compare local main vs origin/main (the live/canonical tip) unconditionally —
   # this is a ref comparison, independent of what's actually checked out, so it
@@ -212,16 +212,6 @@ else
     lines+=("- Local main is $behind commit(s) behind origin/main (the live tip).")
   fi
 
-  # Only actually mutate main when it's the checked-out branch — fast-forwarding
-  # a branch that isn't checked out would silently move the ref out from under
-  # whatever's sitting in the working tree of wherever else it's checked out.
-  if [ "$branch" = "main" ] && [ "$behind" -gt 0 ]; then
-    if ff_err="$(g merge --ff-only origin/main 2>&1 >/dev/null)"; then
-      lines+=("- Fast-forwarded checked-out main to $(g rev-parse --short main).")
-    else
-      lines+=("- Could not fast-forward cleanly ($(printf '%s' "$ff_err" | head -1)).")
-    fi
-  fi
 fi
 
 # ── Deploy drift ────────────────────────────────────────────────────────────
