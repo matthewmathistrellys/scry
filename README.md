@@ -213,7 +213,8 @@ machine is carrying. Independent checks and advisories fill that in.
     check the primary worktree gets, run here too — the file at risk is just
     as often in the linked worktree as in the primary one).
   - **Local main vs origin/main:** divergence in either direction — stranded
-    local commits or a stale local tip. Auto-fast-forwards when safe.
+    local commits or a stale local tip. Fetches remote state for comparison;
+    never advances local branches or changes checked-out files.
   - **Deploy drift:** whether merged work is actually live. Opt-in: configure a
     health URL and it never stays silent again; leave it unconfigured and it
     stays out of the way, because a repo with nothing deployed cannot act on
