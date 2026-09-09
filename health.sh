@@ -209,7 +209,27 @@ else
   if [ "$ahead" -gt 0 ]; then
     lines+=("- Local main has $ahead commit(s) NOT on origin — possibly stranded work needing a PR: git -C $main_wt log --oneline origin/main..main")
   elif [ "$behind" -gt 0 ]; then
-    lines+=("- Local main is $behind commit(s) behind origin/main (the live tip).")
+    # This line used to end at the number, and the number changed nothing. On
+    # 2026-09-09 it was correct and ignored: a checkout 427 commits / 14 days
+    # behind was read by subagents as if it were the repo, and they reported a
+    # 5-stage pipeline that has 6 — the sixth stage's files were simply not on
+    # disk, and absence read as non-existence. A count is a fact; what makes it
+    # act is the consequence plus the command that reads around it.
+    #
+    # The second sentence is the part that was missing entirely. This warning
+    # reaches THIS session and stops: SessionStart output does not propagate to
+    # a spawned subagent, so a dispatch brief that does not repeat the rule
+    # sends an agent into the stale tree with no idea it is stale.
+    # main_drift_advisory.sh now covers that on SubagentStart, but a brief that
+    # names a path still has to carry the rule itself for every other reader.
+    behind_days=0
+    main_ct="$(g log -1 --format=%ct main 2>/dev/null || echo 0)"
+    origin_ct="$(g log -1 --format=%ct origin/main 2>/dev/null || echo 0)"
+    if [ "$origin_ct" -gt "$main_ct" ] && [ "$main_ct" -gt 0 ]; then
+      behind_days=$(( ( origin_ct - main_ct ) / 86400 ))
+    fi
+    lines+=("- Local main is $behind commit(s) / $behind_days day(s) behind origin/main (the live tip), and the files in this checkout are the older ones. Anything added upstream since is ABSENT from disk here, so a grep that finds nothing is not evidence a feature does not exist. Read repo facts from the tip instead: git -C $main_wt show origin/main:<path>, git -C $main_wt grep <pattern> origin/main, git -C $main_wt ls-tree -r --name-only origin/main.")
+    lines+=("- Subagents do NOT inherit this warning — SessionStart context reaches this session only. Any dispatch brief that hands an agent a path in this repo must carry the rule itself: read origin/main, not the working tree.")
   fi
 
 fi

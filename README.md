@@ -19,6 +19,8 @@ machine is carrying. Independent checks and advisories fill that in.
 | **`health.sh`** | Is this repo in good shape? |
 | **`fleet.sh`** | What else is happening *right now*? |
 | **`pressure.sh`** | What shape is this machine in? |
+| **`main_drift_advisory.sh`** | Is the tree this subagent was handed the current one? |
+| **`worktree_disposal_advisory.sh`** | What are the finished build workspaces still costing? |
 | **Markdown trust** | What goes wrong when repository prose is mistaken for authority? |
 
 - **`architecture.sh`** — a map of the codebase. It is a *dispatcher*, not a
@@ -115,6 +117,60 @@ machine is carrying. Independent checks and advisories fill that in.
   Injected on every Read of a source file. Born 2026-08-27, after a stale
   moduledoc claiming "the pipeline is text-only" was re-asserted by four
   consecutive sessions while the disproving sibling module sat two files away.
+- **Stale-tree advisory (subagents)** — `main_drift_advisory.sh` fires on
+  `SubagentStart` and tells the *child* agent that the worktree it was handed
+  is behind `origin/main`, by how many commits and how many days, and how to
+  read the live tip instead (`git show origin/main:<path>`,
+  `git grep <pattern> origin/main`, `git ls-tree -r --name-only origin/main`).
+  It exists because none of Scry's other surfaces reach a subagent:
+  `SessionStart` output does not propagate into one, and `PreToolUse` /
+  `PostToolUse` `additionalContext` on the Agent tool lands in the **parent**.
+  `SubagentStart` is the only event whose `additionalContext` is delivered into
+  the spawned agent.
+
+  Born 2026-09-09, after subagents dispatched to describe a repo's
+  architecture read a checkout whose local `main` was 427 commits and 14 days
+  behind, and reported a five-stage pipeline that has six. Nothing errored: the
+  sixth stage's files were simply not on disk, `grep` found nothing, and
+  **nothing read as non-existence**. That is the sentence the advisory carries,
+  because a bare commit count changes no behavior — the identical count was
+  already on screen during the incident.
+
+  Narrow on purpose. It speaks only when the agent's worktree is checked out
+  on the repo's *default* branch — a feature branch is expected to diverge and
+  its author knows what it is based on. It never fetches (`health.sh` already
+  fetched at session start; a fetch here would put network latency in front of
+  every dispatch) and never mutates: missing refs mean silence, not a fetch.
+  Past `SCRY_SUBAGENT_STALE_DAYS` (7) or `SCRY_SUBAGENT_STALE_COMMITS` (50) the
+  wording escalates to say plainly that an architecture answer from that tree
+  is unreliable — that is the distance at which whole features land. There is
+  no `agent_type` exemption: the built-in Explore agent, whose entire output is
+  what is and isn't in a tree, is the type *most* exposed to this, not least.
+- **Workspace disposal** — `worktree_disposal_advisory.sh` reports, at most
+  once per session, how many linked worktrees the repo has, roughly what they
+  occupy, how many hold branches already merged into `origin/main` (ancestry
+  *and* patch-id, so a squash merge still counts), and the command to clean
+  them — `prune-worktrees` where it is on `PATH`, `git worktree remove`
+  otherwise. It is advisory in the strict sense: it deletes nothing, ever.
+  Agent sessions create isolated worktrees and never tear the finished ones
+  down; on 2026-09-09 that took a machine to 0 bytes free.
+
+  **It runs on `Stop`, not `SessionEnd`, and the reason is measured.**
+  `SessionEnd` output goes nowhere: Claude Code's own event contract gives it
+  "exit code 0 — command completes successfully", with no stdout-to-model and
+  no `additionalContext` path, unlike `SessionStart` or `SubagentStart`. A
+  probe confirmed it — a `SessionEnd` hook that printed a unique token *and*
+  returned it as `additionalContext` demonstrably ran and its token appeared
+  zero times in the CLI output and zero times in the transcript, while the same
+  probe on `Stop` appeared three times and the model quoted it back. A
+  `SessionEnd` version of this hook would be inert. `Stop` costs firing every
+  turn, which three gates absorb: `stop_hook_active` (the loop guard — this
+  hook's own output makes the model continue, so the next `Stop` must be
+  silent), once per session id, and a minimum session age from the transcript
+  file's birth time (`SCRY_WORKTREE_REMINDER_MINUTES`, default 45) so a
+  reminder about finished work does not arrive on turn one. It then speaks only
+  when something is actually reclaimable, or the pile exceeds
+  `SCRY_WORKTREE_DISK_MB_WARN` (default 2048).
 - **Scale** — `scale_advisory.sh` speaks on first contact with a source file
   that is both large *and* actively worked, whether that contact is a Read or
   an Edit. It reports the file's length, its churn, and — on a Read of a file
@@ -456,6 +512,15 @@ The Codex package uses `.codex-plugin/plugin.json`; Claude uses
 `.claude-plugin/plugin.json`. Both discover the same `hooks/hooks.json`, skill,
 scripts, and scanners, so there is no copied implementation to drift.
 
+Two of the hooks ride events Claude Code defines — `SubagentStart`
+(`main_drift_advisory.sh`) and `Stop` (`worktree_disposal_advisory.sh`).
+Whether Codex fires those event names has **not** been verified against a
+Codex build; if it does not, those two groups simply never run there, which is
+the same degradation-to-silence every other check has. The scripts themselves
+are shared and client-agnostic — nothing about them is Claude-specific — so
+adding Codex's equivalent event names is a manifest change, not a second
+implementation.
+
 All six checks are worth having everywhere, not just in the repos you
 remembered to wire up: `fleet.sh` and `pressure.sh` are about the machine, and
 every check degrades to silence where it doesn't apply. `architecture.sh` falls
@@ -562,6 +627,11 @@ starts changing a decision.
 | `SCRY_SWAP_USED_MB_WARN` | `2048` | swap in use before it's reported |
 | `SCRY_DISK_FREE_GB_WARN` | `20` | free-space floor |
 | `SCRY_DISK_USED_PCT_WARN` | `90` | used-percentage ceiling |
+| `SCRY_SUBAGENT_STALE_DAYS` | `7` | drift in days before a subagent is told the tree is unreliable |
+| `SCRY_SUBAGENT_STALE_COMMITS` | `50` | drift in commits before the same escalation |
+| `SCRY_WORKTREE_REMINDER_MINUTES` | `45` | how long a session must run before the disposal reminder speaks |
+| `SCRY_WORKTREE_DISK_MB_WARN` | `2048` | worktree disk at which an unmerged pile is worth saying out loud |
+| `SCRY_WORKTREE_DU_BUDGET` | `4` | seconds of `du` allowed before the size is reported as a floor |
 
 Raising a threshold buys silence. Lowering one buys warning. Neither changes
 what is measured.
@@ -590,6 +660,17 @@ ancestry *and* patch-id equivalence, so a squash or rebase merge — which
 rewrites SHAs and hides from `git branch --merged` — is still recognised.
 Deciding it on ancestry alone files finished work under "possibly abandoned",
 and a review list full of false alarms is a list you learn to skim.
+
+**Pick the event whose output actually lands.** A hook on the semantically
+right event that no one ever reads is worse than no hook: it costs a process
+per turn and buys the belief that the warning was given. Before wiring an
+event, check what its exit-0 contract does with output — Claude Code documents
+this per event, and a probe hook returning a unique token settles it in one
+run. `SessionEnd` reads like the natural home for an end-of-session reminder
+and discards everything it is handed; `Stop` delivers to the model and is why
+`worktree_disposal_advisory.sh` lives there instead. The same question is why
+`main_drift_advisory.sh` is on `SubagentStart`: `SessionStart` context never
+reaches a child agent, and Agent-tool `additionalContext` lands in the parent.
 
 **Advisory, never blocking.** Blocking an edit is a policy opinion —
 trunk-based, work-in-linked-worktrees — that belongs in the project enforcing

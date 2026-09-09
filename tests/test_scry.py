@@ -61,7 +61,14 @@ class ScryHookTests(unittest.TestCase):
 
             report = context(run_hook("health.sh", repo, {"cwd": str(repo)}))
 
-            self.assertIn("Local main is 1 commit(s) behind origin/main", report)
+            self.assertIn("Local main is 1 commit(s) / 0 day(s) behind origin/main",
+                          report)
+            # The count alone fired during the 2026-09-09 incident and changed
+            # nothing. The line has to carry the consequence and the command,
+            # and has to say that a subagent will not see any of it.
+            self.assertIn("ABSENT from disk here", report)
+            self.assertIn("show origin/main:<path>", report)
+            self.assertIn("Subagents do NOT inherit this warning", report)
             self.assertEqual(git(repo, "rev-parse", "origin/main"),
                              git(origin, "rev-parse", "main"))
             self.assertEqual(git(repo, "rev-parse", "main"), original_main)
@@ -662,6 +669,412 @@ class ScryHookTests(unittest.TestCase):
         self.assertTrue(any("agent_model_guard.sh" in c for c in commands),
                         commands)
         self.assertTrue(all("PLUGIN_ROOT" in c for c in commands))
+
+    # ── Stale-tree advisory (SubagentStart) ────────────────────────────────
+
+    @staticmethod
+    def _git(cwd, *args):
+        return subprocess.run(["git", "-C", str(cwd), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def _stale_repo(self, base, commits=61, day_gap=20):
+        """A clone whose main is `commits` behind and `day_gap` days older.
+
+        One file exists only upstream, which is the shape that made the
+        2026-09-09 incident silent: grep finds nothing and nothing reads as
+        non-existence.
+        """
+        origin = base / "origin"
+        repo = base / "repo"
+        g = self._git
+        origin.mkdir(parents=True)
+        g(origin, "init", "-q", "-b", "main")
+        g(origin, "config", "user.name", "Scry Test")
+        g(origin, "config", "user.email", "scry@example.test")
+        (origin / "stage_one.txt").write_text("one\n")
+        g(origin, "add", ".")
+        old = {"GIT_AUTHOR_DATE": "2026-08-10T09:00:00",
+               "GIT_COMMITTER_DATE": "2026-08-10T09:00:00"}
+        subprocess.run(["git", "-C", str(origin), "commit", "-qm", "Initial"],
+                       check=True, capture_output=True,
+                       env={**os.environ, **old})
+        g(base, "clone", "-q", str(origin), str(repo))
+        new_date = f"2026-08-{10 + day_gap:02d}T09:00:00"
+        new = {"GIT_AUTHOR_DATE": new_date, "GIT_COMMITTER_DATE": new_date}
+        for i in range(commits - 1):
+            (origin / "churn.txt").write_text(f"{i}\n")
+            g(origin, "add", "churn.txt")
+            subprocess.run(["git", "-C", str(origin), "commit", "-qm", f"c{i}"],
+                           check=True, capture_output=True,
+                           env={**os.environ, **new})
+        # The stage that exists upstream and nowhere on disk.
+        (origin / "stage_six.txt").write_text("six\n")
+        g(origin, "add", "stage_six.txt")
+        subprocess.run(["git", "-C", str(origin), "commit", "-qm", "stage six"],
+                       check=True, capture_output=True,
+                       env={**os.environ, **new})
+        g(repo, "fetch", "-q", "origin")
+        return repo
+
+    @staticmethod
+    def _subagent_payload(cwd, agent_type="Explore"):
+        return {
+            "session_id": "sa-1",
+            "transcript_path": "/dev/null",
+            "cwd": str(cwd),
+            "prompt_id": "p-1",
+            "agent_id": "a-1",
+            "agent_type": agent_type,
+            "hook_event_name": "SubagentStart",
+        }
+
+    def test_stale_tree_advisory_gives_a_subagent_the_consequence_and_the_commands(self):
+        """A commit count changed nothing during the incident; the read-around did.
+
+        SessionStart output does not reach a subagent and Agent-tool
+        additionalContext lands in the parent, so SubagentStart is the only
+        place this can be said to the agent that will do the grepping.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._stale_repo(Path(td))
+            self.assertFalse((repo / "stage_six.txt").exists())
+
+            report = context(run_hook("main_drift_advisory.sh", repo,
+                                      self._subagent_payload(repo)))
+
+            self.assertIn("61 commit(s) / 20 day(s) behind origin/main", report)
+            self.assertIn("ABSENT from disk", report)
+            self.assertIn("show origin/main:<path>", report)
+            self.assertIn("grep <pattern> origin/main", report)
+            self.assertIn("ls-tree -r --name-only origin/main", report)
+            # Past the escalation thresholds it must say the answer is unusable,
+            # not merely that the tree is dated.
+            self.assertIn("UNRELIABLE", report)
+            emitted = json.loads(
+                run_hook("main_drift_advisory.sh", repo,
+                         self._subagent_payload(repo)).stdout)
+            self.assertEqual(
+                emitted["hookSpecificOutput"]["hookEventName"], "SubagentStart")
+
+    def test_stale_tree_advisory_never_moves_a_ref_or_a_file(self):
+        """Projects consequences, never actions — the ff-only merge removed in #11
+        does not come back through the subagent door."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._stale_repo(Path(td))
+            before_main = self._git(repo, "rev-parse", "main")
+            before_head = self._git(repo, "rev-parse", "HEAD")
+
+            run_hook("main_drift_advisory.sh", repo,
+                     self._subagent_payload(repo))
+
+            self.assertEqual(self._git(repo, "rev-parse", "main"), before_main)
+            self.assertEqual(self._git(repo, "rev-parse", "HEAD"), before_head)
+            self.assertEqual(self._git(repo, "status", "--porcelain"), "")
+            self.assertFalse((repo / "stage_six.txt").exists())
+
+    def test_stale_tree_advisory_does_not_fetch_in_the_dispatch_path(self):
+        """health.sh already fetched. A fetch here is latency on every dispatch,
+        so the hook must report only what the existing refs already know."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._stale_repo(Path(td), commits=3, day_gap=0)
+            origin = Path(td) / "origin"
+            before_remote = self._git(repo, "rev-parse", "origin/main")
+            # Origin moves again, unfetched. A hook that fetched would say 8.
+            for i in range(5):
+                (origin / "later.txt").write_text(f"{i}\n")
+                self._git(origin, "add", "later.txt")
+                self._git(origin, "commit", "-qm", f"later{i}")
+
+            report = context(run_hook("main_drift_advisory.sh", repo,
+                                      self._subagent_payload(repo)))
+
+            self.assertIn("3 commit(s) / 0 day(s) behind", report)
+            self.assertNotIn("UNRELIABLE", report)
+            self.assertEqual(self._git(repo, "rev-parse", "origin/main"),
+                             before_remote)
+
+    def test_stale_tree_advisory_is_silent_off_the_default_branch(self):
+        """A feature branch is expected to diverge; its author chose the base."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._stale_repo(Path(td))
+            self._git(repo, "checkout", "-q", "-b", "feat/thing")
+
+            result = run_hook("main_drift_advisory.sh", repo,
+                              self._subagent_payload(repo))
+
+            self.assertEqual(result.stdout.strip(), "")
+
+    def test_stale_tree_advisory_is_silent_when_current_or_outside_git(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._stale_repo(base)
+            fresh = base / "fresh"
+            self._git(base, "clone", "-q", str(base / "origin"), str(fresh))
+            self.assertEqual(
+                run_hook("main_drift_advisory.sh", fresh,
+                         self._subagent_payload(fresh)).stdout.strip(), "")
+
+            plain = base / "plain"
+            plain.mkdir()
+            self.assertEqual(
+                run_hook("main_drift_advisory.sh", plain,
+                         self._subagent_payload(plain)).stdout.strip(), "")
+
+            # An unparseable payload must not produce a confident answer.
+            result = subprocess.run(
+                ["bash", str(ROOT / "main_drift_advisory.sh")],
+                cwd=str(repo), input="not json", text=True,
+                capture_output=True, check=True)
+            self.assertEqual(result.returncode, 0)
+
+    def test_stale_tree_advisory_exempts_no_agent_type(self):
+        """Explore is the heaviest searcher, so it is the most exposed, not the
+        least. The gate is the state of the tree, which is checkable."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._stale_repo(Path(td))
+            for agent_type in ("Explore", "general-purpose", "Plan",
+                               "code-reviewer", ""):
+                with self.subTest(agent_type=agent_type):
+                    report = context(run_hook(
+                        "main_drift_advisory.sh", repo,
+                        self._subagent_payload(repo, agent_type)))
+                    self.assertIn("behind origin/main", report)
+
+    # ── Workspace disposal advisory (Stop) ─────────────────────────────────
+
+    def _worktree_repo(self, base):
+        """A clone with one merged worktree and one live one."""
+        g = self._git
+        origin = base / "origin"
+        repo = base / "repo"
+        origin.mkdir(parents=True)
+        g(origin, "init", "-q", "-b", "main")
+        g(origin, "config", "user.name", "Scry Test")
+        g(origin, "config", "user.email", "scry@example.test")
+        (origin / "base.txt").write_text("base\n")
+        g(origin, "add", ".")
+        g(origin, "commit", "-qm", "init")
+        g(base, "clone", "-q", str(origin), str(repo))
+        g(repo, "config", "user.name", "Scry Test")
+        g(repo, "config", "user.email", "scry@example.test")
+        # Merged: branch sits exactly at origin/main, nothing pending.
+        g(repo, "worktree", "add", "-q", "-b", "feat/done",
+          str(repo / ".claude/worktrees/agent-done"), "origin/main")
+        # Live: one commit that is not upstream.
+        wip = repo / ".claude/worktrees/agent-wip"
+        g(repo, "worktree", "add", "-q", "-b", "feat/wip", str(wip))
+        (wip / "wip.txt").write_text("wip\n")
+        g(wip, "add", "wip.txt")
+        g(wip, "commit", "-qm", "wip")
+        return repo
+
+    @staticmethod
+    def _stop_payload(cwd, session_id="stop-1", active=False):
+        return {
+            "session_id": session_id,
+            "transcript_path": "/dev/null",
+            "cwd": str(cwd),
+            "hook_event_name": "Stop",
+            "stop_hook_active": active,
+        }
+
+    def test_disposal_advisory_counts_what_is_reclaimable_and_deletes_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._worktree_repo(base)
+            state = base / "state"
+            state.mkdir()
+            env = {"TMPDIR": str(state),
+                   "SCRY_WORKTREE_REMINDER_MINUTES": "0"}
+
+            report = context(run_hook("worktree_disposal_advisory.sh", repo,
+                                      self._stop_payload(repo), env))
+
+            self.assertIn("2 linked worktree(s)", report)
+            self.assertIn("already in origin/main", report)
+            self.assertIn("prune-worktrees", report)
+            self.assertIn("deleted by this note", report)
+            # Advisory means advisory: both worktrees still on disk and listed.
+            listing = self._git(repo, "worktree", "list")
+            self.assertIn("agent-done", listing)
+            self.assertIn("agent-wip", listing)
+            self.assertTrue((repo / ".claude/worktrees/agent-done").is_dir())
+            self.assertTrue((repo / ".claude/worktrees/agent-wip").is_dir())
+
+    def test_disposal_advisory_recognises_a_squash_merged_worktree(self):
+        """Squash merges rewrite SHAs and hide from --is-ancestor. Deciding on
+        ancestry alone files finished workspaces under 'might be precious',
+        which is exactly the bucket nobody ever empties."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._worktree_repo(base)
+            origin = base / "origin"
+            g = self._git
+            # feat/wip's content lands upstream as one squashed commit.
+            (origin / "wip.txt").write_text("wip\n")
+            g(origin, "add", "wip.txt")
+            g(origin, "commit", "-qm", "squash: wip")
+            g(repo, "fetch", "-q", "origin")
+            state = base / "state"
+            state.mkdir()
+
+            report = context(run_hook(
+                "worktree_disposal_advisory.sh", repo,
+                self._stop_payload(repo),
+                {"TMPDIR": str(state), "SCRY_WORKTREE_REMINDER_MINUTES": "0"}))
+
+            self.assertIn("2 of them hold branches whose content is already in "
+                          "origin/main", report)
+
+    def test_disposal_advisory_speaks_once_per_session(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._worktree_repo(base)
+            state = base / "state"
+            state.mkdir()
+            env = {"TMPDIR": str(state),
+                   "SCRY_WORKTREE_REMINDER_MINUTES": "0"}
+
+            first = run_hook("worktree_disposal_advisory.sh", repo,
+                             self._stop_payload(repo), env)
+            second = run_hook("worktree_disposal_advisory.sh", repo,
+                              self._stop_payload(repo), env)
+            other = run_hook("worktree_disposal_advisory.sh", repo,
+                             self._stop_payload(repo, "stop-2"), env)
+
+            self.assertTrue(first.stdout.strip())
+            self.assertEqual(second.stdout.strip(), "")
+            self.assertTrue(other.stdout.strip())
+
+    def test_disposal_advisory_honours_the_stop_loop_guard(self):
+        """Its own additionalContext makes the model continue, so the Stop that
+        follows arrives with stop_hook_active true. Answering it again loops."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._worktree_repo(base)
+            state = base / "state"
+            state.mkdir()
+            env = {"TMPDIR": str(state),
+                   "SCRY_WORKTREE_REMINDER_MINUTES": "0"}
+
+            result = run_hook("worktree_disposal_advisory.sh", repo,
+                              self._stop_payload(repo, active=True), env)
+
+            self.assertEqual(result.stdout.strip(), "")
+
+    def test_disposal_advisory_waits_until_the_work_has_happened(self):
+        """A reminder about finished workspaces has nothing to say on turn one."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._worktree_repo(base)
+            state = base / "state"
+            state.mkdir()
+            transcript = base / "transcript.jsonl"
+            transcript.write_text("")
+            payload = self._stop_payload(repo)
+            payload["transcript_path"] = str(transcript)
+
+            young = run_hook("worktree_disposal_advisory.sh", repo, payload,
+                             {"TMPDIR": str(state),
+                              "SCRY_WORKTREE_REMINDER_MINUTES": "45"})
+            self.assertEqual(young.stdout.strip(), "")
+
+            aged = run_hook("worktree_disposal_advisory.sh", repo, payload,
+                            {"TMPDIR": str(state),
+                             "SCRY_WORKTREE_REMINDER_MINUTES": "0"})
+            self.assertTrue(aged.stdout.strip())
+
+    def test_disposal_advisory_is_silent_with_nothing_reclaimable(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._worktree_repo(base)
+            self._git(repo, "worktree", "remove", "--force",
+                      str(repo / ".claude/worktrees/agent-done"))
+            state = base / "state"
+            state.mkdir()
+
+            quiet = run_hook("worktree_disposal_advisory.sh", repo,
+                             self._stop_payload(repo),
+                             {"TMPDIR": str(state),
+                              "SCRY_WORKTREE_REMINDER_MINUTES": "0",
+                              "SCRY_WORKTREE_DISK_MB_WARN": "99999"})
+            self.assertEqual(quiet.stdout.strip(), "")
+
+            # A repo with no linked worktrees at all says nothing either.
+            plain = base / "plain"
+            self._git(base, "clone", "-q", str(base / "origin"), str(plain))
+            self.assertEqual(
+                run_hook("worktree_disposal_advisory.sh", plain,
+                         self._stop_payload(plain, "stop-plain"),
+                         {"TMPDIR": str(state),
+                          "SCRY_WORKTREE_REMINDER_MINUTES": "0"}).stdout.strip(),
+                "")
+
+    def test_disposal_advisory_stays_silent_when_it_cannot_identify_the_session(self):
+        """No session id means no throttle key, and no throttle key on a Stop
+        hook means an unbounded re-fire. Silence is the only safe answer."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._worktree_repo(base)
+            state = base / "state"
+            state.mkdir()
+            env = {**os.environ, "TMPDIR": str(state),
+                   "SCRY_WORKTREE_REMINDER_MINUTES": "0"}
+            for raw in ("", "not json", json.dumps({"cwd": str(repo)})):
+                with self.subTest(payload=raw):
+                    result = subprocess.run(
+                        ["bash", str(ROOT / "worktree_disposal_advisory.sh")],
+                        cwd=str(repo), input=raw, text=True,
+                        capture_output=True, check=True, env=env)
+                    self.assertEqual(result.stdout.strip(), "")
+
+    def test_the_advisory_hooks_are_wired_to_the_events_that_actually_deliver(self):
+        """Verified against Claude Code 2.1.266 on 2026-09-09.
+
+        SubagentStart is the only event whose additionalContext reaches the
+        spawned agent. Stop is the end-shaped event whose output reaches the
+        model at all — a probe SessionEnd hook demonstrably ran and its token
+        appeared zero times in both the CLI output and the transcript, while
+        the same probe on Stop appeared three times. A hook on SessionEnd
+        would be inert, so it must not be wired there.
+        """
+        hooks = json.loads((ROOT / "hooks/hooks.json").read_text())
+        sub = [h["command"] for group in hooks["hooks"]["SubagentStart"]
+               for h in group["hooks"]]
+        stop = [h["command"] for group in hooks["hooks"]["Stop"]
+                for h in group["hooks"]]
+        self.assertTrue(any("main_drift_advisory.sh" in c for c in sub), sub)
+        self.assertTrue(
+            any("worktree_disposal_advisory.sh" in c for c in stop), stop)
+        self.assertNotIn("SessionEnd", hooks["hooks"])
+        for command in sub + stop:
+            self.assertIn("PLUGIN_ROOT", command)
+            self.assertIn("CLAUDE_PLUGIN_ROOT", command)
+
+    def test_manifests_disclose_the_two_advisory_hooks(self):
+        """A hook that speaks into a subagent, and one that fires on every turn,
+        are both visible behavior — disclosed in BOTH manifests or not shipped."""
+        claude = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
+        codex = json.loads((ROOT / ".codex-plugin/plugin.json").read_text())
+        self.assertEqual(claude["version"], codex["version"])
+        long_desc = codex["interface"]["longDescription"]
+        self.assertIn("SubagentStart", claude["description"])
+        self.assertIn("SubagentStart", long_desc)
+        self.assertIn("Stop hook", claude["description"])
+        self.assertIn("Stop", long_desc)
+        self.assertIn("SCRY_WORKTREE_REMINDER_MINUTES", long_desc)
+        self.assertIn("SCRY_WORKTREE_DISK_MB_WARN", long_desc)
+        # It must not read as another deny hook: these two never block.
+        self.assertIn("ADVISORY", long_desc)
+        self.assertIn("deletes nothing", long_desc)
+
+    def test_the_tuning_table_documents_the_new_thresholds(self):
+        """AGENTS.md: keep thresholds documented in the README tuning table."""
+        readme = (ROOT / "README.md").read_text()
+        for var in ("SCRY_SUBAGENT_STALE_DAYS", "SCRY_SUBAGENT_STALE_COMMITS",
+                    "SCRY_WORKTREE_REMINDER_MINUTES",
+                    "SCRY_WORKTREE_DISK_MB_WARN", "SCRY_WORKTREE_DU_BUDGET"):
+            self.assertIn(f"`{var}`", readme)
 
     def _stack_repo_full(self, base, env_lines, fly_apps, lock=""):
         base.mkdir(parents=True, exist_ok=True)
