@@ -75,6 +75,11 @@
             "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/scale_advisory.sh",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/doc_currency_advisory.sh",
+            "timeout": 5
           }
         ]
       },
