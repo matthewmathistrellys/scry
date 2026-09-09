@@ -43,6 +43,8 @@ ADVISORY_TEXT="$(cat <<'EOF'
 Prose in this code file (moduledoc, docstrings, doc comments, CRISP blocks) is testimony from when it was written, and it may speak only for this module. Any claim reaching beyond this file — other modules, the pipeline, production behavior, providers, "the system always/never" — is STRICKEN: invalid, not to be used as evidence regardless of how authoritative, detailed, or dated it reads. Its one legitimate use is as a signal of where to investigate.
 
 The record is the module code itself, its callers, and the live system. A stricken claim repeated into a plan, spec, or answer is the same mistake as relying on it directly.
+
+Reading a line establishes what that line says. Understanding its behavior may require its callers, conditions, and consumers. Skipping those connections can turn an accurate citation into a false conclusion, then into tests that enshrine the mistake or code that acts on the wrong records. Another reviewer can make the same leap. Building on that premise can waste user time and LLM tokens, delay useful work, and erode trust as the user repeatedly catches and corrects the same error.
 EOF
 )"
 

@@ -840,7 +840,7 @@ class ScryHookTests(unittest.TestCase):
                         self._subagent_payload(repo, agent_type)))
                     self.assertIn("behind origin/main", report)
 
-    # ── Workspace disposal advisory (Stop) ─────────────────────────────────
+    # ── Session disposal advisory (Stop) ───────────────────────────────────
 
     def _worktree_repo(self, base):
         """A clone with one merged worktree and one live one."""
@@ -887,7 +887,7 @@ class ScryHookTests(unittest.TestCase):
             env = {"TMPDIR": str(state),
                    "SCRY_WORKTREE_REMINDER_MINUTES": "0"}
 
-            report = context(run_hook("worktree_disposal_advisory.sh", repo,
+            report = context(run_hook("session_disposal_advisory.sh", repo,
                                       self._stop_payload(repo), env))
 
             self.assertIn("2 linked worktree(s)", report)
@@ -919,7 +919,7 @@ class ScryHookTests(unittest.TestCase):
             state.mkdir()
 
             report = context(run_hook(
-                "worktree_disposal_advisory.sh", repo,
+                "session_disposal_advisory.sh", repo,
                 self._stop_payload(repo),
                 {"TMPDIR": str(state), "SCRY_WORKTREE_REMINDER_MINUTES": "0"}))
 
@@ -935,11 +935,11 @@ class ScryHookTests(unittest.TestCase):
             env = {"TMPDIR": str(state),
                    "SCRY_WORKTREE_REMINDER_MINUTES": "0"}
 
-            first = run_hook("worktree_disposal_advisory.sh", repo,
+            first = run_hook("session_disposal_advisory.sh", repo,
                              self._stop_payload(repo), env)
-            second = run_hook("worktree_disposal_advisory.sh", repo,
+            second = run_hook("session_disposal_advisory.sh", repo,
                               self._stop_payload(repo), env)
-            other = run_hook("worktree_disposal_advisory.sh", repo,
+            other = run_hook("session_disposal_advisory.sh", repo,
                              self._stop_payload(repo, "stop-2"), env)
 
             self.assertTrue(first.stdout.strip())
@@ -957,7 +957,7 @@ class ScryHookTests(unittest.TestCase):
             env = {"TMPDIR": str(state),
                    "SCRY_WORKTREE_REMINDER_MINUTES": "0"}
 
-            result = run_hook("worktree_disposal_advisory.sh", repo,
+            result = run_hook("session_disposal_advisory.sh", repo,
                               self._stop_payload(repo, active=True), env)
 
             self.assertEqual(result.stdout.strip(), "")
@@ -974,12 +974,12 @@ class ScryHookTests(unittest.TestCase):
             payload = self._stop_payload(repo)
             payload["transcript_path"] = str(transcript)
 
-            young = run_hook("worktree_disposal_advisory.sh", repo, payload,
+            young = run_hook("session_disposal_advisory.sh", repo, payload,
                              {"TMPDIR": str(state),
                               "SCRY_WORKTREE_REMINDER_MINUTES": "45"})
             self.assertEqual(young.stdout.strip(), "")
 
-            aged = run_hook("worktree_disposal_advisory.sh", repo, payload,
+            aged = run_hook("session_disposal_advisory.sh", repo, payload,
                             {"TMPDIR": str(state),
                              "SCRY_WORKTREE_REMINDER_MINUTES": "0"})
             self.assertTrue(aged.stdout.strip())
@@ -993,7 +993,7 @@ class ScryHookTests(unittest.TestCase):
             state = base / "state"
             state.mkdir()
 
-            quiet = run_hook("worktree_disposal_advisory.sh", repo,
+            quiet = run_hook("session_disposal_advisory.sh", repo,
                              self._stop_payload(repo),
                              {"TMPDIR": str(state),
                               "SCRY_WORKTREE_REMINDER_MINUTES": "0",
@@ -1004,7 +1004,7 @@ class ScryHookTests(unittest.TestCase):
             plain = base / "plain"
             self._git(base, "clone", "-q", str(base / "origin"), str(plain))
             self.assertEqual(
-                run_hook("worktree_disposal_advisory.sh", plain,
+                run_hook("session_disposal_advisory.sh", plain,
                          self._stop_payload(plain, "stop-plain"),
                          {"TMPDIR": str(state),
                           "SCRY_WORKTREE_REMINDER_MINUTES": "0"}).stdout.strip(),
@@ -1023,10 +1023,364 @@ class ScryHookTests(unittest.TestCase):
             for raw in ("", "not json", json.dumps({"cwd": str(repo)})):
                 with self.subTest(payload=raw):
                     result = subprocess.run(
-                        ["bash", str(ROOT / "worktree_disposal_advisory.sh")],
+                        ["bash", str(ROOT / "session_disposal_advisory.sh")],
                         cwd=str(repo), input=raw, text=True,
                         capture_output=True, check=True, env=env)
                     self.assertEqual(result.stdout.strip(), "")
+
+    # ── Session disposal: scratch Markdown (Stop) ──────────────────────────
+
+    def _scratch_repo(self, base):
+        """A clone with no linked worktrees, so only the Markdown half speaks.
+
+        `.resolve()` because a macOS temp dir is a symlink and git reports the
+        physical path; without it the hook's repo-relative paths are absolute
+        and every exemption misses for a reason that has nothing to do with
+        what is being tested.
+        """
+        g = self._git
+        origin = base / "origin"
+        repo = base / "repo"
+        origin.mkdir(parents=True)
+        g(origin, "init", "-q", "-b", "main")
+        g(origin, "config", "user.name", "Scry Test")
+        g(origin, "config", "user.email", "scry@example.test")
+        (origin / "README.md").write_text("readme\n")
+        g(origin, "add", ".")
+        g(origin, "commit", "-qm", "init")
+        g(base, "clone", "-q", str(origin), str(repo))
+        return repo
+
+    def _dated_session(self, base, repo, session_id="stop-md"):
+        """A Stop payload whose transcript is a real file, so its birth time is
+        a readable session start. Everything written after this call is, by
+        construction, 'created during this session'."""
+        transcript = base / f"{session_id}.jsonl"
+        transcript.write_text("")
+        payload = self._stop_payload(repo, session_id)
+        payload["transcript_path"] = str(transcript)
+        return payload
+
+    @staticmethod
+    def _md_env(state):
+        return {"TMPDIR": str(state), "SCRY_WORKTREE_REMINDER_MINUTES": "0"}
+
+    def test_disposal_advisory_lists_scratch_markdown_and_deletes_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td).resolve()
+            repo = self._scratch_repo(base)
+            state = base / "state"
+            state.mkdir()
+            payload = self._dated_session(base, repo)
+            (repo / "notes").mkdir()
+            (repo / "notes/plan.md").write_text("draft\n")
+            before = sorted(str(p.relative_to(repo)) for p in repo.rglob("*.md"))
+
+            report = context(run_hook("session_disposal_advisory.sh", repo,
+                                      payload, self._md_env(state)))
+
+            self.assertIn("1 untracked .md file(s)", report)
+            self.assertIn("notes/plan.md", report)
+            self.assertIn("where long-lived work is tracked", report)
+            self.assertIn("Nothing here has been or will be deleted", report)
+            # Advisory means advisory: the tree is byte-for-byte as it was.
+            after = sorted(str(p.relative_to(repo)) for p in repo.rglob("*.md"))
+            self.assertEqual(after, before)
+            self.assertEqual((repo / "notes/plan.md").read_text(), "draft\n")
+
+    def test_disposal_advisory_ignores_markdown_older_than_the_session(self):
+        """A file that predates the session is not this session's leftover, and
+        claiming it is turns the note into noise on the second day of a repo."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td).resolve()
+            repo = self._scratch_repo(base)
+            state = base / "state"
+            state.mkdir()
+            (repo / "old.md").write_text("from last week\n")
+            os.utime(repo / "old.md", (1, 1))
+            payload = self._dated_session(base, repo)
+
+            result = run_hook("session_disposal_advisory.sh", repo, payload,
+                              self._md_env(state))
+
+            self.assertEqual(result.stdout.strip(), "")
+            self.assertTrue((repo / "old.md").is_file())
+
+    def test_disposal_advisory_is_silent_with_no_scratch_markdown(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td).resolve()
+            repo = self._scratch_repo(base)
+            state = base / "state"
+            state.mkdir()
+            payload = self._dated_session(base, repo)
+
+            self.assertEqual(
+                run_hook("session_disposal_advisory.sh", repo, payload,
+                         self._md_env(state)).stdout.strip(), "")
+
+    def test_disposal_advisory_applies_the_shared_markdown_exemptions(self):
+        """Same list as md_creation_advisory.sh, from md_exemptions.sh. A file
+        exempt when it was written is exempt when the session ends."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td).resolve()
+            repo = self._scratch_repo(base)
+            state = base / "state"
+            state.mkdir()
+            payload = self._dated_session(base, repo)
+            for rel in ("CLAUDE.md", "AGENTS.md", "CHANGELOG.md", "LICENSE.md",
+                        "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md",
+                        "SUPPORT.md", ".github/PULL_REQUEST_TEMPLATE.md",
+                        ".github/copilot-instructions.md",
+                        ".github/ISSUE_TEMPLATE/bug.md", ".claude/scratch.md"):
+                target = repo / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("x\n")
+
+            self.assertEqual(
+                run_hook("session_disposal_advisory.sh", repo, payload,
+                         self._md_env(state)).stdout.strip(), "")
+
+    def test_disposal_advisory_is_silent_in_a_markdown_product_repo(self):
+        for marker in ("astro.config.mjs", "docusaurus.config.js"):
+            with self.subTest(marker=marker):
+                with tempfile.TemporaryDirectory() as td:
+                    base = Path(td).resolve()
+                    repo = self._scratch_repo(base)
+                    state = base / "state"
+                    state.mkdir()
+                    payload = self._dated_session(base, repo)
+                    (repo / marker).write_text("export default {}\n")
+                    (repo / "src").mkdir()
+                    (repo / "src/post.md").write_text("a post\n")
+
+                    self.assertEqual(
+                        run_hook("session_disposal_advisory.sh", repo, payload,
+                                 self._md_env(state)).stdout.strip(), "")
+
+    def test_disposal_advisory_will_not_guess_when_the_session_start_is_unknown(self):
+        """Birth time is the only honest cutoff. Where it cannot be read there
+        is no fallback: the transcript's mtime is its LAST write, and using it
+        would misdate every file in the tree. Report nothing instead."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td).resolve()
+            repo = self._scratch_repo(base)
+            state = base / "state"
+            state.mkdir()
+            (repo / "plan.md").write_text("draft\n")
+
+            for transcript in ("/dev/null", str(base / "missing.jsonl"), ""):
+                with self.subTest(transcript=transcript):
+                    payload = self._stop_payload(repo, f"stop-{len(transcript)}")
+                    payload["transcript_path"] = transcript
+                    self.assertEqual(
+                        run_hook("session_disposal_advisory.sh", repo, payload,
+                                 self._md_env(state)).stdout.strip(), "")
+
+    def test_disposal_advisory_says_both_leftovers_in_one_note(self):
+        """It fires in a live session at the end of a turn. Two findings are
+        one note, not two walls of text."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td).resolve()
+            repo = self._worktree_repo(base)
+            state = base / "state"
+            state.mkdir()
+            payload = self._dated_session(base, repo, "stop-both")
+            (repo / "plan.md").write_text("draft\n")
+
+            report = context(run_hook("session_disposal_advisory.sh", repo,
+                                      payload, self._md_env(state)))
+
+            self.assertIn("Worktrees:", report)
+            self.assertIn("Scratch Markdown:", report)
+            self.assertIn("plan.md", report)
+            self.assertEqual(report.count("Nothing here has been or will be "
+                                          "deleted"), 1)
+
+    def test_disposal_advisory_markdown_half_honours_the_session_gates(self):
+        """The loop guard and the once-per-session marker bound the Markdown
+        half exactly as they bound the worktree half — it is one note."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td).resolve()
+            repo = self._scratch_repo(base)
+            state = base / "state"
+            state.mkdir()
+            env = self._md_env(state)
+            payload = self._dated_session(base, repo, "stop-gates")
+            (repo / "plan.md").write_text("draft\n")
+
+            looping = dict(payload, stop_hook_active=True)
+            self.assertEqual(
+                run_hook("session_disposal_advisory.sh", repo, looping,
+                         env).stdout.strip(), "")
+
+            first = run_hook("session_disposal_advisory.sh", repo, payload, env)
+            second = run_hook("session_disposal_advisory.sh", repo, payload, env)
+            self.assertIn("plan.md", context(first))
+            self.assertEqual(second.stdout.strip(), "")
+
+            # A session that has not run long enough has nothing to say yet.
+            young = self._dated_session(base, repo, "stop-young")
+            (repo / "second.md").write_text("draft\n")
+            self.assertEqual(
+                run_hook("session_disposal_advisory.sh", repo, young,
+                         {"TMPDIR": str(state),
+                          "SCRY_WORKTREE_REMINDER_MINUTES": "45"}
+                         ).stdout.strip(), "")
+
+    # ── Markdown creation advisory (PostToolUse: Write) ────────────────────
+
+    def _creation_repo(self, base):
+        repo = base / "repo"
+        repo.mkdir(parents=True)
+        g = self._git
+        g(repo, "init", "-q", "-b", "main")
+        g(repo, "config", "user.name", "Scry Test")
+        g(repo, "config", "user.email", "scry@example.test")
+        (repo / "README.md").write_text("readme\n")
+        (repo / "docs").mkdir()
+        (repo / "docs/guide.md").write_text("tracked\n")
+        g(repo, "add", ".")
+        g(repo, "commit", "-qm", "init")
+        return repo
+
+    @staticmethod
+    def _write_payload(file_path, session_id="md-1"):
+        return {
+            "session_id": session_id,
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(file_path)},
+        }
+
+    def test_md_creation_advisory_states_the_facts_without_the_sermon(self):
+        """The old wording ranked two homes a file could belong in — which of
+        them is right is not something a hook can check. Cut 2026-09-09."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td).resolve()
+            repo = self._creation_repo(base)
+            state = base / "state"
+            state.mkdir()
+            scratch = repo / "notes"
+            scratch.mkdir()
+            (scratch / "plan.md").write_text("draft\n")
+
+            report = context(run_hook(
+                "md_creation_advisory.sh", repo,
+                self._write_payload(scratch / "plan.md"),
+                {"TMPDIR": str(state)}))
+
+            self.assertIn("NEW MARKDOWN", report)
+            self.assertIn("notes/plan.md", report)
+            self.assertIn("cleared out at session end", report)
+            self.assertIn("where long-lived work is tracked", report)
+            for gone in ("Artifact", "bind future sessions",
+                         "worth checking in", "delete it before the session"):
+                self.assertNotIn(gone, report)
+
+    def test_md_creation_advisory_keeps_every_exemption(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td).resolve()
+            repo = self._creation_repo(base)
+            state = base / "state"
+            state.mkdir()
+            exempt = ("README.md", "CLAUDE.md", "AGENTS.md", "LICENSE.md",
+                      "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md",
+                      "SUPPORT.md", "CHANGELOG.md",
+                      ".github/PULL_REQUEST_TEMPLATE.md",
+                      ".github/copilot-instructions.md",
+                      ".github/ISSUE_TEMPLATE/bug.md",
+                      ".claude/scratch.md", ".claude/commands/deep/note.md",
+                      # Already tracked: a Write is an overwrite, not creation.
+                      "docs/guide.md",
+                      # Not Markdown at all.
+                      "notes.txt")
+            for rel in exempt:
+                with self.subTest(rel=rel):
+                    target = repo / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("x\n")
+                    self.assertEqual(
+                        run_hook("md_creation_advisory.sh", repo,
+                                 self._write_payload(target, f"md-{rel}"),
+                                 {"TMPDIR": str(state)}).stdout.strip(), "")
+
+    def test_md_creation_advisory_is_silent_in_a_markdown_product_repo(self):
+        """index.md is dangerous in a code repo and normal in a docs site, so
+        the exemption is structural — a generator config, not a filename."""
+        for marker in ("astro.config.mjs", "astro.config.ts", "astro.config.js",
+                       "docusaurus.config.js", "docusaurus.config.ts"):
+            with self.subTest(marker=marker):
+                with tempfile.TemporaryDirectory() as td:
+                    base = Path(td).resolve()
+                    repo = self._creation_repo(base)
+                    state = base / "state"
+                    state.mkdir()
+                    (repo / marker).write_text("export default {}\n")
+                    (repo / "src").mkdir()
+                    (repo / "src/index.md").write_text("a post\n")
+                    self.assertEqual(
+                        run_hook("md_creation_advisory.sh", repo,
+                                 self._write_payload(repo / "src/index.md"),
+                                 {"TMPDIR": str(state)}).stdout.strip(), "")
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td).resolve()
+            repo = self._creation_repo(base)
+            state = base / "state"
+            state.mkdir()
+            (repo / ".vitepress").mkdir()
+            (repo / "post.md").write_text("a post\n")
+            self.assertEqual(
+                run_hook("md_creation_advisory.sh", repo,
+                         self._write_payload(repo / "post.md"),
+                         {"TMPDIR": str(state)}).stdout.strip(), "")
+
+    def test_md_creation_advisory_speaks_once_per_file_per_session(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td).resolve()
+            repo = self._creation_repo(base)
+            state = base / "state"
+            state.mkdir()
+            env = {"TMPDIR": str(state)}
+            (repo / "plan.md").write_text("draft\n")
+            (repo / "other.md").write_text("draft\n")
+
+            first = run_hook("md_creation_advisory.sh", repo,
+                             self._write_payload(repo / "plan.md"), env)
+            again = run_hook("md_creation_advisory.sh", repo,
+                             self._write_payload(repo / "plan.md"), env)
+            other_file = run_hook("md_creation_advisory.sh", repo,
+                                  self._write_payload(repo / "other.md"), env)
+            other_session = run_hook(
+                "md_creation_advisory.sh", repo,
+                self._write_payload(repo / "plan.md", "md-2"), env)
+
+            self.assertTrue(first.stdout.strip())
+            self.assertEqual(again.stdout.strip(), "")
+            self.assertTrue(other_file.stdout.strip())
+            self.assertTrue(other_session.stdout.strip())
+
+    def test_md_creation_advisory_has_no_client_detection_left(self):
+        """The Codex/Claude split existed only to gate the Artifact line. With
+        that line gone it was dead code, and dead code that reads like policy
+        is the kind a later session re-implements around."""
+        source = (ROOT / "md_creation_advisory.sh").read_text()
+        for gone in ("/.codex/", "client=", "EPHEMERAL_BULLET"):
+            self.assertNotIn(gone, source)
+
+    def test_the_two_markdown_hooks_share_one_exemption_list(self):
+        """Two copies of one whitelist is two answers to one question, and the
+        copy that drifts is the one that starts nagging about README.md."""
+        lib = ROOT / "md_exemptions.sh"
+        self.assertTrue(lib.is_file())
+        for hook in ("md_creation_advisory.sh", "session_disposal_advisory.sh"):
+            source = (ROOT / hook).read_text()
+            self.assertIn("md_exemptions.sh", source, hook)
+            self.assertIn("scry_md_product_repo", source, hook)
+            self.assertIn("scry_md_standard_file", source, hook)
+            # The list itself appears once, in the library.
+            self.assertNotIn("CODE_OF_CONDUCT.md", source, hook)
+        self.assertIn("CODE_OF_CONDUCT.md", lib.read_text())
 
     def test_the_advisory_hooks_are_wired_to_the_events_that_actually_deliver(self):
         """Verified against Claude Code 2.1.266 on 2026-09-09.
@@ -1045,7 +1399,7 @@ class ScryHookTests(unittest.TestCase):
                 for h in group["hooks"]]
         self.assertTrue(any("main_drift_advisory.sh" in c for c in sub), sub)
         self.assertTrue(
-            any("worktree_disposal_advisory.sh" in c for c in stop), stop)
+            any("session_disposal_advisory.sh" in c for c in stop), stop)
         self.assertNotIn("SessionEnd", hooks["hooks"])
         for command in sub + stop:
             self.assertIn("PLUGIN_ROOT", command)
@@ -1064,16 +1418,25 @@ class ScryHookTests(unittest.TestCase):
         self.assertIn("Stop", long_desc)
         self.assertIn("SCRY_WORKTREE_REMINDER_MINUTES", long_desc)
         self.assertIn("SCRY_WORKTREE_DISK_MB_WARN", long_desc)
+        self.assertIn("SCRY_SCRATCH_MD_LIST_MAX", long_desc)
         # It must not read as another deny hook: these two never block.
         self.assertIn("ADVISORY", long_desc)
         self.assertIn("deletes nothing", long_desc)
+        # The Stop hook now reports scratch Markdown too, and a manifest that
+        # does not say so is a manifest that under-discloses what fires on
+        # every turn. Both manifests or not shipped.
+        for text in (claude["description"], long_desc, codex["description"]):
+            self.assertIn("Markdown", text)
+        self.assertIn("untracked Markdown files", claude["description"])
+        self.assertIn("untracked Markdown files", long_desc)
 
     def test_the_tuning_table_documents_the_new_thresholds(self):
         """AGENTS.md: keep thresholds documented in the README tuning table."""
         readme = (ROOT / "README.md").read_text()
         for var in ("SCRY_SUBAGENT_STALE_DAYS", "SCRY_SUBAGENT_STALE_COMMITS",
                     "SCRY_WORKTREE_REMINDER_MINUTES",
-                    "SCRY_WORKTREE_DISK_MB_WARN", "SCRY_WORKTREE_DU_BUDGET"):
+                    "SCRY_WORKTREE_DISK_MB_WARN", "SCRY_WORKTREE_DU_BUDGET",
+                    "SCRY_SCRATCH_MD_LIST_MAX"):
             self.assertIn(f"`{var}`", readme)
 
     def _stack_repo_full(self, base, env_lines, fly_apps, lock=""):

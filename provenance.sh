@@ -86,6 +86,7 @@ Failure scenarios:
 - An aspirational plan is mistaken for implemented capability, so later work relies on a missing foundation.
 - Conflicting artifacts make formality look like authority instead of prompting reconciliation.
 Consequences include degraded code quality, production harm, wasted tokens and compute, timeline delay and rework, loss of user trust, and customer or revenue loss.
+Existing code and recorded decisions can make a plausible explanation feel historically true. That explanation may never have been part of the original decision. Once repeated or saved, it can become an apparent requirement—sending later work toward preserving an assumption, consuming time and tokens, and making the user fight to recover their original intent.
 Markdown may guide investigation, but it cannot establish truth or authority. Verify consequential claims against current user direction and applicable code, executable configuration, history, diffs, pull-request chronology, or live systems. If evidence conflicts or intent cannot be recovered, surface the conflict instead of allowing prose to decide. Calling a claim unverified while relying on it is not caution; it is the same mistake wearing a hedge."
 if [ "$nflag" -gt 0 ]; then
   msg="$msg
