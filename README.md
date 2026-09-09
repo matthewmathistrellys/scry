@@ -20,7 +20,7 @@ machine is carrying. Independent checks and advisories fill that in.
 | **`fleet.sh`** | What else is happening *right now*? |
 | **`pressure.sh`** | What shape is this machine in? |
 | **`main_drift_advisory.sh`** | Is the tree this subagent was handed the current one? |
-| **`worktree_disposal_advisory.sh`** | What are the finished build workspaces still costing? |
+| **`session_disposal_advisory.sh`** | What is this session leaving behind? |
 | **Markdown trust** | What goes wrong when repository prose is mistaken for authority? |
 
 - **`architecture.sh`** — a map of the codebase. It is a *dispatcher*, not a
@@ -86,27 +86,35 @@ machine is carrying. Independent checks and advisories fill that in.
   design documents, architectural decisions, status claims, memories, READMEs,
   and factual claims inside instruction files. It names the main failure
   scenarios and their consequences for code quality, production, tokens,
-  timelines, user trust, and customers. `md_advisory.sh` repeats the invariant
-  concisely when the dedicated Read tool opens a Markdown file. The session
-  warning is primary because shell commands and other access paths cannot all
-  be intercepted reliably.
+  timelines, user trust, and customers. It names one failure that is not about
+  stale prose at all: existing code and recorded decisions make a *plausible*
+  explanation feel historically true, when that explanation may never have been
+  part of the original decision. Repeated or saved once, it hardens into an
+  apparent requirement, and later work spends itself preserving an assumption
+  nobody made while the user fights to recover their actual intent.
+  `md_advisory.sh` repeats the invariant concisely when the dedicated Read tool
+  opens a Markdown file. The session warning is primary because shell commands
+  and other access paths cannot all be intercepted reliably.
 - **Markdown creation** — `md_creation_advisory.sh` is `md_advisory.sh`'s
   counterpart at write time: it fires when a session creates a Markdown file
-  git doesn't already track, and asks whether it's one of two things —
-  ephemeral/session work (in Claude Code, belongs in a Claude Code Artifact,
-  not a repo file) or an instruction file meant to bind future sessions (the
-  one case a permanent `.md` is correct). Anything else falls to a shared
-  closing line: it's scratch, not a third named home — a markdown file
-  standing in for a task tracker or a decision log isn't given a destination
-  this hook can't verify exists, it's just told it doesn't belong. Client-aware:
-  a Codex session (detected the same way `fleet.sh` tells clients apart) never
-  sees the Artifact line, since Codex CLI has no equivalent — verified against
-  OpenAI's own docs, not assumed — and gets one bullet instead of two. Silent
+  git doesn't already track, and states two facts. The file is not one of this
+  repo's standard Markdown files, and scratch Markdown created this session may
+  be cleared out at session end — so if what is in it needs to outlive the
+  session, it goes where long-lived work is tracked rather than into a repo
+  file. That is the whole message. It does not rank the homes a document could
+  belong in: which one is right is not something a hook can check, and the
+  earlier wording that tried (a Claude Code Artifact for ephemeral work, an
+  instruction file as "the only case a permanent `.md` is correct") was cut on
+  2026-09-09 as moralizing — along with the Codex/Claude client detection that
+  existed only to gate the Artifact line and became dead code with it. Silent
   on the standard ecosystem files (README, LICENSE, CHANGELOG,
   `CLAUDE.md`/`AGENTS.md`, GitHub's community-health files, anything under
   `.claude/`) and on any repo whose actual product *is* Markdown content — an
   Astro/Docusaurus-style content site, detected by its config, not by
-  filename. Fires at most once per file per session.
+  filename. Those exemptions live in `md_exemptions.sh`, sourced by both this
+  hook and `session_disposal_advisory.sh`, because two copies of one whitelist
+  is two answers to one question and the copy that drifts is the one that
+  starts nagging about `README.md`. Fires at most once per file per session.
 - **Code-prose trust (atomicity)** — `code_prose_advisory.sh` extends the
   Markdown doctrine to prose embedded in source files (`.ex`, `.exs`, `.py`):
   moduledocs, docstrings, doc comments, CRISP blocks. The doctrine is
@@ -117,6 +125,12 @@ machine is carrying. Independent checks and advisories fill that in.
   Injected on every Read of a source file. Born 2026-08-27, after a stale
   moduledoc claiming "the pipeline is text-only" was re-asserted by four
   consecutive sessions while the disproving sibling module sat two files away.
+
+  It also says what an *accurate* citation still cannot establish. Reading a
+  line settles what that line says; its behavior lives in its callers,
+  conditions, and consumers. Skip those and a correct quotation becomes a false
+  conclusion — then a test that enshrines it, or code that acts on the wrong
+  records — and the next reviewer makes the same leap from the same line.
 - **Stale-tree advisory (subagents)** — `main_drift_advisory.sh` fires on
   `SubagentStart` and tells the *child* agent that the worktree it was handed
   is behind `origin/main`, by how many commits and how many days, and how to
@@ -146,14 +160,37 @@ machine is carrying. Independent checks and advisories fill that in.
   is unreliable — that is the distance at which whole features land. There is
   no `agent_type` exemption: the built-in Explore agent, whose entire output is
   what is and isn't in a tree, is the type *most* exposed to this, not least.
-- **Workspace disposal** — `worktree_disposal_advisory.sh` reports, at most
-  once per session, how many linked worktrees the repo has, roughly what they
+- **Session disposal** — `session_disposal_advisory.sh` reports, at most once
+  per session, what the session is leaving behind. Two kinds of leftover, one
+  compact note, and it deletes nothing, ever.
+
+  *Worktrees*: how many linked worktrees the repo has, roughly what they
   occupy, how many hold branches already merged into `origin/main` (ancestry
   *and* patch-id, so a squash merge still counts), and the command to clean
   them — `prune-worktrees` where it is on `PATH`, `git worktree remove`
-  otherwise. It is advisory in the strict sense: it deletes nothing, ever.
-  Agent sessions create isolated worktrees and never tear the finished ones
-  down; on 2026-09-09 that took a machine to 0 bytes free.
+  otherwise. Agent sessions create isolated worktrees and never tear the
+  finished ones down; on 2026-09-09 that took a machine to 0 bytes free.
+
+  *Scratch Markdown*: the untracked `.md` files in the session's own working
+  tree whose mtime is at or after the session started — the far end of the
+  sentence `md_creation_advisory.sh` began when each one appeared. It lists
+  them (up to `SCRY_SCRATCH_MD_LIST_MAX`, then a count), says plainly that
+  nothing has been deleted, and says that anything worth keeping belongs where
+  long-lived work is tracked. It applies the same `md_exemptions.sh` list the
+  creation hook uses, so a file exempt at birth is exempt here. "Untracked"
+  means what `git status` means by it, `.gitignore` included: a file the repo
+  has already decided not to keep is not news, and scanning ignored trees would
+  put `node_modules/` under `du`-shaped pressure at the end of every turn.
+
+  **"Created this session" is a fact here, not a guess.** The cutoff is the
+  transcript file's birth time — the same metadata the age gate already reads,
+  never the transcript's contents. Where a filesystem does not record birth
+  time there is no second mechanism: the Markdown half stays silent rather than
+  substituting the transcript's *m*time, which records its last write and would
+  silently misdate every file in the tree.
+
+  Named `worktree_disposal_advisory.sh` until 2026-09-09, when the Markdown
+  half made the old name an undersell.
 
   **It runs on `Stop`, not `SessionEnd`, and the reason is measured.**
   `SessionEnd` output goes nowhere: Claude Code's own event contract gives it
@@ -513,7 +550,7 @@ The Codex package uses `.codex-plugin/plugin.json`; Claude uses
 scripts, and scanners, so there is no copied implementation to drift.
 
 Two of the hooks ride events Claude Code defines — `SubagentStart`
-(`main_drift_advisory.sh`) and `Stop` (`worktree_disposal_advisory.sh`).
+(`main_drift_advisory.sh`) and `Stop` (`session_disposal_advisory.sh`).
 Whether Codex fires those event names has **not** been verified against a
 Codex build; if it does not, those two groups simply never run there, which is
 the same degradation-to-silence every other check has. The scripts themselves
@@ -632,6 +669,7 @@ starts changing a decision.
 | `SCRY_WORKTREE_REMINDER_MINUTES` | `45` | how long a session must run before the disposal reminder speaks |
 | `SCRY_WORKTREE_DISK_MB_WARN` | `2048` | worktree disk at which an unmerged pile is worth saying out loud |
 | `SCRY_WORKTREE_DU_BUDGET` | `4` | seconds of `du` allowed before the size is reported as a floor |
+| `SCRY_SCRATCH_MD_LIST_MAX` | `5` | scratch `.md` files named in the disposal note before the rest become a count |
 
 Raising a threshold buys silence. Lowering one buys warning. Neither changes
 what is measured.
@@ -668,7 +706,7 @@ event, check what its exit-0 contract does with output — Claude Code documents
 this per event, and a probe hook returning a unique token settles it in one
 run. `SessionEnd` reads like the natural home for an end-of-session reminder
 and discards everything it is handed; `Stop` delivers to the model and is why
-`worktree_disposal_advisory.sh` lives there instead. The same question is why
+`session_disposal_advisory.sh` lives there instead. The same question is why
 `main_drift_advisory.sh` is on `SubagentStart`: `SessionStart` context never
 reaches a child agent, and Agent-tool `additionalContext` lands in the parent.
 

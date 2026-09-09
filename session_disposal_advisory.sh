@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# worktree_disposal_advisory.sh — Stop hook: what the finished build
-# workspaces are still costing.
+# session_disposal_advisory.sh — Stop hook: what this session is leaving
+# behind. Two kinds of leftover, one note, once.
 #
-# Agent sessions create isolated worktrees (`.claude/worktrees/`,
-# `.worktrees/`) and nothing tears the finished ones down. On 2026-09-09 that
-# reached 0 bytes free on the machine. `health.sh` already names stale and
-# abandoned worktrees at SessionStart, but session start is the wrong end of
-# the work: at that point the worktrees this session is about to create do not
-# exist yet, and the ones it inherits are not yet its problem. The cost lands
-# at the END, which is where this speaks.
+#   1. Finished build worktrees. Agent sessions create isolated worktrees
+#      (`.claude/worktrees/`, `.worktrees/`) and nothing tears the finished
+#      ones down. On 2026-09-09 that reached 0 bytes free on the machine.
+#   2. Scratch Markdown. Untracked .md files this session itself wrote. The
+#      creation-time counterpart (md_creation_advisory.sh) said each one was
+#      scratch as it appeared; this is the end of that sentence.
+#
+# `health.sh` already names stale and abandoned worktrees at SessionStart, but
+# session start is the wrong end of the work: at that point what this session
+# is about to create does not exist yet, and what it inherits is not yet its
+# problem. The cost lands at the END, which is where this speaks. (Named
+# worktree_disposal_advisory.sh until 2026-09-09, when the Markdown half made
+# the old name an undersell.)
 #
 # ── Why Stop and not SessionEnd ────────────────────────────────────────────
 # SessionEnd is the obvious event and its output goes NOWHERE. Verified two
@@ -44,9 +50,21 @@
 #     metadata, never its contents (AGENTS.md: metadata, not conversation
 #     content).
 #
-# ADVISORY ONLY. It counts, measures, and names the command. It removes
-# nothing, and it never runs prune-worktrees for you.
+# That same birth time is the ONLY thing that makes "created this session" a
+# fact rather than a guess, so it does double duty: it is both the age gate and
+# the cutoff an untracked .md file's mtime is compared against. Where it cannot
+# be read (a filesystem that does not record birth time), the age gate opens as
+# before and the Markdown half stays silent — there is no second mechanism to
+# fall back to. The transcript's mtime is its LAST write, not the session's
+# first, and using it as a start time would silently misdate every file.
+#
+# ADVISORY ONLY. It counts, measures, lists, and names the command. It removes
+# nothing — no worktree, no file, ever — and it never runs prune-worktrees for
+# you.
 set -uo pipefail
+
+# shellcheck source=md_exemptions.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/md_exemptions.sh"
 
 payload="$(cat 2>/dev/null || true)"
 
@@ -83,7 +101,7 @@ g() { git -C "$main_wt" "$@"; }
 
 # ── Gate 2: once per session ───────────────────────────────────────────────
 session_key="$session_id"
-marker_dir="${TMPDIR:-/tmp}/scry-worktree-disposal"
+marker_dir="${TMPDIR:-/tmp}/scry-session-disposal"
 mkdir -p "$marker_dir" 2>/dev/null || exit 0
 marker="$marker_dir/$(printf '%s' "$session_key" | shasum | cut -c1-16)"
 [ -e "$marker" ] && exit 0
@@ -91,12 +109,15 @@ marker="$marker_dir/$(printf '%s' "$session_key" | shasum | cut -c1-16)"
 # ── Gate 3: only once the session is old enough to have finished something ──
 # A reminder about cleaning up finished work has nothing to say on turn one.
 # Birth time of the transcript file, via stat; if it cannot be read, this gate
-# opens rather than closing (the other two gates still bound the noise).
+# opens rather than closing (the other two gates still bound the noise) and
+# session_start stays 0, which is what silences the Markdown half below.
 MIN_MINUTES="${SCRY_WORKTREE_REMINDER_MINUTES:-45}"
+session_start=0
 if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
   born="$(stat -f %B "$transcript_path" 2>/dev/null || stat -c %W "$transcript_path" 2>/dev/null || echo 0)"
   case "$born" in ''|*[!0-9]*) born=0 ;; esac
   if [ "$born" -gt 0 ]; then
+    session_start="$born"
     age_min=$(( ( $(date +%s) - born ) / 60 ))
     [ "$age_min" -ge "$MIN_MINUTES" ] || exit 0
   fi
@@ -186,41 +207,87 @@ while [ "$i" -lt "$total" ]; do
   fi
 done
 
-[ "$linked" -gt 0 ] || exit 0
-
 # Speak only when there is something true to say: something is reclaimable, or
 # the pile is big enough to matter on its own.
 DISK_MB_WARN="${SCRY_WORKTREE_DISK_MB_WARN:-2048}"
 mb=$(( kb / 1024 ))
-if [ "$merged" -eq 0 ] && [ "$mb" -lt "$DISK_MB_WARN" ]; then
-  exit 0
+worktree_note=""
+if [ "$linked" -gt 0 ] && { [ "$merged" -gt 0 ] || [ "$mb" -ge "$DISK_MB_WARN" ]; }; then
+  size_phrase="~${mb} MB"
+  [ "$mb" -lt 1 ] && size_phrase="under 1 MB"
+  [ "$measured" -lt "$linked" ] && size_phrase="at least ~${mb} MB (measured $measured of $linked; time budget)"
+
+  if [ "$merged" -eq 1 ]; then
+    merged_phrase="1 of them holds a branch whose content is already in $upstream, so nothing in it is pending — that is finished work still occupying disk."
+  elif [ "$merged" -gt 1 ]; then
+    merged_phrase="$merged of them hold branches whose content is already in $upstream, so nothing in those is pending — that is finished work still occupying disk."
+  else
+    merged_phrase="None are provably merged into $upstream from local refs, so none can be called safe to remove from here."
+  fi
+
+  if command -v prune-worktrees >/dev/null 2>&1; then
+    cmd_phrase="\`prune-worktrees --dry-run $main_wt\` lists what it would remove; \`prune-worktrees $main_wt\` removes them. It removes a worktree only when GitHub reports its branch's PR merged, and keeps anything dirty, detached, or without a merged PR."
+  else
+    cmd_phrase="\`git -C $main_wt worktree list\` shows them; \`git -C $main_wt worktree remove <path>\` removes one. Check \`git -C <path> status --porcelain\` first — a worktree with uncommitted files is not safe to remove."
+  fi
+
+  worktree_note="Worktrees: $(basename "$main_wt") has $linked linked worktree(s) besides the primary checkout, occupying $size_phrase. $merged_phrase $cmd_phrase Unremoved build workspaces are what took this machine to 0 bytes free on 2026-09-09, and a full disk fails a session mid-write rather than at a boundary."
 fi
+
+# ── Scratch Markdown this session wrote ────────────────────────────────────
+# Scope is the session's OWN working tree, not the primary checkout: a session
+# running in a linked worktree writes its scratch there, and claiming to have
+# surveyed a tree this session never touched would be a wider claim than the
+# evidence supports.
+#
+# Untracked means `--others --exclude-standard`: the same set `git status`
+# calls untracked. Files a .gitignore already covers are deliberately out —
+# including them means walking node_modules/ and _build/ at the end of every
+# turn to report files the repo has already decided it does not keep.
+#
+# Exemptions come from md_exemptions.sh, the same list md_creation_advisory.sh
+# used when each file appeared. A file exempt at creation is exempt here.
+md_count=0
+md_names=""
+MD_LIST_MAX="${SCRY_SCRATCH_MD_LIST_MAX:-5}"
+if [ "$session_start" -gt 0 ]; then
+  tree_root="$(git -C "$session_cwd" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$tree_root" ] && ! scry_md_product_repo "$tree_root"; then
+    while IFS= read -r -d '' mdrel; do
+      [ -n "$mdrel" ] || continue
+      scry_md_standard_file "$mdrel" && continue
+      [ -f "$tree_root/$mdrel" ] || continue
+      mdt="$(stat -f %m "$tree_root/$mdrel" 2>/dev/null || stat -c %Y "$tree_root/$mdrel" 2>/dev/null || echo 0)"
+      case "$mdt" in ''|*[!0-9]*) mdt=0 ;; esac
+      [ "$mdt" -ge "$session_start" ] || continue
+      md_count=$((md_count+1))
+      if [ "$md_count" -le "$MD_LIST_MAX" ]; then
+        md_names="${md_names:+$md_names, }$mdrel"
+      fi
+    done < <(git -C "$tree_root" ls-files --others --exclude-standard -z -- '*.md' 2>/dev/null)
+  fi
+fi
+
+md_note=""
+if [ "$md_count" -gt 0 ]; then
+  [ "$md_count" -gt "$MD_LIST_MAX" ] && md_names="$md_names, +$((md_count - MD_LIST_MAX)) more"
+  md_note="Scratch Markdown: $md_count untracked .md file(s) in this tree were written after this session started — $md_names. Anything in them that needs to outlive the session belongs where long-lived work is tracked; the files themselves are scratch."
+fi
+
+[ -n "$worktree_note" ] || [ -n "$md_note" ] || exit 0
 
 : > "$marker"
 
-size_phrase="~${mb} MB"
-[ "$mb" -lt 1 ] && size_phrase="under 1 MB"
-[ "$measured" -lt "$linked" ] && size_phrase="at least ~${mb} MB (measured $measured of $linked; time budget)"
+ADVISORY_TEXT="Scry — session disposal (advisory, once per session):"
+[ -n "$worktree_note" ] && ADVISORY_TEXT="$ADVISORY_TEXT
 
-if [ "$merged" -eq 1 ]; then
-  merged_phrase="1 of them holds a branch whose content is already in $upstream, so nothing in it is pending — that is finished work still occupying disk."
-elif [ "$merged" -gt 1 ]; then
-  merged_phrase="$merged of them hold branches whose content is already in $upstream, so nothing in those is pending — that is finished work still occupying disk."
-else
-  merged_phrase="None are provably merged into $upstream from local refs, so none can be called safe to remove from here."
-fi
+$worktree_note"
+[ -n "$md_note" ] && ADVISORY_TEXT="$ADVISORY_TEXT
 
-if command -v prune-worktrees >/dev/null 2>&1; then
-  cmd_phrase="\`prune-worktrees --dry-run $main_wt\` lists what it would remove; \`prune-worktrees $main_wt\` removes them. It removes a worktree only when GitHub reports its branch's PR merged, and keeps anything dirty, detached, or without a merged PR."
-else
-  cmd_phrase="\`git -C $main_wt worktree list\` shows them; \`git -C $main_wt worktree remove <path>\` removes one. Check \`git -C <path> status --porcelain\` first — a worktree with uncommitted files is not safe to remove."
-fi
+$md_note"
+ADVISORY_TEXT="$ADVISORY_TEXT
 
-ADVISORY_TEXT="Scry — workspace disposal (advisory, once per session): $(basename "$main_wt") has $linked linked worktree(s) besides the primary checkout, occupying $size_phrase. $merged_phrase
-
-Nothing here has been or will be deleted by this note. $cmd_phrase
-
-Say this to the user in a sentence and stop; do not start cleaning up unless asked. Unremoved build workspaces are what took this machine to 0 bytes free on 2026-09-09, and a full disk fails a session mid-write rather than at a boundary."
+Nothing here has been or will be deleted by this note — no worktree, no file. Say this to the user in a sentence and stop; do not start cleaning up unless asked."
 
 CTX="$ADVISORY_TEXT" python3 - <<'PY'
 import json, os

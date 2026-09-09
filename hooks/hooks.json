@@ -120,7 +120,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/worktree_disposal_advisory.sh",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/session_disposal_advisory.sh",
             "timeout": 15
           }
         ]
