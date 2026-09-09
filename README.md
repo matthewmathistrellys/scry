@@ -652,6 +652,30 @@ malformed completed states are unknown rather than silently healthy.
 No configuration needed — the git remote provides the repo. If `gh` isn't
 installed or authentication fails, the block is silently skipped (fails open).
 
+## Branch point
+
+A branch is created from whatever ref the command names, and from `HEAD` when it
+names none. Git raises nothing when that commit is one origin moved past hours
+ago: the branch is created, and the work begins on files that are already the
+older ones.
+
+A `PreToolUse` advisory speaks when a Bash command creates a branch
+(`git checkout -b`, `git switch -c`, `git worktree add`, `git branch <name>`)
+**without naming a start point**. It states two facts and no instruction: how far
+`HEAD` sits behind `origin/<default>`, and how long ago origin was last fetched —
+because a `behind` count measured against a remote-tracking ref last updated
+yesterday is itself yesterday's answer, and a zero from a checkout that has never
+fetched means "nothing had landed as of the clone", not "nothing has landed".
+
+It is silent when the command chooses its own start point, and when the tree is
+current and the fetch is recent enough for that to mean something. It never
+fetches, never moves a ref, and never denies.
+
+Observed 2026-09-09 on a freshly built remote box: an agent asked to make one
+change ran `git checkout -b <name>` with no start point and no preceding fetch.
+`git reflog` recorded "Created from HEAD" and the checkout had no `FETCH_HEAD` at
+all. The branch was current only because the clone was minutes old.
+
 ## Tuning
 
 Every threshold is an environment variable. Defaults are set where the number
@@ -670,6 +694,7 @@ starts changing a decision.
 | `SCRY_WORKTREE_DISK_MB_WARN` | `2048` | worktree disk at which an unmerged pile is worth saying out loud |
 | `SCRY_WORKTREE_DU_BUDGET` | `4` | seconds of `du` allowed before the size is reported as a floor |
 | `SCRY_SCRATCH_MD_LIST_MAX` | `5` | scratch `.md` files named in the disposal note before the rest become a count |
+| `SCRY_BRANCH_POINT_FETCH_HOURS` | `2` | age of the last fetch past which a branch-point count is reported as dated |
 
 Raising a threshold buys silence. Lowering one buys warning. Neither changes
 what is measured.

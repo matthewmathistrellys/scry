@@ -2501,3 +2501,152 @@ class ScryHookTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BranchPointAdvisoryTests(unittest.TestCase):
+    """The branch is created from HEAD when the command names no start point.
+
+    Observed 2026-09-09 on a freshly built remote box: an agent asked to make
+    one change ran `git checkout -b <name>` with no start point and no
+    preceding fetch. The reflog recorded "Created from HEAD" and the checkout
+    had no FETCH_HEAD at all. It was current only because the clone was
+    minutes old.
+    """
+
+    @staticmethod
+    def _git(cwd, *args):
+        return subprocess.run(["git", "-C", str(cwd), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def _clone_behind(self, base, commits=3):
+        """A clone whose HEAD is `commits` behind origin/main, never fetched."""
+        origin = base / "origin"
+        repo = base / "repo"
+        g = self._git
+        origin.mkdir(parents=True)
+        g(origin, "init", "-q", "-b", "main")
+        g(origin, "config", "user.name", "Scry Test")
+        g(origin, "config", "user.email", "scry@example.test")
+        (origin / "first.txt").write_text("one\n")
+        g(origin, "add", "first.txt")
+        g(origin, "commit", "-qm", "first")
+        subprocess.run(["git", "clone", "-q", str(origin), str(repo)],
+                       check=True, capture_output=True)
+        g(repo, "config", "user.name", "Scry Test")
+        g(repo, "config", "user.email", "scry@example.test")
+        for i in range(commits):
+            (origin / f"later{i}.txt").write_text(f"{i}\n")
+            g(origin, "add", f"later{i}.txt")
+            g(origin, "commit", "-qm", f"later{i}")
+        if commits:
+            g(repo, "fetch", "-q", "origin")
+        return repo
+
+    @staticmethod
+    def _payload(cwd, command):
+        return {
+            "session_id": "bp-1",
+            "transcript_path": "/dev/null",
+            "cwd": str(cwd),
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        }
+
+    def _run(self, repo, command, env=None):
+        return run_hook("branch_point_advisory.sh", repo,
+                        self._payload(repo, command), env=env)
+
+    def test_it_names_the_distance_the_new_branch_will_carry(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._clone_behind(Path(td), commits=3)
+            report = context(self._run(repo, "git checkout -b feat/thing"))
+            self.assertIn("3 commit(s) behind origin/main", report)
+            self.assertIn("no start point named", report)
+
+    def test_it_says_the_count_is_unknowable_when_origin_was_never_fetched(self):
+        """A zero measured against a never-updated remote-tracking ref is not a
+        zero. That is the exact shape of the 2026-09-09 observation."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._clone_behind(Path(td), commits=0)
+            self.assertFalse((repo / ".git" / "FETCH_HEAD").exists())
+            report = context(self._run(repo, "git checkout -b feat/thing"))
+            self.assertIn("never been fetched", report)
+            self.assertIn("can only be larger", report)
+
+    def test_it_is_silent_when_the_command_chooses_its_own_start_point(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._clone_behind(Path(td), commits=3)
+            for cmd in ("git checkout -b feat/x origin/main",
+                        "git switch -c feat/x origin/main",
+                        "git worktree add ../wt -b feat/x origin/main"):
+                self.assertEqual(context(self._run(repo, cmd)), "", cmd)
+
+    def test_it_is_silent_on_a_current_tree_fetched_recently(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._clone_behind(Path(td), commits=0)
+            self._git(repo, "fetch", "-q", "origin")
+            self.assertEqual(context(self._run(repo, "git checkout -b feat/x")), "")
+
+    def test_it_speaks_again_once_the_fetch_itself_is_old(self):
+        """A count is only as fresh as the ref it was measured against."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._clone_behind(Path(td), commits=0)
+            self._git(repo, "fetch", "-q", "origin")
+            fetch_head = repo / ".git" / "FETCH_HEAD"
+            old = time.time() - 9 * 3600
+            os.utime(fetch_head, (old, old))
+            report = context(self._run(repo, "git checkout -b feat/x"))
+            self.assertIn("last fetched 9h ago", report)
+
+    def test_it_ignores_commands_that_create_no_branch(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._clone_behind(Path(td), commits=3)
+            for cmd in ("git checkout main", "git branch -d old",
+                        "git branch --merged", "git status", "git switch main",
+                        "ls -la"):
+                self.assertEqual(context(self._run(repo, cmd)), "", cmd)
+
+    def test_it_advises_and_never_denies(self):
+        """AGENTS.md: advisory, never blocking. Every hook exits zero."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._clone_behind(Path(td), commits=3)
+            result = self._run(repo, "git checkout -b feat/x")
+            self.assertEqual(result.returncode, 0)
+            emitted = json.loads(result.stdout)
+            self.assertEqual(
+                emitted["hookSpecificOutput"]["hookEventName"], "PreToolUse")
+            self.assertNotIn("permissionDecision", emitted["hookSpecificOutput"])
+
+    def test_it_moves_no_ref_and_no_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._clone_behind(Path(td), commits=3)
+            before_head = self._git(repo, "rev-parse", "HEAD")
+            before_remote = self._git(repo, "rev-parse", "origin/main")
+            self._run(repo, "git checkout -b feat/x")
+            self.assertEqual(self._git(repo, "rev-parse", "HEAD"), before_head)
+            self.assertEqual(self._git(repo, "rev-parse", "origin/main"),
+                             before_remote)
+            self.assertEqual(self._git(repo, "status", "--porcelain"), "")
+
+    def test_the_staleness_threshold_is_configurable_not_hardcoded(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._clone_behind(Path(td), commits=0)
+            self._git(repo, "fetch", "-q", "origin")
+            fetch_head = repo / ".git" / "FETCH_HEAD"
+            old = time.time() - 4 * 3600
+            os.utime(fetch_head, (old, old))
+            self.assertEqual(
+                context(self._run(repo, "git checkout -b feat/x",
+                                  env={"SCRY_BRANCH_POINT_FETCH_HOURS": "8"})), "")
+            self.assertIn(
+                "last fetched 4h ago",
+                context(self._run(repo, "git checkout -b feat/x",
+                                  env={"SCRY_BRANCH_POINT_FETCH_HOURS": "2"})))
+
+    def test_it_fails_open_on_a_payload_it_cannot_read(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._clone_behind(Path(td), commits=3)
+            result = run_hook("branch_point_advisory.sh", repo, {"cwd": str(repo)})
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout.strip(), "")
