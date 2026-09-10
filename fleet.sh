@@ -33,9 +33,13 @@
 # was written moments ago, so the new session used to start knowing nothing
 # about where it came from (Matt, 2026-09-10: "the new one has no idea where
 # it just came from"). On "clear" this hook names that session — id, title,
-# how to resume it — and, when the cache-handoff monitor got a handoff
-# written for it, prints that handoff. Still no prompts, no responses: a
-# handoff is a document the session wrote to be read by the next one.
+# what resuming it costs — and whether the cache-handoff monitor got a handoff
+# written for it (its path, never its body). Which session that was comes
+# from clear_record.sh, written as the old session ended; with ten sessions
+# open the newest-transcript guess is wrong exactly when it matters, so the
+# guess is only a labelled fallback (council + Matt, 2026-09-10). Still no
+# prompts, no responses, no recipe: four facts, and the decision is the
+# reader's.
 #
 # Silence is the default and the point. A signal speaks only when it
 # would change a decision; one lone session in a quiet repo prints
@@ -112,6 +116,8 @@ TRANSCRIPT_PATH="$transcript_path" ACTIVE_MINUTES="$ACTIVE_MINUTES" \
 AGENT_BINARIES="$AGENT_BINARIES" WORKTREE_PATHS="$worktree_paths" \
 START_SOURCE="$start_source" \
 SCRY_HANDOFF_ROOT="${SCRY_CACHE_HANDOFF_DIR:-$HOME/.claude/scry/handoffs}" \
+SCRY_CLEAR_ROOT="${SCRY_CLEAR_STATE_DIR:-${TMPDIR:-/tmp}/scry-last-cleared}" \
+SCRY_DEADLINE_ROOT="${SCRY_CACHE_STATE_DIR:-${TMPDIR:-/tmp}/scry-cache-deadline}" \
 python3 - >"$fleet_tmp" 2>/dev/null <<'PY'
 import glob, json, os, re, subprocess, time
 
@@ -124,6 +130,8 @@ now      = time.time()
 transcript_path = os.environ.get("TRANSCRIPT_PATH", "")
 start_source = os.environ.get("START_SOURCE", "startup")
 handoff_root = os.environ.get("SCRY_HANDOFF_ROOT", "")
+clear_root = os.environ.get("SCRY_CLEAR_ROOT", "")
+deadline_root = os.environ.get("SCRY_DEADLINE_ROOT", "")
 
 def encode(path):
     # Claude Code's transcript directory name: '/', '.' and '_' all become
@@ -433,9 +441,10 @@ if found:
 
 # ── 3. What the previous session here was doing ─────────────────────────
 # Title only — see the header comment on why content is deliberately excluded.
-# After /clear the rule inverts: the newest transcript here that is not this
-# session IS the one the user just left, live-window or not, and the point
-# is to say so. See the header comment.
+# After /clear the question is different: WHICH session did the user just
+# leave. clear_record.sh wrote that down as the old session ended; this reads
+# the record for this directory, deletes it, and states four facts. If no
+# record exists the mtime guess stands in, and says it is a guess.
 sd = os.path.join(projects, self_prefix)
 
 def last_title(path):
@@ -461,6 +470,8 @@ def last_title(path):
 
 def newest_other_transcript(exclude_live):
     best = None
+    if not os.path.isdir(sd):
+        return None
     for f in os.listdir(sd):
         if not f.endswith(".jsonl") or f[:-6] == self_id:
             continue
@@ -475,46 +486,85 @@ def newest_other_transcript(exclude_live):
             best = (p, st.st_mtime)
     return best
 
-if os.path.isdir(sd) and start_source == "clear":
-    best = newest_other_transcript(exclude_live=False)
+def claim_clear_record():
+    """The record clear_record.sh left for this directory, newest first,
+    deleted once read. None when the SessionEnd hook did not run."""
+    if not clear_root or not os.path.isdir(clear_root):
+        return None
+    best = None
+    for f in os.listdir(clear_root):
+        if not f.endswith(".json"):
+            continue
+        p = os.path.join(clear_root, f)
+        try:
+            with open(p) as fh:
+                rec = json.load(fh)
+        except Exception:
+            continue
+        if rec.get("cwd") != cwd or rec.get("session_id") == self_id:
+            continue
+        if best is None or rec.get("ended_at", 0) > best[0].get("ended_at", 0):
+            best = (rec, p)
     if best:
-        prev_id = os.path.basename(best[0])[:-6]
-        title = last_title(best[0])
-        label = f'"{title}" ' if title else ""
-        lines.append(
-            f"- This session began with /clear. The session you left was {label}"
-            f"(id {prev_id}, last written {human(now - best[1])} ago). Its transcript "
-            f"is intact: `claude --resume {prev_id}` reopens it, and in this same "
-            f"process the rewind menu's previous-session entry does too. This "
-            f"session shares no context with it; what follows is all it gets."
-        )
-        # The cache-handoff monitor names handoffs <stamp>-<sid[:8]>.md under
-        # <root>/<repo basename>/. If one was written for the session just
-        # left, it was written to be read here.
-        handoff = None
-        hd = os.path.join(handoff_root, os.path.basename(family)) if handoff_root else ""
-        if hd and os.path.isdir(hd):
-            cands = [os.path.join(hd, f) for f in os.listdir(hd)
-                     if f.endswith(f"-{prev_id[:8]}.md")]
-            cands = [c for c in cands if os.path.isfile(c) and os.path.getsize(c) > 0]
-            if cands:
-                handoff = max(cands, key=os.path.getmtime)
-        if handoff:
-            try:
-                with open(handoff, encoding="utf-8", errors="ignore") as fh:
-                    body = fh.read(6000)
-                more = (" [truncated at 6000 chars; read the file for the rest]"
-                        if os.path.getsize(handoff) > 6000 else "")
-                lines.append(f"- Handoff written by that session ({handoff}):{more}\n"
-                             + "\n".join("    " + ln for ln in body.rstrip().splitlines()))
-            except Exception:
-                lines.append(f"- A handoff exists for that session but could not be read: {handoff}")
+        try:
+            os.unlink(best[1])
+        except OSError:
+            pass
+        return best[0]
+    return None
+
+def cache_state(sid):
+    """What resuming that session costs, from the deadline the status-line
+    wrapper recorded for it. Cheap while its prompt cache is warm; a full
+    re-read after (prompt-caching reference, read 2026-09-10)."""
+    try:
+        with open(os.path.join(deadline_root, sid + ".deadline")) as fh:
+            rec = json.load(fh)
+        exp = rec.get("expires_at")
+        if rec.get("warm") and isinstance(exp, (int, float)) and exp > now:
+            hhmm = time.strftime("%H:%M", time.localtime(exp))
+            return (f"its prompt cache is warm until {hhmm}, so `claude --resume {sid}` "
+                    f"before then reads from cache; after that a resume, or a /compact "
+                    f"inside it, re-reads the whole conversation at the full rate")
+    except Exception:
+        pass
+    return (f"its prompt cache is cold or unrecorded, so `claude --resume {sid}` "
+            f"re-reads the whole conversation at the full rate, as would a /compact inside it")
+
+def handoff_for(sid):
+    hd = os.path.join(handoff_root, os.path.basename(family)) if handoff_root else ""
+    if not hd or not os.path.isdir(hd):
+        return None
+    cands = [os.path.join(hd, f) for f in os.listdir(hd) if f.endswith(f"-{sid[:8]}.md")]
+    cands = [c for c in cands if os.path.isfile(c) and os.path.getsize(c) > 0]
+    return max(cands, key=os.path.getmtime) if cands else None
+
+if start_source == "clear":
+    rec = claim_clear_record()
+    if rec:
+        prev_id, tpath, how = rec["session_id"], rec.get("transcript_path") or "", "recorded as it ended"
+        ended = human(now - rec.get("ended_at", now))
+    else:
+        best = newest_other_transcript(exclude_live=False)
+        if best:
+            prev_id, tpath = os.path.basename(best[0])[:-6], best[0]
+            how, ended = "a GUESS: the newest transcript in this directory, no end record found", human(now - best[1])
         else:
-            lines.append(
-                "- No handoff was written for that session. Orientation has to come "
-                "from the user or from resuming it."
-            )
-elif os.path.isdir(sd):
+            prev_id = None
+    if prev_id:
+        title = last_title(tpath) if tpath else None
+        label = f' "{title}"' if title else ""
+        lines.append(
+            f"- This session began with /clear. The session left ({how}):{label} "
+            f"id {prev_id}, ended {ended} ago."
+        )
+        if tpath:
+            lines.append(f"- Its transcript: {tpath}")
+        lines.append(f"- Resuming it: {cache_state(prev_id)}.")
+        h = handoff_for(prev_id)
+        lines.append(f"- A handoff was written for it: {h}" if h
+                     else "- No handoff was written for it.")
+else:
     best = newest_other_transcript(exclude_live=True)
     if best:
         title = last_title(best[0])
