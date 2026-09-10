@@ -7,7 +7,7 @@
 #
 #   scry  3 uncommitted  2 unpushed  Fable 5.1  $4.20  👥 3  🗓️ 64% Wed  🌕 42k/200k  🔥 39m
 #
-#   folder          basename of the session's directory; in a worktree that is
+#   folder          bold cyan; basename of the session's directory; in a worktree that is
 #                   the branch name, which is why the branch segment stays
 #                   quiet there
 #   branch          only when it is not the default branch (yellow) — the one
@@ -63,6 +63,7 @@ import json, os, re, subprocess, sys, time
 from datetime import datetime
 
 YEL, RED, DIM, OFF = "\033[33m", "\033[31m", "\033[2m", "\033[0m"
+FOLDER = "\033[1;36m"  # bold cyan: the one segment that must be seen first (Matt, 2026-09-10)
 
 try:
     d = json.loads(os.environ.get("SCRY_PAYLOAD") or "{}")
@@ -83,7 +84,7 @@ segs = []
 # ── folder ───────────────────────────────────────────────────────────────
 folder = os.path.basename(os.path.normpath(cwd)) if cwd else ""
 if folder:
-    segs.append(folder)
+    segs.append(f"{FOLDER}{folder}{OFF}")
 
 # ── git: branch, uncommitted, unpushed ───────────────────────────────────
 def git(*args):
