@@ -27,17 +27,19 @@
 # broken status line.
 #
 # The segment (Matt, 2026-09-10: "the TTL thing is critically important …
-# have that at the bottom"):
-#   cache 1h ⏱43m            warm; minutes until it goes cold
-#   cache 1h ⏱4m  ~150k      warm, inside the last ten minutes, yellow; the
-#                            number is what the next request re-reads at the
-#                            full rate if nobody speaks before then
-#   cache COLD ~150k         red; the next request pays that re-read no
-#                            matter what — /compact included, since the
-#                            summary request reads the same history
-#                            (prompt-caching reference, read 2026-09-10)
+# have that at the bottom"; later that day: no "cache 1h" label, icon then a
+# space like worktrunk's own segments, fire while warm, snowflake once cold,
+# no middle icon — "KISS" — the colour carries the warning):
+#   🔥 43m            default text; warm, minutes until it goes cold
+#   🔥 4m ~150k       yellow; warm but inside the last ten minutes. The
+#                     number is what the next request re-reads at the full
+#                     rate if nobody speaks before then
+#   ❄️ ~150k          blue; cold. The next request pays that re-read no matter
+#                     what — /compact included, since the summary request
+#                     reads the same history (prompt-caching reference, read
+#                     2026-09-10)
 # Claude Code re-runs the status line when a warm cache reaches expires_at,
-# so COLD appears on time; the minute count only ticks between events unless
+# so ❄️ appears on time; the minute count only ticks between events unless
 # statusLine.refreshInterval is set (README, Install).
 set -uo pipefail
 
@@ -76,17 +78,16 @@ recache = pc.get("recache_tokens_if_cold")
 size = ""
 if isinstance(recache, (int, float)) and recache > 0:
     size = f" ~{int(recache) // 1000}k" if recache >= 1000 else f" ~{int(recache)}"
-ttl = rec["ttl"] if isinstance(rec["ttl"], str) else "?"
-YEL, RED, DIM, OFF = "\033[33m", "\033[31m", "\033[2m", "\033[0m"
+YEL, BLU, OFF = "\033[33m", "\033[34m", "\033[0m"
 if rec["warm"] and rec["expires_at"]:
     left = max(0, rec["expires_at"] - rec["observed_at"])
     mins = left // 60
     if left <= 600:
-        print(f"{YEL}cache {ttl} \u23f1{mins}m{size}{OFF}")
+        print(f"\U0001f525 {YEL}{mins}m{size}{OFF}")
     else:
-        print(f"{DIM}cache {ttl} \u23f1{mins}m{OFF}")
+        print(f"\U0001f525 {mins}m")
 else:
-    print(f"{RED}cache COLD{size}{OFF}")
+    print(f"\u2744\ufe0f {BLU}{size.strip() or 'cold'}{OFF}")
 PY
 )"
 

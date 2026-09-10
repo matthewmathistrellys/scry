@@ -228,9 +228,10 @@ machine is carrying. Independent checks and advisories fill that in.
   the user points `statusLine.command` at once (see [Install](#install)).
   It keeps `observed_at`, `warm`, `ttl`, `expires_at`, `requests` and passes
   the payload through to the status line that was already there, appending
-  one segment to the end of the bar: `cache 1h ⏱43m` while warm, in yellow
-  with the re-read size (`cache 1h ⏱4m ~150k`) inside the last ten minutes,
-  and `cache COLD ~150k` in red once it has expired. The size is Claude
+  one segment to the end of the bar, styled like worktrunk's own (icon, space,
+  value): `🔥 43m` in green while warm, `🔥 4m ~150k` in yellow with the
+  re-read size inside the last ten minutes, and `❄️ ~150k` in red once it has
+  expired. The size is Claude
   Code's own `recache_tokens_if_cold` — what the next request re-reads at the
   full rate if nobody speaks first. Nothing avoids that re-read once the cache
   is cold: a `/compact` sends the same history to write its summary, and
@@ -605,7 +606,7 @@ at all. Without this the monitor still arms, sees no deadline, and stays
 silent — it does not guess.
 
 Claude Code re-runs the status line on events (a new assistant message, a
-compaction, and the moment a warm cache reaches `expires_at`), so the COLD
+compaction, and the moment a warm cache reaches `expires_at`), so the ❄️
 flip is on time by itself. The minute count only ticks between events; add
 `"refreshInterval": 60` next to `command` to keep it live while you are away
 from the keyboard.
