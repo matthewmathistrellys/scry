@@ -26,6 +26,17 @@
 # having it. Claude Code already writes the title itself, so this costs
 # no inference and no tokens.
 #
+# One case is different: `/clear`. Claude Code ends the session and starts
+# a new one (SessionStart fires with source "clear"), and the session just
+# left is the one the user was in seconds ago — same seat, same intent. The
+# live-window rule below hides exactly that session, because its transcript
+# was written moments ago, so the new session used to start knowing nothing
+# about where it came from (Matt, 2026-09-10: "the new one has no idea where
+# it just came from"). On "clear" this hook names that session — id, title,
+# how to resume it — and, when the cache-handoff monitor got a handoff
+# written for it, prints that handoff. Still no prompts, no responses: a
+# handoff is a document the session wrote to be read by the next one.
+#
 # Silence is the default and the point. A signal speaks only when it
 # would change a decision; one lone session in a quiet repo prints
 # nothing. See README "The output budget".
@@ -62,14 +73,16 @@ PY
 # itself as a collision is worse than useless) and cwd because $PWD is
 # not guaranteed to be the session's directory.
 payload="$(cat 2>/dev/null || true)"
-read -r self_id session_cwd transcript_path <<<"$(SCRY_PAYLOAD="$payload" python3 - <<'PY'
+read -r self_id session_cwd transcript_path start_source <<<"$(SCRY_PAYLOAD="$payload" python3 - <<'PY'
 import json, os
 try:
     d = json.loads(os.environ.get("SCRY_PAYLOAD") or "{}")
 except Exception:
     d = {}
+# source: startup | resume | clear | compact | fork (Claude Code 2.1.268,
+# hooks reference, read 2026-09-10). Codex sends none; treat as startup.
 print(d.get("session_id", ""), d.get("cwd", "") or os.getcwd(),
-      d.get("transcript_path", "") or "")
+      d.get("transcript_path", "") or "", d.get("source", "") or "startup")
 PY
 )"
 [ -n "$session_cwd" ] || session_cwd="$PWD"
@@ -97,6 +110,8 @@ trap 'rm -f "$fleet_tmp"' EXIT
 SELF_ID="$self_id" SESSION_CWD="$session_cwd" FAMILY_ROOT="$family_root" \
 TRANSCRIPT_PATH="$transcript_path" ACTIVE_MINUTES="$ACTIVE_MINUTES" \
 AGENT_BINARIES="$AGENT_BINARIES" WORKTREE_PATHS="$worktree_paths" \
+START_SOURCE="$start_source" \
+SCRY_HANDOFF_ROOT="${SCRY_CACHE_HANDOFF_DIR:-$HOME/.claude/scry/handoffs}" \
 python3 - >"$fleet_tmp" 2>/dev/null <<'PY'
 import glob, json, os, re, subprocess, time
 
@@ -107,6 +122,8 @@ window   = int(os.environ["ACTIVE_MINUTES"]) * 60
 agents   = set(os.environ["AGENT_BINARIES"].split())
 now      = time.time()
 transcript_path = os.environ.get("TRANSCRIPT_PATH", "")
+start_source = os.environ.get("START_SOURCE", "startup")
+handoff_root = os.environ.get("SCRY_HANDOFF_ROOT", "")
 
 def encode(path):
     # Claude Code's transcript directory name: '/', '.' and '_' all become
@@ -416,8 +433,33 @@ if found:
 
 # ── 3. What the previous session here was doing ─────────────────────────
 # Title only — see the header comment on why content is deliberately excluded.
+# After /clear the rule inverts: the newest transcript here that is not this
+# session IS the one the user just left, live-window or not, and the point
+# is to say so. See the header comment.
 sd = os.path.join(projects, self_prefix)
-if os.path.isdir(sd):
+
+def last_title(path):
+    """The session's current title. Titles are rewritten as the session
+    evolves, so the LAST one is current. Read a bounded tail rather than
+    the whole file — transcripts run to megabytes and this is a startup
+    hook."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 262144))
+            chunk = fh.read().decode("utf-8", "ignore")
+        for ln in reversed(chunk.splitlines()):
+            try:
+                d = json.loads(ln)
+            except Exception:
+                continue
+            if d.get("type") == "ai-title" and d.get("aiTitle"):
+                return d["aiTitle"]
+    except Exception:
+        pass
+    return None
+
+def newest_other_transcript(exclude_live):
     best = None
     for f in os.listdir(sd):
         if not f.endswith(".jsonl") or f[:-6] == self_id:
@@ -427,30 +469,55 @@ if os.path.isdir(sd):
             st = os.stat(p)
         except OSError:
             continue
-        if now - st.st_mtime <= window:      # that's a live one, already counted
-            continue
+        if exclude_live and now - st.st_mtime <= window:
+            continue                       # that's a live one, already counted
         if best is None or st.st_mtime > best[1]:
             best = (p, st.st_mtime)
+    return best
+
+if os.path.isdir(sd) and start_source == "clear":
+    best = newest_other_transcript(exclude_live=False)
     if best:
-        title = None
-        try:
-            # Titles are rewritten as the session evolves, so the LAST one
-            # is current. Read a bounded tail rather than the whole file —
-            # transcripts run to megabytes and this is a startup hook.
-            with open(best[0], "rb") as fh:
-                fh.seek(0, 2)
-                fh.seek(max(0, fh.tell() - 262144))
-                chunk = fh.read().decode("utf-8", "ignore")
-            for ln in reversed(chunk.splitlines()):
-                try:
-                    d = json.loads(ln)
-                except Exception:
-                    continue
-                if d.get("type") == "ai-title" and d.get("aiTitle"):
-                    title = d["aiTitle"]
-                    break
-        except Exception:
-            pass
+        prev_id = os.path.basename(best[0])[:-6]
+        title = last_title(best[0])
+        label = f'"{title}" ' if title else ""
+        lines.append(
+            f"- This session began with /clear. The session you left was {label}"
+            f"(id {prev_id}, last written {human(now - best[1])} ago). Its transcript "
+            f"is intact: `claude --resume {prev_id}` reopens it, and in this same "
+            f"process the rewind menu's previous-session entry does too. This "
+            f"session shares no context with it; what follows is all it gets."
+        )
+        # The cache-handoff monitor names handoffs <stamp>-<sid[:8]>.md under
+        # <root>/<repo basename>/. If one was written for the session just
+        # left, it was written to be read here.
+        handoff = None
+        hd = os.path.join(handoff_root, os.path.basename(family)) if handoff_root else ""
+        if hd and os.path.isdir(hd):
+            cands = [os.path.join(hd, f) for f in os.listdir(hd)
+                     if f.endswith(f"-{prev_id[:8]}.md")]
+            cands = [c for c in cands if os.path.isfile(c) and os.path.getsize(c) > 0]
+            if cands:
+                handoff = max(cands, key=os.path.getmtime)
+        if handoff:
+            try:
+                with open(handoff, encoding="utf-8", errors="ignore") as fh:
+                    body = fh.read(6000)
+                more = (" [truncated at 6000 chars; read the file for the rest]"
+                        if os.path.getsize(handoff) > 6000 else "")
+                lines.append(f"- Handoff written by that session ({handoff}):{more}\n"
+                             + "\n".join("    " + ln for ln in body.rstrip().splitlines()))
+            except Exception:
+                lines.append(f"- A handoff exists for that session but could not be read: {handoff}")
+        else:
+            lines.append(
+                "- No handoff was written for that session. Orientation has to come "
+                "from the user or from resuming it."
+            )
+elif os.path.isdir(sd):
+    best = newest_other_transcript(exclude_live=True)
+    if best:
+        title = last_title(best[0])
         if title:
             lines.append(
                 f'- Last session in this directory: "{title}" '
