@@ -237,12 +237,13 @@ class ScryHookTests(unittest.TestCase):
             self.assertIn("1 Codex subagent", report)
             self.assertIn("COLLISION RISK: 3 of them are", report)
 
-    def test_fleet_after_clear_names_the_session_just_left_and_its_handoff(self):
+    def test_fleet_after_clear_states_four_facts_from_the_end_record(self):
         # /clear ends the session and starts a new one with source "clear".
-        # The session just left was written seconds ago, which the live
-        # window hides on a normal start — the one case the new session
-        # needs it (Matt, 2026-09-10: "the new one has no idea where it just
-        # came from"). Metadata and the handoff only; never the prompts.
+        # clear_record.sh wrote the ending session down; fleet.sh reads that
+        # record for this directory, deletes it, and states four facts: the
+        # session left, its transcript, what resuming it costs, and whether a
+        # handoff exists (path only). Insight, not action (council + Matt,
+        # 2026-09-10). Never the transcript's prompts, never the handoff body.
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             repo = base / "repo"
@@ -252,29 +253,60 @@ class ScryHookTests(unittest.TestCase):
             claude_dir.mkdir(parents=True)
             prev = claude_dir / "0123abcd-prev-session.jsonl"
             prev.write_text(json.dumps({"type": "user", "message": "SECRET PROMPT"}) + "\n"
-                            + json.dumps({"type": "ai-title", "aiTitle": "Old title"}) + "\n"
                             + json.dumps({"type": "ai-title", "aiTitle": "Scry cache TTL handoff design"}) + "\n")
-            older = claude_dir / "older-session.jsonl"
-            older.write_text(json.dumps({"type": "ai-title", "aiTitle": "Older"}) + "\n")
-            os.utime(older, (time.time() - 3600, time.time() - 3600))
+            # A newer transcript from ANOTHER session in the same directory —
+            # the case the mtime guess gets wrong.
+            other = claude_dir / "other-live-session.jsonl"
+            other.write_text(json.dumps({"type": "ai-title", "aiTitle": "Unrelated work"}) + "\n")
+            os.utime(prev, (time.time() - 30, time.time() - 30))
             handoffs = base / "handoffs" / "repo"
             handoffs.mkdir(parents=True)
-            (handoffs / "20260910-1200-0123abcd.md").write_text("# Handoff\nObjective: finish the clear hook.\n")
-            (handoffs / "20260910-1100-0123abcd.md").write_text("stale earlier handoff\n")
-            os.utime(handoffs / "20260910-1100-0123abcd.md", (time.time() - 900, time.time() - 900))
+            (handoffs / "20260910-1200-0123abcd.md").write_text("# Handoff\nHANDOFF BODY\n")
             env = {"HOME": str(base), "CODEX_HOME": str(base / ".codex"),
-                   "SCRY_CACHE_HANDOFF_DIR": str(base / "handoffs")}
+                   "SCRY_CACHE_HANDOFF_DIR": str(base / "handoffs"),
+                   "SCRY_CLEAR_STATE_DIR": str(base / "cleared"),
+                   "SCRY_CACHE_STATE_DIR": str(base / "deadline")}
+            # The old session ends with /clear: clear_record.sh writes it down.
+            run_hook("clear_record.sh", repo, {"session_id": "0123abcd-prev-session",
+                                              "transcript_path": str(prev), "cwd": str(repo),
+                                              "reason": "clear"}, env)
+            rec_path = base / "cleared" / "0123abcd-prev-session.json"
+            self.assertTrue(rec_path.exists())
+            self.assertNotIn("SECRET", rec_path.read_text())
+            # Its cache deadline, as the status-line wrapper records it.
+            (base / "deadline").mkdir()
+            (base / "deadline" / "0123abcd-prev-session.deadline").write_text(json.dumps(
+                {"session_id": "0123abcd-prev-session", "observed_at": int(time.time()),
+                 "warm": True, "ttl": "1h", "expires_at": int(time.time()) + 1800, "requests": 9}))
             payload = {"cwd": str(repo), "session_id": "new-session",
-                       "transcript_path": str(claude_dir / "new-session.jsonl")}
+                       "transcript_path": str(claude_dir / "new-session.jsonl"), "source": "clear"}
 
-            report = context(run_hook("fleet.sh", repo, {**payload, "source": "clear"}, env))
+            report = context(run_hook("fleet.sh", repo, payload, env))
             self.assertIn("began with /clear", report)
+            self.assertIn("recorded as it ended", report)
             self.assertIn('"Scry cache TTL handoff design"', report)
+            self.assertIn("id 0123abcd-prev-session", report)
+            self.assertIn(f"Its transcript: {prev}", report)
+            self.assertRegex(report, r"warm until \d\d:\d\d")
             self.assertIn("claude --resume 0123abcd-prev-session", report)
-            self.assertIn("Objective: finish the clear hook.", report)
-            self.assertNotIn("stale earlier handoff", report)
+            self.assertIn("full rate", report)
+            self.assertIn(f"A handoff was written for it: {handoffs / '20260910-1200-0123abcd.md'}", report)
+            self.assertNotIn("HANDOFF BODY", report)
             self.assertNotIn("SECRET PROMPT", report)
-            self.assertNotIn("Last session in this directory", report)
+            self.assertNotIn("Unrelated work", report)      # the guess would have said this
+            self.assertNotIn("GUESS", report)
+            self.assertNotIn("subagent", report.lower())     # facts, not a recipe
+            self.assertFalse(rec_path.exists())              # read once, then gone
+
+            # With no record (the SessionEnd hook did not run) the guess stands
+            # in, says so, and the cold-cache cost is stated.
+            (base / "deadline" / "0123abcd-prev-session.deadline").unlink()
+            (handoffs / "20260910-1200-0123abcd.md").unlink()
+            report = context(run_hook("fleet.sh", repo, payload, env))
+            self.assertIn("a GUESS", report)
+            self.assertIn("Unrelated work", report)
+            self.assertIn("cold or unrecorded", report)
+            self.assertIn("No handoff was written", report)
 
             # A plain start keeps the old rule: the just-written transcript
             # counts as live and is not reported as the last session.
@@ -282,11 +314,21 @@ class ScryHookTests(unittest.TestCase):
             self.assertNotIn("began with /clear", report)
             self.assertNotIn("0123abcd", report)
 
-            # /clear with no handoff on disk says so, instead of nothing.
-            for f in handoffs.iterdir():
-                f.unlink()
-            report = context(run_hook("fleet.sh", repo, {**payload, "source": "clear"}, env))
-            self.assertIn("No handoff was written", report)
+    def test_clear_record_writes_only_on_clear_and_sweeps_old_records(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            env = {"SCRY_CLEAR_STATE_DIR": str(base / "cleared")}
+            stale = base / "cleared" / "stale.json"
+            stale.parent.mkdir()
+            stale.write_text("{}")
+            os.utime(stale, (time.time() - 90000, time.time() - 90000))
+            run_hook("clear_record.sh", td, {"session_id": "s1", "cwd": td, "reason": "logout"}, env)
+            self.assertFalse((base / "cleared" / "s1.json").exists())
+            self.assertFalse(stale.exists())
+            run_hook("clear_record.sh", td, {"session_id": "s1", "cwd": td, "reason": "clear",
+                                            "transcript_path": "/x/s1.jsonl"}, env)
+            rec = json.loads((base / "cleared" / "s1.json").read_text())
+            self.assertEqual(set(rec), {"session_id", "transcript_path", "cwd", "ended_at"})
 
     def test_session_worktree_reports_lock_escape_hatch_and_orphan_exposure(self):
         # 2026-08-10 incident: a session inside a linked worktree spent an
@@ -1440,8 +1482,11 @@ class ScryHookTests(unittest.TestCase):
         spawned agent. Stop is the end-shaped event whose output reaches the
         model at all — a probe SessionEnd hook demonstrably ran and its token
         appeared zero times in both the CLI output and the transcript, while
-        the same probe on Stop appeared three times. A hook on SessionEnd
-        would be inert, so it must not be wired there.
+        the same probe on Stop appeared three times. An ADVISORY on SessionEnd
+        would be inert, so none is wired there. The one SessionEnd hook that is
+        wired, clear_record.sh, says nothing: its whole effect is a file, which
+        is exactly what an end-of-session event can still do (the same probe
+        showed the hook ran).
         """
         hooks = json.loads((ROOT / "hooks/hooks.json").read_text())
         sub = [h["command"] for group in hooks["hooks"]["SubagentStart"]
@@ -1451,8 +1496,10 @@ class ScryHookTests(unittest.TestCase):
         self.assertTrue(any("main_drift_advisory.sh" in c for c in sub), sub)
         self.assertTrue(
             any("session_disposal_advisory.sh" in c for c in stop), stop)
-        self.assertNotIn("SessionEnd", hooks["hooks"])
-        for command in sub + stop:
+        end = [h["command"] for group in hooks["hooks"].get("SessionEnd", [])
+               for h in group["hooks"]]
+        self.assertEqual([c.rsplit("/", 1)[-1] for c in end], ["clear_record.sh"])
+        for command in sub + stop + end:
             self.assertIn("PLUGIN_ROOT", command)
             self.assertIn("CLAUDE_PLUGIN_ROOT", command)
 

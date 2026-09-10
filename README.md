@@ -411,13 +411,20 @@ machine is carrying. Independent checks and advisories fill that in.
   worktrees*, how old they are, whether one is in your exact directory, which
   subagents are editing here without a session of their own, whether other
   agent CLIs (Gemini, aider, and others) are competing for the same machine, and
-  what the last session here was called. After `/clear` it does one more thing:
+  what the last session here was called. After `/clear` it does one more thing.
   Claude Code ends the session and starts a new one (SessionStart fires with
-  `source: "clear"`), and the session just left is the one you were in seconds
-  ago, so the new session is told its title, its id, the `claude --resume`
-  command that reopens it, and — when the cache-handoff monitor got one
-  written — the handoff itself. Without that, the live-window rule hid exactly
-  that session (2026-09-10: "the new one has no idea where it just came from").
+  `source: "clear"`), and nothing in the new session says which one it
+  replaced. `clear_record.sh`, a `SessionEnd` hook, writes that down as the old
+  session ends — id, transcript path, directory, time — in one small file
+  under `$TMPDIR/scry-last-cleared/`; the new session's `fleet.sh` reads the
+  record for its directory, deletes it, and states four facts: the session
+  left (title, id), its transcript path, what resuming it costs (its prompt
+  cache is warm until HH:MM, a full re-read after), and whether a handoff was
+  written for it — the path, never the body. No recipe, no action: the reader
+  decides. If the record is missing the newest transcript stands in and is
+  labelled a guess, because with ten sessions open that guess is wrong exactly
+  when it matters (council + Matt, 2026-09-10). Records nobody claims are
+  swept after a day.
 - **`pressure.sh`** — load per core, swap in use, disk headroom, and which dev
   servers are already listening.
 
@@ -443,7 +450,7 @@ industrialise that problem.
 | Disk | 60% used | ≥90% used, or <20GB free |
 | Sessions in this repo | just you | any other live one |
 | Last session | none recorded | a title exists |
-| Session left by `/clear` | start was not a `/clear` | always: id, title, resume command, and the handoff if one was written |
+| Session left by `/clear` | start was not a `/clear` | always: id, title, transcript path, resume cost, handoff path if one exists |
 | Session worktree location | never silent | states primary-worktree consequences, or the linked-worktree lock + `ExitWorktree` escape hatch — whichever applies |
 | Session worktree merged | not merged | content already in main |
 | Session worktree drift | up to date | origin/main ahead of fork point |
@@ -808,11 +815,11 @@ have been reversed an hour later in another session you also cannot see, and
 acting on stale conclusions is worse than having no context. If you want the
 detail, ask for it in-session, so it arrives as something you went and got
 rather than something you were handed as fact.
-The `/clear` case is the one exception, and it is a different thing: the
-session just left is yours, from seconds ago, and the handoff it may have
-written is a document made to be read next, not a summary of a stranger's
-conversation. Even then only the handoff is printed — never the transcript's
-prompts or responses.
+The `/clear` case is not an exception to this, only a sharper question —
+*which* session was left — answered by a record the ending session wrote,
+not by content. Even the handoff that session may have written is reported
+as a path; the first cut printed its body, and that was content flowing
+through Scry, so it went (council + Matt, 2026-09-10).
 
 **Merged means content, not commits.** Whether a branch is merged is decided by
 ancestry *and* patch-id equivalence, so a squash or rebase merge — which
