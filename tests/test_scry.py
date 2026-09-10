@@ -2769,15 +2769,15 @@ class CacheHandoffTests(unittest.TestCase):
             r = self._statusline(td, 3000, inner="python3 -c 'import json,sys; print(\"inner:\"+json.load(sys.stdin)[\"model\"][\"id\"])'")
             # The bar the user already had, then the cache at the end of it
             # (Matt, 2026-09-10: the TTL "at the bottom" is the point).
-            self.assertRegex(r.stdout.strip(), r"^inner:claude-fable-5-1  \x1b\[2mcache 1h \u23f1(49|50)m\x1b\[0m$")
+            self.assertRegex(r.stdout.strip(), r"^inner:claude-fable-5-1  \U0001f525 (49|50)m$")
             # An inner that prints nothing leaves the cache segment alone.
             r = self._statusline(td, 3000, inner="true")
-            self.assertRegex(r.stdout.strip(), r"^\x1b\[2mcache 1h \u23f1(49|50)m\x1b\[0m$")
+            self.assertRegex(r.stdout.strip(), r"^\U0001f525 (49|50)m$")
 
     def test_the_status_line_is_a_cache_status_when_no_inner_command_is_set(self):
         with tempfile.TemporaryDirectory() as td:
-            self.assertRegex(self._statusline(td, 3000).stdout, r"cache 1h \u23f1(49|50)m")
-            self.assertRegex(self._statusline(td, 3000, warm=False).stdout.strip(), r"^\x1b\[31mcache COLD\x1b\[0m$")
+            self.assertRegex(self._statusline(td, 3000).stdout, r"\U0001f525 (49|50)m")
+            self.assertRegex(self._statusline(td, 3000, warm=False).stdout.strip(), r"^\u2744\ufe0f \x1b\[34mcold\x1b\[0m$")
 
     def test_the_status_line_says_what_a_cold_cache_will_cost(self):
         # recache_tokens_if_cold is what the next request re-reads at the
@@ -2795,9 +2795,9 @@ class CacheHandoffTests(unittest.TestCase):
                                      "requests": 3, "recache_tokens_if_cold": 153_400},
                 }
                 return run_hook("cache_deadline_statusline.sh", td, payload, env=env).stdout.strip()
-            self.assertRegex(run(3000, True), r"^\x1b\[2mcache 1h \u23f1(49|50)m\x1b\[0m$")
-            self.assertRegex(run(250, True), r"^\x1b\[33mcache 1h \u23f14m ~153k\x1b\[0m$")
-            self.assertEqual(run(-5, False), "\x1b[31mcache COLD ~153k\x1b[0m")
+            self.assertRegex(run(3000, True), r"^\U0001f525 (49|50)m$")
+            self.assertRegex(run(250, True), r"^\U0001f525 \x1b\[33m4m ~153k\x1b\[0m$")
+            self.assertEqual(run(-5, False), "\u2744\ufe0f \x1b[34m~153k\x1b[0m")
             # The record the monitor reads is unchanged by any of this.
             rec = json.loads((Path(td) / "state" / f"{self.SID}.deadline").read_text())
             self.assertEqual(set(rec), {"session_id", "observed_at", "warm",
