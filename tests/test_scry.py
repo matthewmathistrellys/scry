@@ -2952,3 +2952,111 @@ class CacheHandoffTests(unittest.TestCase):
             self.assertEqual(self._monitor(td, SCRY_CACHE_HANDOFF="0").stdout, "")
             self.assertEqual(self._state(td)[0], "armed")
             self.assertIn("unavailable", self._monitor(td, CLAUDE_CODE_SESSION_ID="").stdout)
+
+
+class StatuslineTests(unittest.TestCase):
+    """statusline.sh owns the whole bar (Matt, 2026-09-10): folder, branch
+    only when off the default, N uncommitted / N unpushed only when non-zero,
+    model, session cost, other live sessions here, the 7-day window with its
+    reset day, context as tokens over the window, then the cache segment."""
+
+    def _payload(self, cwd, **over):
+        now = int(time.time())
+        p = {
+            "session_id": "sess-bar-0001",
+            "cwd": cwd,
+            "workspace": {"current_dir": cwd},
+            "model": {"id": "claude-fable-5-1", "display_name": "Fable 5.1"},
+            "cost": {"total_cost_usd": 4.2},
+            "rate_limits": {
+                "five_hour": {"used_percentage": 31, "resets_at": now + 7200},
+                "seven_day": {"used_percentage": 64, "resets_at": now + 3 * 86400},
+            },
+            "context_window": {"total_input_tokens": 42000, "context_window_size": 200000, "used_percentage": 21},
+            "prompt_cache": {"warm": True, "ttl": "1h", "expires_at": now + 2400, "recache_tokens_if_cold": 42000},
+        }
+        p.update(over)
+        return p
+
+    def _run(self, td, cwd, **over):
+        env = {
+            "SCRY_CACHE_STATE_DIR": str(Path(td) / "state"),
+            "SCRY_CLAUDE_PROJECTS": str(Path(td) / "projects"),
+        }
+        return run_hook("statusline.sh", cwd, self._payload(cwd, **over), env=env).stdout.rstrip("\n")
+
+    def _repo(self, td):
+        origin = Path(td) / "origin"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(origin)], check=True)
+        subprocess.run(["git", "-C", str(origin), "commit", "-q", "--allow-empty", "-m", "init"], check=True,
+                       env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+        work = Path(td) / "scry"
+        subprocess.run(["git", "clone", "-q", str(origin), str(work)], check=True, capture_output=True)
+        return work
+
+    def test_a_clean_primary_on_main_is_quiet_and_ordered_slow_to_fast(self):
+        with tempfile.TemporaryDirectory() as td:
+            work = self._repo(td)
+            day = time.strftime("%a", time.localtime(time.time() + 3 * 86400))
+            self.assertRegex(self._run(td, str(work)),
+                r"^ scry  Fable 5\.1  \$4\.20  🗓️ 64% " + day + r"  🌕 42k/200k  🔥 (39|40)m$")
+
+    def test_a_feature_branch_with_work_shows_branch_uncommitted_and_unpushed(self):
+        with tempfile.TemporaryDirectory() as td:
+            work = self._repo(td)
+            env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+            subprocess.run(["git", "-C", str(work), "checkout", "-q", "-b", "feature-x"], check=True)
+            for m in ("one", "two"):
+                subprocess.run(["git", "-C", str(work), "commit", "-q", "--allow-empty", "-m", m], check=True, env=env)
+            for f in ("a", "b", "c"):
+                (work / f).write_text("x")
+            out = self._run(td, str(work))
+            self.assertIn(" scry  \x1b[33mfeature-x\x1b[0m  \x1b[33m3 uncommitted\x1b[0m  \x1b[33m2 unpushed\x1b[0m  Fable 5.1", out)
+            # In a worktree named after the branch, the branch is not repeated.
+            wt = Path(td) / "feature-x"
+            subprocess.run(["git", "-C", str(work), "worktree", "add", "-q", str(wt), "-b", "feature-x-wt", "feature-x"],
+                           check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(wt), "checkout", "-q", "--detach"], check=True)
+            subprocess.run(["git", "-C", str(work), "checkout", "-q", "main"], check=True)
+            subprocess.run(["git", "-C", str(wt), "checkout", "-q", "feature-x"], check=True)
+            out = self._run(td, str(wt))
+            self.assertTrue(out.startswith(" feature-x  \x1b[33m2 unpushed\x1b[0m  Fable 5.1"), out)
+
+    def test_week_turns_yellow_then_red_and_cold_cache_is_blue(self):
+        with tempfile.TemporaryDirectory() as td:
+            work = self._repo(td)
+            now = int(time.time())
+            y = self._run(td, str(work), rate_limits={"seven_day": {"used_percentage": 72, "resets_at": now + 86400}})
+            self.assertIn("🗓️ \x1b[33m72% ", y)
+            r = self._run(td, str(work),
+                          rate_limits={"seven_day": {"used_percentage": 93, "resets_at": now + 86400}},
+                          prompt_cache={"warm": False, "recache_tokens_if_cold": 42000})
+            self.assertIn("🗓️ \x1b[31m93% ", r)
+            self.assertTrue(r.endswith("❄️ \x1b[34m~42k\x1b[0m"), r)
+
+    def test_other_live_sessions_in_this_directory_are_counted_and_self_is_not(self):
+        with tempfile.TemporaryDirectory() as td:
+            work = self._repo(td)
+            enc = re.sub(r"[/._]", "-", str(work.resolve()))
+            pdir = Path(td) / "projects" / enc
+            pdir.mkdir(parents=True)
+            (pdir / "sess-bar-0001.jsonl").write_text("self")
+            (pdir / "other-1.jsonl").write_text("x")
+            (pdir / "other-2.jsonl").write_text("x")
+            old = pdir / "old.jsonl"
+            old.write_text("x")
+            os.utime(old, (time.time() - 3600, time.time() - 3600))
+            self.assertIn("👥 \x1b[33m2\x1b[0m", self._run(td, str(work)))
+
+    def test_a_missing_field_drops_only_its_segment(self):
+        with tempfile.TemporaryDirectory() as td:
+            work = self._repo(td)
+            out = self._run(td, str(work), cost={}, rate_limits={}, context_window={})
+            self.assertRegex(out, r"^ scry  Fable 5\.1  🔥 (39|40)m$")
+
+    def test_the_bar_still_renders_outside_a_repository(self):
+        with tempfile.TemporaryDirectory() as td:
+            plain = Path(td) / "notes"
+            plain.mkdir()
+            out = self._run(td, str(plain))
+            self.assertTrue(out.startswith(" notes  Fable 5.1  $4.20"), out)

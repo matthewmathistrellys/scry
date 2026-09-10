@@ -227,9 +227,8 @@ machine is carrying. Independent checks and advisories fill that in.
   2026-09-10), and no plugin can install a status line, so this is a wrapper
   the user points `statusLine.command` at once (see [Install](#install)).
   It keeps `observed_at`, `warm`, `ttl`, `expires_at`, `requests` and passes
-  the payload through to the status line that was already there, appending
-  one segment to the end of the bar, styled like worktrunk's own (icon, space,
-  value): `🔥 43m` in green while warm, `🔥 4m ~150k` in yellow with the
+  the payload through to any status line named in `SCRY_STATUSLINE_INNER`,
+  appending one segment to the end of the bar (icon, space, value): `🔥 43m` in green while warm, `🔥 4m ~150k` in yellow with the
   re-read size inside the last ten minutes, and `❄️ ~150k` in red once it has
   expired. The size is Claude
   Code's own `recache_tokens_if_cold` — what the next request re-reads at the
@@ -595,22 +594,37 @@ That is the whole install. The hooks register themselves and run from the
 plugin's own directory, so updating is `/plugin update scry` — there are no
 copies on your machine to keep in sync.
 
-One thing a plugin cannot do for you: the cache-handoff monitor needs the
-status-line payload, and `statusLine` is a user setting. Point it at Scry's
-adapter once, naming the status line you already had in
-`SCRY_STATUSLINE_INNER` (leave it unset to get a plain `cache warm 42m`):
+One thing a plugin cannot do for you: `statusLine` is a user setting. Point it
+at Scry's status line once:
 
 ```json
 "statusLine": {
   "type": "command",
-  "command": "f=\"$(ls -d \"$HOME\"/.claude/plugins/cache/scry/scry/*/ 2>/dev/null | sort -V | tail -1)cache_deadline_statusline.sh\"; if [ -f \"$f\" ]; then SCRY_STATUSLINE_INNER='wt list statusline --format=claude-code' exec bash \"$f\"; else exec wt list statusline --format=claude-code; fi"
+  "command": "f=\"$(ls -d \"$HOME\"/.claude/plugins/cache/scry/scry/*/ 2>/dev/null | sort -V | tail -1)statusline.sh\"; [ -f \"$f\" ] && exec bash \"$f\"; exit 0",
+  "refreshInterval": 60
 }
 ```
 
 The resolver picks the newest installed Scry so `/plugin update scry` keeps
-working, and falls back to the inner status line when Scry is not installed
-at all. Without this the monitor still arms, sees no deadline, and stays
-silent — it does not guess.
+working, and prints nothing when Scry is not installed. The bar, left to right,
+slow-moving to fast-moving:
+
+```
+scry  3 uncommitted  2 unpushed  Fable 5.1  $4.20  👥 3  🗓️ 64% Wed  🌕 42k/200k  🔥 39m
+```
+
+folder · branch (only when off the default branch) · `N uncommitted` and
+`N unpushed` (only when non-zero — together, what would be lost if the
+machine died now) · model · session cost · other live sessions in this
+directory (only when any) · the seven-day window with the day it resets,
+yellow from 70 %, red from 90 % · context as input tokens over the window,
+moon phase by fill · the prompt-cache segment. A segment with nothing to say
+is omitted; a segment whose source fails drops alone and the rest renders.
+Only metadata is read from the payload — never prompt or response text.
+
+To keep another status line and add only the cache segment, point
+`statusLine.command` at `cache_deadline_statusline.sh` instead, with the
+other command in `SCRY_STATUSLINE_INNER`.
 
 Claude Code re-runs the status line on events (a new assistant message, a
 compaction, and the moment a warm cache reaches `expires_at`), so the ❄️
