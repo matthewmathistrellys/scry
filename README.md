@@ -21,6 +21,7 @@ machine is carrying. Independent checks and advisories fill that in.
 | **`pressure.sh`** | What shape is this machine in? |
 | **`main_drift_advisory.sh`** | Is the tree this subagent was handed the current one? |
 | **`session_disposal_advisory.sh`** | What is this session leaving behind? |
+| **`cache_handoff_monitor.sh`** | Is this session about to lose its prompt cache, and is anything written down? |
 | **Markdown trust** | What goes wrong when repository prose is mistaken for authority? |
 
 - **`architecture.sh`** — a map of the codebase. It is a *dispatcher*, not a
@@ -208,6 +209,49 @@ machine is carrying. Independent checks and advisories fill that in.
   reminder about finished work does not arrive on turn one. It then speaks only
   when something is actually reclaimable, or the pile exceeds
   `SCRY_WORKTREE_DISK_MB_WARN` (default 2048).
+
+- **Cache handoff** — `cache_handoff_monitor.sh` (Claude only) asks the
+  session, at most once per user message, to write a handoff shortly before
+  its prompt cache goes cold. Claude Code's prompt cache has a time-to-live;
+  every request refreshes it, and an idle session lets it run out, after which
+  the next request re-reads the whole context at the full rate. That idle
+  session is also the one most likely to be abandoned with nothing written
+  down. One cached request in the last minutes of the warm window buys a
+  handoff file the next session can start from.
+
+  Three pieces, two small files of numbers per session:
+
+  *`cache_deadline_statusline.sh`* records when the cache expires. The
+  status-line payload is the only place Claude Code reports it
+  (`prompt_cache.expires_at`, verified against the 2.1.267 binary on
+  2026-09-10), and no plugin can install a status line, so this is a wrapper
+  the user points `statusLine.command` at once (see [Install](#install)).
+  It keeps `observed_at`, `warm`, `ttl`, `expires_at`, `requests` and passes
+  the payload through to the status line that was already there.
+
+  *`cache_handoff_arm.sh`* is a `UserPromptSubmit` hook that writes "armed".
+  It is the whole re-arm rule: only a user message starts a new cycle. Tool
+  calls, cache hits, monitor notifications, and the handoff itself never do —
+  the handoff is a request, a request refreshes the cache, and a monitor that
+  re-armed on a warm cache would ask every hour forever with no user in the
+  loop (designed with Codex, 2026-09-10). It reads `session_id` and nothing
+  else from the payload.
+
+  *`cache_handoff_monitor.sh`* is a plugin monitor (`monitors/monitors.json`):
+  a background process Claude Code arms at session start whose every stdout
+  line reaches the model as a notification — which is what wakes an idle
+  session. It polls the two files with no model calls and, when the session
+  is armed and the deadline is within the lead window, prints one line naming
+  the expiry time and the path to write the handoff to
+  (`~/.claude/scry/handoffs/<repo>/<date>-<session>.md`), then marks the
+  cycle `requested` before printing so a restart cannot ask twice. A deadline
+  that passes while armed is marked `missed` and said on the *next* user turn
+  by the arm hook, never by the monitor: a monitor line wakes the model onto a
+  cold cache, which is the exact cost this exists to avoid.
+
+  Bounded: at most one request per user message, none without one.
+  `SCRY_CACHE_HANDOFF=0` switches it off. It writes the handoff to nothing
+  itself; the session does, with its own context.
 - **Scale** — `scale_advisory.sh` speaks on first contact with a source file
   that is both large *and* actively worked, whether that contact is a Read or
   an Edit. It reports the file's length, its churn, and — on a Read of a file
@@ -528,6 +572,23 @@ That is the whole install. The hooks register themselves and run from the
 plugin's own directory, so updating is `/plugin update scry` — there are no
 copies on your machine to keep in sync.
 
+One thing a plugin cannot do for you: the cache-handoff monitor needs the
+status-line payload, and `statusLine` is a user setting. Point it at Scry's
+adapter once, naming the status line you already had in
+`SCRY_STATUSLINE_INNER` (leave it unset to get a plain `cache warm 42m`):
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "f=\"$(ls -d \"$HOME\"/.claude/plugins/cache/scry/scry/*/ 2>/dev/null | sort -V | tail -1)cache_deadline_statusline.sh\"; if [ -f \"$f\" ]; then SCRY_STATUSLINE_INNER='wt list statusline --format=claude-code' exec bash \"$f\"; else exec wt list statusline --format=claude-code; fi"
+}
+```
+
+The resolver picks the newest installed Scry so `/plugin update scry` keeps
+working, and falls back to the inner status line when Scry is not installed
+at all. Without this the monitor still arms, sees no deadline, and stays
+silent — it does not guess.
+
 ### Codex
 
 ```sh
@@ -549,8 +610,12 @@ The Codex package uses `.codex-plugin/plugin.json`; Claude uses
 `.claude-plugin/plugin.json`. Both discover the same `hooks/hooks.json`, skill,
 scripts, and scanners, so there is no copied implementation to drift.
 
-Two of the hooks ride events Claude Code defines — `SubagentStart`
-(`main_drift_advisory.sh`) and `Stop` (`session_disposal_advisory.sh`).
+Three of the hooks ride events Claude Code defines — `SubagentStart`
+(`main_drift_advisory.sh`), `Stop` (`session_disposal_advisory.sh`), and
+`UserPromptSubmit` (`cache_handoff_arm.sh`). The cache-handoff monitor itself
+(`monitors/monitors.json`) is a Claude Code plugin component with no Codex
+equivalent as of 2026-09-10, and its status-line adapter reads a payload only
+Claude Code produces; on Codex those two files are inert.
 Whether Codex fires those event names has **not** been verified against a
 Codex build; if it does not, those two groups simply never run there, which is
 the same degradation-to-silence every other check has. The scripts themselves
@@ -695,6 +760,10 @@ starts changing a decision.
 | `SCRY_WORKTREE_DU_BUDGET` | `4` | seconds of `du` allowed before the size is reported as a floor |
 | `SCRY_SCRATCH_MD_LIST_MAX` | `5` | scratch `.md` files named in the disposal note before the rest become a count |
 | `SCRY_BRANCH_POINT_FETCH_HOURS` | `2` | age of the last fetch past which a branch-point count is reported as dated |
+| `SCRY_CACHE_HANDOFF_LEAD_SECONDS` | `120` | how long before the prompt cache expires the handoff is requested |
+| `SCRY_CACHE_HANDOFF_POLL_SECONDS` | `15` | how often the monitor re-reads the deadline (no model calls) |
+| `SCRY_CACHE_HANDOFF_DIR` | `~/.claude/scry/handoffs` | where handoff files are asked to be written |
+| `SCRY_CACHE_HANDOFF` | `1` | `0` disables the cache-handoff monitor entirely |
 
 Raising a threshold buys silence. Lowering one buys warning. Neither changes
 what is measured.
