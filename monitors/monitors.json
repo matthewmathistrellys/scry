@@ -1,0 +1,7 @@
+[
+  {
+    "name": "cache-handoff",
+    "command": "\"${CLAUDE_PLUGIN_ROOT}\"/cache_handoff_monitor.sh",
+    "description": "prompt-cache deadline: one handoff request per user turn, shortly before the cache goes cold"
+  }
+]

@@ -2650,3 +2650,178 @@ class BranchPointAdvisoryTests(unittest.TestCase):
             result = run_hook("branch_point_advisory.sh", repo, {"cwd": str(repo)})
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout.strip(), "")
+
+
+class CacheHandoffTests(unittest.TestCase):
+    """One handoff per user-work cycle, shortly before the prompt cache goes
+    cold, and only a user message re-arms it (designed with Codex,
+    2026-09-10). Three scripts share two small files of numbers per session.
+    """
+
+    SID = "sess-cache-0001"
+
+    def _env(self, td, **extra):
+        env = {
+            "SCRY_CACHE_STATE_DIR": str(Path(td) / "state"),
+            "SCRY_CACHE_HANDOFF_DIR": str(Path(td) / "handoffs"),
+            "CLAUDE_CODE_SESSION_ID": self.SID,
+            "SCRY_CACHE_HANDOFF_ONCE": "1",
+        }
+        env.update(extra)
+        return env
+
+    def _statusline(self, td, expires_in, warm=True, inner=None, sid=None):
+        env = self._env(td)
+        if inner is not None:
+            env["SCRY_STATUSLINE_INNER"] = inner
+        payload = {
+            "session_id": sid or self.SID,
+            "cwd": td,
+            "model": {"id": "claude-fable-5-1"},
+            "prompt_cache": {
+                "warm": warm,
+                "ttl": "1h",
+                "expires_at": int(time.time()) + expires_in,
+                "requests": 7,
+                "misses": 1,
+            },
+        }
+        return run_hook("cache_deadline_statusline.sh", td, payload, env=env)
+
+    def _arm(self, td):
+        return run_hook("cache_handoff_arm.sh", td,
+                        {"session_id": self.SID, "prompt": "SECRET PROMPT TEXT"},
+                        env=self._env(td))
+
+    def _monitor(self, td, **extra):
+        return subprocess.run(
+            ["bash", str(ROOT / "cache_handoff_monitor.sh")], cwd=td, text=True,
+            capture_output=True, check=True,
+            env={**os.environ, **self._env(td, **extra)},
+        )
+
+    def _state(self, td):
+        p = Path(td) / "state" / f"{self.SID}.state"
+        return p.read_text().split() if p.exists() else []
+
+    def test_the_status_line_records_the_deadline_and_nothing_else(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._statusline(td, 3000)
+            rec = json.loads((Path(td) / "state" / f"{self.SID}.deadline").read_text())
+            self.assertEqual(set(rec), {"session_id", "observed_at", "warm",
+                                        "ttl", "expires_at", "requests"})
+            self.assertTrue(rec["warm"])
+            self.assertNotIn("model", json.dumps(rec))
+
+    def test_the_status_line_passes_the_payload_to_the_inner_command(self):
+        with tempfile.TemporaryDirectory() as td:
+            r = self._statusline(td, 3000, inner="python3 -c 'import json,sys; print(\"inner:\"+json.load(sys.stdin)[\"model\"][\"id\"])'")
+            self.assertEqual(r.stdout.strip(), "inner:claude-fable-5-1")
+
+    def test_the_status_line_is_a_cache_status_when_no_inner_command_is_set(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertRegex(self._statusline(td, 3000).stdout, r"cache warm \d+m")
+            self.assertEqual(self._statusline(td, 3000, warm=False).stdout.strip(), "cache cold")
+
+    def test_the_status_line_records_nothing_without_cache_data(self):
+        with tempfile.TemporaryDirectory() as td:
+            run_hook("cache_deadline_statusline.sh", td,
+                     {"session_id": self.SID, "cwd": td}, env=self._env(td))
+            self.assertFalse((Path(td) / "state").exists())
+
+    def test_a_user_message_arms_and_reads_no_prompt(self):
+        with tempfile.TemporaryDirectory() as td:
+            r = self._arm(td)
+            self.assertEqual(r.stdout, "")
+            self.assertEqual(self._state(td)[0], "armed")
+            for p in (Path(td) / "state").iterdir():
+                self.assertNotIn("SECRET", p.read_text())
+
+    def test_it_asks_once_inside_the_lead_window_and_never_again(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._arm(td)
+            time.sleep(1.1)  # the deadline must be observed after arming
+            self._statusline(td, 90)
+            first = self._monitor(td)
+            self.assertIn("goes cold", first.stdout)
+            self.assertEqual(first.stdout.count("\n"), 1)
+            path = self._state(td)[2]
+            self.assertIn(os.path.basename(td.rstrip("/")), path)
+            self.assertIn(self.SID[:8], path)
+            self.assertTrue(Path(path).parent.is_dir())
+            self.assertEqual(self._state(td)[0], "requested")
+            # The handoff itself refreshes the cache; that must not re-arm.
+            self._statusline(td, 3500)
+            self.assertEqual(self._monitor(td).stdout, "")
+            self._statusline(td, 90)
+            self.assertEqual(self._monitor(td).stdout, "")
+
+    def test_a_new_user_message_starts_a_new_cycle(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._arm(td)
+            time.sleep(1.1)
+            self._statusline(td, 90)
+            self.assertIn("goes cold", self._monitor(td).stdout)
+            self._arm(td)
+            time.sleep(1.1)
+            self._statusline(td, 90)
+            self.assertIn("goes cold", self._monitor(td).stdout)
+
+    def test_it_is_silent_when_not_armed_or_outside_the_window(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._statusline(td, 90)
+            self.assertEqual(self._monitor(td).stdout, "")  # never armed
+            self._arm(td)
+            time.sleep(1.1)
+            self._statusline(td, 3000)
+            self.assertEqual(self._monitor(td).stdout, "")  # far from expiry
+            self._statusline(td, 90, warm=False)
+            self.assertEqual(self._monitor(td).stdout, "")  # already cold
+            self.assertEqual(self._state(td)[0], "armed")
+
+    def test_a_deadline_observed_before_arming_is_not_this_cycles(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._statusline(td, 90)
+            time.sleep(1.1)
+            self._arm(td)
+            self.assertEqual(self._monitor(td).stdout, "")
+
+    def test_a_missed_deadline_is_silent_here_and_said_on_the_next_turn(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._arm(td)
+            time.sleep(1.1)
+            self._statusline(td, -5)
+            self.assertEqual(self._monitor(td).stdout, "")
+            self.assertEqual(self._state(td)[0], "missed")
+            note = context(self._arm(td))
+            self.assertIn("expired at", note)
+            self.assertEqual(self._state(td)[0], "armed")
+            self.assertEqual(self._arm(td).stdout, "")  # said once
+
+    def test_it_notes_the_saved_handoff_silently(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._arm(td)
+            time.sleep(1.1)
+            self._statusline(td, 90)
+            self._monitor(td)
+            path = self._state(td)[2]
+            Path(path).write_text("# handoff\n")
+            self.assertEqual(self._monitor(td).stdout, "")
+            self.assertEqual(self._state(td)[0], "saved")
+
+    def test_the_lead_time_is_configurable_not_hardcoded(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._arm(td)
+            time.sleep(1.1)
+            self._statusline(td, 500)
+            self.assertEqual(self._monitor(td).stdout, "")
+            self.assertIn("goes cold", self._monitor(td, SCRY_CACHE_HANDOFF_LEAD_SECONDS="600").stdout)
+
+    def test_opt_out_exits_silently_and_a_missing_session_id_says_so(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._arm(td)
+            time.sleep(1.1)
+            self._statusline(td, 90)
+            self.assertEqual(self._monitor(td, SCRY_CACHE_HANDOFF="0").stdout, "")
+            self.assertEqual(self._state(td)[0], "armed")
+            self.assertIn("unavailable", self._monitor(td, CLAUDE_CODE_SESSION_ID="").stdout)
