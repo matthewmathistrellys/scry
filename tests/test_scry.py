@@ -237,6 +237,57 @@ class ScryHookTests(unittest.TestCase):
             self.assertIn("1 Codex subagent", report)
             self.assertIn("COLLISION RISK: 3 of them are", report)
 
+    def test_fleet_after_clear_names_the_session_just_left_and_its_handoff(self):
+        # /clear ends the session and starts a new one with source "clear".
+        # The session just left was written seconds ago, which the live
+        # window hides on a normal start — the one case the new session
+        # needs it (Matt, 2026-09-10: "the new one has no idea where it just
+        # came from"). Metadata and the handoff only; never the prompts.
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = base / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            claude_dir = base / ".claude/projects" / re.sub(r"[/._]", "-", str(repo.resolve()))
+            claude_dir.mkdir(parents=True)
+            prev = claude_dir / "0123abcd-prev-session.jsonl"
+            prev.write_text(json.dumps({"type": "user", "message": "SECRET PROMPT"}) + "\n"
+                            + json.dumps({"type": "ai-title", "aiTitle": "Old title"}) + "\n"
+                            + json.dumps({"type": "ai-title", "aiTitle": "Scry cache TTL handoff design"}) + "\n")
+            older = claude_dir / "older-session.jsonl"
+            older.write_text(json.dumps({"type": "ai-title", "aiTitle": "Older"}) + "\n")
+            os.utime(older, (time.time() - 3600, time.time() - 3600))
+            handoffs = base / "handoffs" / "repo"
+            handoffs.mkdir(parents=True)
+            (handoffs / "20260910-1200-0123abcd.md").write_text("# Handoff\nObjective: finish the clear hook.\n")
+            (handoffs / "20260910-1100-0123abcd.md").write_text("stale earlier handoff\n")
+            os.utime(handoffs / "20260910-1100-0123abcd.md", (time.time() - 900, time.time() - 900))
+            env = {"HOME": str(base), "CODEX_HOME": str(base / ".codex"),
+                   "SCRY_CACHE_HANDOFF_DIR": str(base / "handoffs")}
+            payload = {"cwd": str(repo), "session_id": "new-session",
+                       "transcript_path": str(claude_dir / "new-session.jsonl")}
+
+            report = context(run_hook("fleet.sh", repo, {**payload, "source": "clear"}, env))
+            self.assertIn("began with /clear", report)
+            self.assertIn('"Scry cache TTL handoff design"', report)
+            self.assertIn("claude --resume 0123abcd-prev-session", report)
+            self.assertIn("Objective: finish the clear hook.", report)
+            self.assertNotIn("stale earlier handoff", report)
+            self.assertNotIn("SECRET PROMPT", report)
+            self.assertNotIn("Last session in this directory", report)
+
+            # A plain start keeps the old rule: the just-written transcript
+            # counts as live and is not reported as the last session.
+            report = context(run_hook("fleet.sh", repo, {**payload, "source": "startup"}, env))
+            self.assertNotIn("began with /clear", report)
+            self.assertNotIn("0123abcd", report)
+
+            # /clear with no handoff on disk says so, instead of nothing.
+            for f in handoffs.iterdir():
+                f.unlink()
+            report = context(run_hook("fleet.sh", repo, {**payload, "source": "clear"}, env))
+            self.assertIn("No handoff was written", report)
+
     def test_session_worktree_reports_lock_escape_hatch_and_orphan_exposure(self):
         # 2026-08-10 incident: a session inside a linked worktree spent an
         # hour failing to leave it, and an untracked file in that same
@@ -2713,15 +2764,44 @@ class CacheHandoffTests(unittest.TestCase):
             self.assertTrue(rec["warm"])
             self.assertNotIn("model", json.dumps(rec))
 
-    def test_the_status_line_passes_the_payload_to_the_inner_command(self):
+    def test_the_status_line_passes_the_payload_to_the_inner_command_and_appends_the_cache(self):
         with tempfile.TemporaryDirectory() as td:
             r = self._statusline(td, 3000, inner="python3 -c 'import json,sys; print(\"inner:\"+json.load(sys.stdin)[\"model\"][\"id\"])'")
-            self.assertEqual(r.stdout.strip(), "inner:claude-fable-5-1")
+            # The bar the user already had, then the cache at the end of it
+            # (Matt, 2026-09-10: the TTL "at the bottom" is the point).
+            self.assertRegex(r.stdout.strip(), r"^inner:claude-fable-5-1  \x1b\[2mcache 1h \u23f1(49|50)m\x1b\[0m$")
+            # An inner that prints nothing leaves the cache segment alone.
+            r = self._statusline(td, 3000, inner="true")
+            self.assertRegex(r.stdout.strip(), r"^\x1b\[2mcache 1h \u23f1(49|50)m\x1b\[0m$")
 
     def test_the_status_line_is_a_cache_status_when_no_inner_command_is_set(self):
         with tempfile.TemporaryDirectory() as td:
-            self.assertRegex(self._statusline(td, 3000).stdout, r"cache warm \d+m")
-            self.assertEqual(self._statusline(td, 3000, warm=False).stdout.strip(), "cache cold")
+            self.assertRegex(self._statusline(td, 3000).stdout, r"cache 1h \u23f1(49|50)m")
+            self.assertRegex(self._statusline(td, 3000, warm=False).stdout.strip(), r"^\x1b\[31mcache COLD\x1b\[0m$")
+
+    def test_the_status_line_says_what_a_cold_cache_will_cost(self):
+        # recache_tokens_if_cold is what the next request re-reads at the
+        # full rate once the cache has gone cold — the number that decides
+        # whether to /clear, /compact, or resume (prompt-caching reference,
+        # read 2026-09-10). Inside the last ten minutes it is shown in
+        # yellow with the count; cold, in red with the count.
+        with tempfile.TemporaryDirectory() as td:
+            env = self._env(td)
+            def run(expires_in, warm):
+                payload = {
+                    "session_id": self.SID, "cwd": td,
+                    "prompt_cache": {"warm": warm, "ttl": "1h",
+                                     "expires_at": int(time.time()) + expires_in,
+                                     "requests": 3, "recache_tokens_if_cold": 153_400},
+                }
+                return run_hook("cache_deadline_statusline.sh", td, payload, env=env).stdout.strip()
+            self.assertRegex(run(3000, True), r"^\x1b\[2mcache 1h \u23f1(49|50)m\x1b\[0m$")
+            self.assertRegex(run(250, True), r"^\x1b\[33mcache 1h \u23f14m ~153k\x1b\[0m$")
+            self.assertEqual(run(-5, False), "\x1b[31mcache COLD ~153k\x1b[0m")
+            # The record the monitor reads is unchanged by any of this.
+            rec = json.loads((Path(td) / "state" / f"{self.SID}.deadline").read_text())
+            self.assertEqual(set(rec), {"session_id", "observed_at", "warm",
+                                        "ttl", "expires_at", "requests"})
 
     def test_the_status_line_records_nothing_without_cache_data(self):
         with tempfile.TemporaryDirectory() as td:

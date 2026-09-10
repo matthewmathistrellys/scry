@@ -227,7 +227,15 @@ machine is carrying. Independent checks and advisories fill that in.
   2026-09-10), and no plugin can install a status line, so this is a wrapper
   the user points `statusLine.command` at once (see [Install](#install)).
   It keeps `observed_at`, `warm`, `ttl`, `expires_at`, `requests` and passes
-  the payload through to the status line that was already there.
+  the payload through to the status line that was already there, appending
+  one segment to the end of the bar: `cache 1h ⏱43m` while warm, in yellow
+  with the re-read size (`cache 1h ⏱4m ~150k`) inside the last ten minutes,
+  and `cache COLD ~150k` in red once it has expired. The size is Claude
+  Code's own `recache_tokens_if_cold` — what the next request re-reads at the
+  full rate if nobody speaks first. Nothing avoids that re-read once the cache
+  is cold: a `/compact` sends the same history to write its summary, and
+  resuming does too. The only free move is `/clear`, which is why the handoff
+  exists and why the new session is handed it (see `fleet.sh`).
 
   *`cache_handoff_arm.sh`* is a `UserPromptSubmit` hook that writes "armed".
   It is the whole re-arm rule: only a user message starts a new cycle. Tool
@@ -402,7 +410,13 @@ machine is carrying. Independent checks and advisories fill that in.
   worktrees*, how old they are, whether one is in your exact directory, which
   subagents are editing here without a session of their own, whether other
   agent CLIs (Gemini, aider, and others) are competing for the same machine, and
-  what the last session here was called.
+  what the last session here was called. After `/clear` it does one more thing:
+  Claude Code ends the session and starts a new one (SessionStart fires with
+  `source: "clear"`), and the session just left is the one you were in seconds
+  ago, so the new session is told its title, its id, the `claude --resume`
+  command that reopens it, and — when the cache-handoff monitor got one
+  written — the handoff itself. Without that, the live-window rule hid exactly
+  that session (2026-09-10: "the new one has no idea where it just came from").
 - **`pressure.sh`** — load per core, swap in use, disk headroom, and which dev
   servers are already listening.
 
@@ -428,6 +442,7 @@ industrialise that problem.
 | Disk | 60% used | ≥90% used, or <20GB free |
 | Sessions in this repo | just you | any other live one |
 | Last session | none recorded | a title exists |
+| Session left by `/clear` | start was not a `/clear` | always: id, title, resume command, and the handoff if one was written |
 | Session worktree location | never silent | states primary-worktree consequences, or the linked-worktree lock + `ExitWorktree` escape hatch — whichever applies |
 | Session worktree merged | not merged | content already in main |
 | Session worktree drift | up to date | origin/main ahead of fork point |
@@ -588,6 +603,12 @@ The resolver picks the newest installed Scry so `/plugin update scry` keeps
 working, and falls back to the inner status line when Scry is not installed
 at all. Without this the monitor still arms, sees no deadline, and stays
 silent — it does not guess.
+
+Claude Code re-runs the status line on events (a new assistant message, a
+compaction, and the moment a warm cache reaches `expires_at`), so the COLD
+flip is on time by itself. The minute count only ticks between events; add
+`"refreshInterval": 60` next to `command` to keep it live while you are away
+from the keyboard.
 
 ### Codex
 
@@ -786,6 +807,11 @@ have been reversed an hour later in another session you also cannot see, and
 acting on stale conclusions is worse than having no context. If you want the
 detail, ask for it in-session, so it arrives as something you went and got
 rather than something you were handed as fact.
+The `/clear` case is the one exception, and it is a different thing: the
+session just left is yours, from seconds ago, and the handoff it may have
+written is a document made to be read next, not a summary of a stranger's
+conversation. Even then only the handoff is printed — never the transcript's
+prompts or responses.
 
 **Merged means content, not commits.** Whether a branch is merged is decided by
 ancestry *and* patch-id equivalence, so a squash or rebase merge — which
