@@ -2999,7 +2999,7 @@ class StatuslineTests(unittest.TestCase):
             work = self._repo(td)
             day = time.strftime("%a", time.localtime(time.time() + 3 * 86400))
             self.assertRegex(self._run(td, str(work)),
-                r"^ scry  Fable 5\.1  \$4\.20  🗓️ 64% " + day + r"  🌕 42k/200k  🔥 (39|40)m$")
+                r"^ \x1b\[1;36mscry\x1b\[0m  Fable 5\.1  \$4\.20  🗓️ 64% " + day + r"  🌕 42k/200k  🔥 (39|40)m$")
 
     def test_a_feature_branch_with_work_shows_branch_uncommitted_and_unpushed(self):
         with tempfile.TemporaryDirectory() as td:
@@ -3011,7 +3011,7 @@ class StatuslineTests(unittest.TestCase):
             for f in ("a", "b", "c"):
                 (work / f).write_text("x")
             out = self._run(td, str(work))
-            self.assertIn(" scry  \x1b[33mfeature-x\x1b[0m  \x1b[33m3 uncommitted\x1b[0m  \x1b[33m2 unpushed\x1b[0m  Fable 5.1", out)
+            self.assertIn(" \x1b[1;36mscry\x1b[0m  \x1b[33mfeature-x\x1b[0m  \x1b[33m3 uncommitted\x1b[0m  \x1b[33m2 unpushed\x1b[0m  Fable 5.1", out)
             # In a worktree named after the branch, the branch is not repeated.
             wt = Path(td) / "feature-x"
             subprocess.run(["git", "-C", str(work), "worktree", "add", "-q", str(wt), "-b", "feature-x-wt", "feature-x"],
@@ -3020,7 +3020,7 @@ class StatuslineTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(work), "checkout", "-q", "main"], check=True)
             subprocess.run(["git", "-C", str(wt), "checkout", "-q", "feature-x"], check=True)
             out = self._run(td, str(wt))
-            self.assertTrue(out.startswith(" feature-x  \x1b[33m2 unpushed\x1b[0m  Fable 5.1"), out)
+            self.assertTrue(out.startswith(" \x1b[1;36mfeature-x\x1b[0m  \x1b[33m2 unpushed\x1b[0m  Fable 5.1"), out)
 
     def test_week_turns_yellow_then_red_and_cold_cache_is_blue(self):
         with tempfile.TemporaryDirectory() as td:
@@ -3052,11 +3052,11 @@ class StatuslineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             work = self._repo(td)
             out = self._run(td, str(work), cost={}, rate_limits={}, context_window={})
-            self.assertRegex(out, r"^ scry  Fable 5\.1  🔥 (39|40)m$")
+            self.assertRegex(out, r"^ \x1b\[1;36mscry\x1b\[0m  Fable 5\.1  🔥 (39|40)m$")
 
     def test_the_bar_still_renders_outside_a_repository(self):
         with tempfile.TemporaryDirectory() as td:
             plain = Path(td) / "notes"
             plain.mkdir()
             out = self._run(td, str(plain))
-            self.assertTrue(out.startswith(" notes  Fable 5.1  $4.20"), out)
+            self.assertTrue(out.startswith(" \x1b[1;36mnotes\x1b[0m  Fable 5.1  $4.20"), out)
