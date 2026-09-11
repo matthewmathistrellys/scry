@@ -152,14 +152,46 @@ here so we know what we're doing").
   session's directory froze at 12:42:09 (341 KB) while a second transcript for
   the *same agent id* appeared under the replacement session's directory and
   was still growing at 12:47:03. The replacement conversation listed it under
-  `ListAgents` as its own subagent, a `SendMessage` to the bare id was queued
-  and answered with a substantive report, and the `<task-notification>` for its
-  completion arrived in that conversation carrying the full result. **Confound,
+  `ListAgents` as its own subagent **while it was running**, a `SendMessage` to
+  the bare id was queued and answered with a substantive report, and the
+  `<task-notification>` for its completion arrived in that conversation carrying
+  the full result. **Confound,
   stated because it is the whole weight of the claim:** the session had already
   addressed the agent before it finished. That an *untouched* orphan announces
   itself is NOT established — see §Unknown. What is established is that the
   handle survives the clear, which is the difference between seeing orphaned
   work and being able to ask it what it is doing.
+- **Second replication, 2026-09-11 13:45 — a finished orphan is reachable but
+  invisible.** The same agent `abf2be96274ae9c55` was probed again from a
+  *second* replacement session (`ca11d83a`), 58 minutes after it stopped, by a
+  conversation that knew only the id. `SendMessage` to the bare id worked —
+  `{"success":true,"message":"Resuming agent abf2be9"}` — and it answered.
+  `TaskOutput` resolved it (`task_type local_agent`). But `ListAgents` returned
+  `No reachable agents`, because the agent was `completed` rather than
+  `running`: the earlier run's listing was taken at 12:42 and 12:45 while it
+  was still working. Both observations stand; the qualifier was missing. This
+  matters because the orphan `fleet.sh` is built to catch is usually the
+  *finished and unread* one, which is exactly the one `ListAgents` cannot see.
+  **The id is the only handle that works in both states.**
+- **Re-parenting is per clear, not once.** After the second clear the agent had
+  *three* transcripts under the same id, one per session
+  (`3399fa22` 341 KB frozen 12:42, `f8c5cf92` 119 KB frozen 12:47, `ca11d83a`
+  462 KB live 13:46), and the task symlink — still named under the original
+  spawner `3399fa22` — had been repointed again, now at the third. So the
+  liveness test keeps reading the live transcript across repeated clears, and
+  `orphaned_tasks()` keeps looking in the right directory. Still luck that
+  held; mechanism still untraced.
+- **A notification already delivered does not re-deliver.** The second
+  replacement session received no `<task-notification>` on its own for the
+  58 minutes it sat with the agent finished — the completion notice had been
+  consumed by the first replacement at 12:47. This is *not* evidence about an
+  untouched orphan announcing itself; that stays in §Unknown. What it does
+  establish is that arriving late means arriving to silence.
+- **`TaskOutput` on an agent task is the same context hazard as reading the
+  symlink.** Called with `block:false, timeout:0` purely as a liveness probe,
+  it still returned roughly 25k tokens of raw transcript JSONL inline. The
+  warning not to `Read` the `.output` file applies to `TaskOutput` on it too —
+  the tool is a different door onto the same file.
 - **The task file stays with the spawner; its target follows the seat.** The
   entry is `<task root>/<encoded cwd>/<SPAWNING session id>/tasks/<task
   id>.output`, and after the clear that symlink resolves to
@@ -193,8 +225,9 @@ here so we know what we're doing").
   deleted when it completes; a background one's is kept. (run + tool schema,
   2026-09-11) Confirmed by calling it: `TaskOutput` on an agent task returns
   `status` plus raw transcript JSONL — useful as a liveness probe, useless as a
-  findings channel, and expensive. `ListAgents` for status, a message to the id
-  for content.
+  findings channel, and expensive. For a *running* agent, `ListAgents` for
+  status and a message to the id for content; for a *finished* one the message
+  is the only channel, because `ListAgents` does not list it (below).
 - **Correction, same day.** An earlier note here claimed the file is "created
   empty, does not grow while it runs, and is written in one go at exit", so
   that a zero-byte file meant an unfinished job. That was a bad
