@@ -314,6 +314,125 @@ class ScryHookTests(unittest.TestCase):
             self.assertNotIn("began with /clear", report)
             self.assertNotIn("0123abcd", report)
 
+    def test_fleet_after_clear_names_the_work_the_cleared_session_left_running(self):
+        # 2026-09-11: a session was cleared mid-build. The builder it had
+        # launched kept running, as subagents do — but its results reported to
+        # a session id that takes no more turns, and the replacement session
+        # was never handed it. Worse, this hook SAW that builder and filed it
+        # under "from other sessions", which reads as somebody else's work. So
+        # the replacement launched a second builder on the same branch and the
+        # two collided on the same PR. The subagent was always visible; only
+        # its owner was wrong. Attribution is the fix.
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = base / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            enc = re.sub(r"[/._]", "-", str(repo.resolve()))
+            claude_dir = base / ".claude/projects" / enc
+            claude_dir.mkdir(parents=True)
+            prev_id = "0123abcd-prev-session"
+            prev = claude_dir / f"{prev_id}.jsonl"
+            prev.write_text(json.dumps({"type": "ai-title", "aiTitle": "Overnight build"}) + "\n")
+
+            # The builder the cleared session started, still writing here.
+            mine = claude_dir / prev_id / "subagents"
+            mine.mkdir(parents=True)
+            (mine / "builder.jsonl").write_text(
+                json.dumps({"cwd": str(repo), "type": "user",
+                            "message": "SECRET BUILDER PROMPT"}) + "\n")
+            # A genuine stranger: another session's subagent in the same tree.
+            stranger = claude_dir / "someone-elses-session" / "subagents"
+            stranger.mkdir(parents=True)
+            (stranger / "reviewer.jsonl").write_text(
+                json.dumps({"cwd": str(repo)}) + "\n")
+
+            # Background jobs it registered: one that wrote its result before
+            # the clear, one still empty — no result recorded either way but
+            # only the empty one is unfinished.
+            tasks = base / "taskroot" / enc / prev_id / "tasks"
+            tasks.mkdir(parents=True)
+            (tasks / "running.output").write_text("")
+            (tasks / "finished.output").write_text("done\n\n[exited with code 0]\n")
+
+            env = {"HOME": str(base), "CODEX_HOME": str(base / ".codex"),
+                   "SCRY_CACHE_HANDOFF_DIR": str(base / "handoffs"),
+                   "SCRY_CLEAR_STATE_DIR": str(base / "cleared"),
+                   "SCRY_CACHE_STATE_DIR": str(base / "deadline"),
+                   "SCRY_TASK_STATE_DIR": str(base / "taskroot")}
+            run_hook("clear_record.sh", repo, {"session_id": prev_id,
+                                              "transcript_path": str(prev), "cwd": str(repo),
+                                              "reason": "clear"}, env)
+            payload = {"cwd": str(repo), "session_id": "new-session",
+                       "transcript_path": str(claude_dir / "new-session.jsonl"),
+                       "source": "clear"}
+            report = context(run_hook("fleet.sh", repo, payload, env))
+
+            # Fact five: named as this seat's own, with the consequence.
+            self.assertIn("IT LEFT WORK RUNNING", report)
+            self.assertIn("1 subagent still writing (in this directory", report)
+            self.assertIn("1 background job(s) that recorded no result", report)
+            self.assertIn(str(tasks), report)
+            self.assertIn("runs twice", report)
+            # The stranger is still a stranger, and is counted once, not twice.
+            self.assertIn("1 subagent from other sessions is working", report)
+            # Both are concurrent writers in this tree, so both are exposure.
+            self.assertIn("COLLISION RISK: 2 of them are", report)
+            # ...and the session that just ended is not also counted as one of
+            # the live neighbours competing for this tree.
+            self.assertNotIn("other Claude session(s) active", report)
+            # Still metadata only: no prompt from either transcript.
+            self.assertNotIn("SECRET BUILDER PROMPT", report)
+
+            # The guess is not good enough to call work your own. With the
+            # record consumed, the fifth fact goes silent rather than pointing
+            # a reader at agents that may belong to anyone.
+            report = context(run_hook("fleet.sh", repo, payload, env))
+            self.assertIn("a GUESS", report)
+            self.assertNotIn("IT LEFT WORK RUNNING", report)
+            self.assertIn("2 subagents from other sessions are working", report)
+
+    def test_fleet_leaves_a_finished_background_job_unreported(self):
+        # A job that wrote its result is finished work, not in-flight work,
+        # and a line that fired for every cleared session with a tasks
+        # directory would stop carrying information (README, output budget).
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = base / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            enc = re.sub(r"[/._]", "-", str(repo.resolve()))
+            (base / ".claude/projects" / enc).mkdir(parents=True)
+            prev = base / ".claude/projects" / enc / "s-prev.jsonl"
+            prev.write_text(json.dumps({"type": "ai-title", "aiTitle": "Quiet session"}) + "\n")
+            tasks = base / "taskroot" / enc / "s-prev" / "tasks"
+            tasks.mkdir(parents=True)
+            (tasks / "finished.output").write_text("done\n\n[exited with code 0]\n")
+            env = {"HOME": str(base), "CODEX_HOME": str(base / ".codex"),
+                   "SCRY_CACHE_HANDOFF_DIR": str(base / "handoffs"),
+                   "SCRY_CLEAR_STATE_DIR": str(base / "cleared"),
+                   "SCRY_CACHE_STATE_DIR": str(base / "deadline"),
+                   "SCRY_TASK_STATE_DIR": str(base / "taskroot")}
+            run_hook("clear_record.sh", repo, {"session_id": "s-prev", "cwd": str(repo),
+                                              "reason": "clear", "transcript_path": str(prev)}, env)
+            report = context(run_hook("fleet.sh", repo,
+                                      {"cwd": str(repo), "session_id": "new",
+                                       "transcript_path": str(base / "new.jsonl"),
+                                       "source": "clear"}, env))
+            self.assertIn("began with /clear", report)
+            self.assertNotIn("IT LEFT WORK RUNNING", report)
+
+            # And a client that does not use this layout at all is silence,
+            # never a guess (AGENTS.md: never silently wrong).
+            env["SCRY_TASK_STATE_DIR"] = str(base / "nothing-here")
+            run_hook("clear_record.sh", repo, {"session_id": "s-prev", "cwd": str(repo),
+                                              "reason": "clear", "transcript_path": str(prev)}, env)
+            report = context(run_hook("fleet.sh", repo,
+                                      {"cwd": str(repo), "session_id": "new",
+                                       "transcript_path": str(base / "new.jsonl"),
+                                       "source": "clear"}, env))
+            self.assertNotIn("IT LEFT WORK RUNNING", report)
+
     def test_clear_record_writes_only_on_clear_and_sweeps_old_records(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

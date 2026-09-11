@@ -416,14 +416,37 @@ machine is carrying. Independent checks and advisories fill that in.
   replaced. `clear_record.sh`, a `SessionEnd` hook, writes that down as the old
   session ends — id, transcript path, directory, time — in one small file
   under `$TMPDIR/scry-last-cleared/`; the new session's `fleet.sh` reads the
-  record for its directory, deletes it, and states four facts: the session
+  record for its directory, deletes it, and states five facts: the session
   left (title, id), its transcript path, what resuming it costs (its prompt
-  cache is warm until HH:MM, a full re-read after), and whether a handoff was
-  written for it — the path, never the body. No recipe, no action: the reader
-  decides. If the record is missing the newest transcript stands in and is
-  labelled a guess, because with ten sessions open that guess is wrong exactly
-  when it matters (council + Matt, 2026-09-10). Records nobody claims are
-  swept after a day.
+  cache is warm until HH:MM, a full re-read after), whether a handoff was
+  written for it — the path, never the body — and **what it left running**. No
+  recipe, no action: the reader decides. If the record is missing the newest
+  transcript stands in and is labelled a guess, because with ten sessions open
+  that guess is wrong exactly when it matters (council + Matt, 2026-09-10).
+  Records nobody claims are swept after a day.
+
+  That fifth fact is the one that cost an hour. A subagent, a workflow agent or
+  a background job does not stop when the session that launched it is cleared —
+  but its result has nowhere to land, because the session id it reports to takes
+  no more turns and the new session was never handed it. Until 1.29.0 this hook
+  made that worse rather than better: it *saw* those subagents, found their
+  session id was not this session's, and reported them as "from other sessions"
+  — which reads as somebody else's work. On 2026-09-11 a session cleared
+  mid-build, could not see its own still-running builder, launched a second one
+  on the same branch, and the two collided on the same PR. The subagents were
+  always visible; they were filed under the wrong owner. So a subagent whose
+  session-id directory matches the session just cleared is now reported as this
+  seat's own in-flight work, with how long it has been running and the
+  consequence — *the same job started again runs twice over the same files and
+  the same branch* — and the same line counts the background jobs under that
+  session id whose output file is still empty, which is a job that never
+  reported: still running, or gone with the session. Attribution only ever uses
+  the **recorded** id, never the transcript guess: a guess good enough to name a
+  conversation for a human to resume is nowhere near good enough to tell a
+  session that work is its own. For the same reason the cleared session no
+  longer counts as a live neighbour — its transcript is seconds old, so the live
+  window read it as an active session competing for this tree, in the same
+  report that said it had ended.
 - **`pressure.sh`** — load per core, swap in use, disk headroom, and which dev
   servers are already listening.
 
@@ -792,6 +815,7 @@ starts changing a decision.
 | Variable | Default | Controls |
 |---|---|---|
 | `SCRY_FLEET_ACTIVE_MINUTES` | `15` | how recently a session must have written to count as live |
+| `SCRY_TASK_STATE_DIR` | `$TMPDIR/claude-$(id -u)` | where background-job output files live, read after `/clear` to count the jobs a cleared session left with no result recorded; absent directory means silence |
 | `SCRY_LOAD_PER_CORE_WARN` | `1.5` | load-per-core before "oversubscribed" |
 | `SCRY_SWAP_USED_MB_WARN` | `2048` | swap in use before it's reported |
 | `SCRY_DISK_FREE_GB_WARN` | `20` | free-space floor |

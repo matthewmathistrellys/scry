@@ -136,6 +136,30 @@ here so we know what we're doing").
 - **Transcript path.** `~/.claude/projects/<cwd with [/._] → ->/<session
   id>.jsonl`. Format is internal and changes between versions. (docs
   sessions; encoding verified in Scry 2026-07-26)
+- **What `/clear` does NOT end: the work.** A subagent, workflow agent or
+  background job started before the clear keeps running. Only the
+  *conversation* ends. The result then has nowhere to land: it is addressed to
+  a session id that takes no more turns, and the new session is told nothing
+  about it. Observed on 2026-09-11 — a session cleared mid-build, its builder
+  ran on and pushed, and the replacement launched a second builder on the same
+  branch (Matt; the push itself is in the PR history). Where the completion
+  notification actually goes is `unknown` — not traced, and the observable
+  effect is the same either way: nobody read it.
+- **A subagent's owning session is recoverable from its path.**
+  `~/.claude/projects/<encoded cwd>/<session id>/subagents/<subagent
+  id>.jsonl` — the session-id directory that `subagents/` hangs off is the
+  session that started it. That is what lets a post-`/clear` session tell its
+  own orphaned agents from a stranger's. (run, verified in this repo
+  2026-07-26, relied on for attribution 2026-09-11)
+- **Background jobs leave one file each, written once at exit.**
+  `$TMPDIR/claude-<uid>/<encoded cwd>/<session id>/tasks/<task id>.output` is
+  created empty when the job starts, does not grow while it runs, and is
+  written in one go at exit with the output and a trailing `[exited with code
+  N]` line. So mtime is useless as a liveness signal and **size is not**: a
+  zero-byte file is a job that never reported. The directory is keyed by
+  session id, so a `/clear` orphans the whole set by construction. (run, on a
+  remote Claude Code container, 2026-09-11 — by starting a 120s job and
+  watching the file)
 - **Cache scope.** Effectively one machine + one directory: the prefix
   carries cwd, platform, shell, OS version and the git snapshot at start.
   Worktrees of the same repo have different caches. Parallel sessions in the
@@ -163,3 +187,12 @@ here so we know what we're doing").
   feature this whole line of work wants).
 - Whether the status-line `refreshInterval` timer keeps firing while the
   terminal is unfocused for hours (not tested).
+- Whether `$TMPDIR/claude-<uid>/.../tasks/` is stock Claude Code or specific
+  to the remote/container runtime it was observed on. It was read on a Linux
+  container where `TMPDIR` was unset; macOS sets `TMPDIR` per user, so the
+  root would differ. `fleet.sh` therefore treats an absent directory as
+  silence rather than as "nothing running" — if the layout is wrong or absent
+  the fifth fact simply loses its background-job half, and the subagent half,
+  which is verified, still speaks.
+- Where a background job's completion notification goes when its session was
+  cleared before it finished (see §3).
