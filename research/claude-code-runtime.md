@@ -145,6 +145,38 @@ here so we know what we're doing").
   branch (Matt; the push itself is in the PR history). Where the completion
   notification actually goes is `unknown` — not traced, and the observable
   effect is the same either way: nobody read it.
+- **Correction, 2026-09-11 (experiment).** Both halves above are wrong for a
+  subagent on this runtime. `/clear` **re-parents** a running subagent to the
+  replacement session, and the result lands there. Agent `abf2be96274ae9c55`
+  was spawned seconds before a clear; its transcript under the spawning
+  session's directory froze at 12:42:09 (341 KB) while a second transcript for
+  the *same agent id* appeared under the replacement session's directory and
+  was still growing at 12:47:03. The replacement conversation listed it under
+  `ListAgents` as its own subagent, a `SendMessage` to the bare id was queued
+  and answered with a substantive report, and the `<task-notification>` for its
+  completion arrived in that conversation carrying the full result. **Confound,
+  stated because it is the whole weight of the claim:** the session had already
+  addressed the agent before it finished. That an *untouched* orphan announces
+  itself is NOT established — see §Unknown. What is established is that the
+  handle survives the clear, which is the difference between seeing orphaned
+  work and being able to ask it what it is doing.
+- **The task file stays with the spawner; its target follows the seat.** The
+  entry is `<task root>/<encoded cwd>/<SPAWNING session id>/tasks/<task
+  id>.output`, and after the clear that symlink resolves to
+  `<projects>/<encoded cwd>/<REPLACEMENT session id>/subagents/agent-<task
+  id>.jsonl`. So `orphaned_tasks(cleared_id)` looks in the right directory, and
+  its liveness test — mtime of the link's *target*, which `os.stat` follows —
+  reads the live transcript rather than the frozen one. Both halves verified
+  2026-09-11; neither was designed with this in mind, so record it as luck that
+  held rather than foresight.
+- **After a clear, the replacement session's own tasks also land under the
+  cleared id.** No `tasks/` directory was ever created for the replacement
+  session; a shell task it registered at 12:48 appeared under the cleared
+  session's directory. This is what the memoized `outputDir` below predicts, and
+  it means the cleared session's `tasks/` dir is a *mix* of both sessions' work
+  the moment the replacement starts anything. `fleet.sh` is safe only because it
+  reads at `SessionStart`, before the new session has registered a task — the
+  timing is load-bearing, not incidental.
 - **A subagent's owning session is recoverable from its path.**
   `~/.claude/projects/<encoded cwd>/<session id>/subagents/<subagent
   id>.jsonl` — the session-id directory that `subagents/` hangs off is the
@@ -159,7 +191,10 @@ here so we know what we're doing").
   **regular file** is a shell task: appended to as output is produced, with a
   trailing `[exited with code N]` once it is done. A foreground task's file is
   deleted when it completes; a background one's is kept. (run + tool schema,
-  2026-09-11)
+  2026-09-11) Confirmed by calling it: `TaskOutput` on an agent task returns
+  `status` plus raw transcript JSONL — useful as a liveness probe, useless as a
+  findings channel, and expensive. `ListAgents` for status, a message to the id
+  for content.
 - **Correction, same day.** An earlier note here claimed the file is "created
   empty, does not grow while it runs, and is written in one go at exit", so
   that a zero-byte file meant an unfinished job. That was a bad
@@ -180,6 +215,11 @@ here so we know what we're doing").
   both sides. So it is evidence that the runtime works to keep live task
   output resolvable when files move, and NOT evidence about `/clear`. Noted
   because it reads like the latter at first glance. (binary, 2026-09-11)
+  **Amended same day:** the code-path reading stands, but the *observable* is
+  that a symlink under the cleared session's `tasks/` now points into the
+  replacement session's `subagents/`, so something does repoint across a clear,
+  where the session ids differ. Mechanism still untraced. The original note was
+  right to refuse the inference and wrong to imply the question was closed.
 - **Cache scope.** Effectively one machine + one directory: the prefix
   carries cwd, platform, shell, OS version and the git snapshot at start.
   Worktrees of the same repo have different caches. Parallel sessions in the
@@ -214,5 +254,11 @@ here so we know what we're doing").
   silence rather than as "nothing running" — if the layout is wrong or absent
   the fifth fact simply loses its background-job half, and the subagent half,
   which is verified, still speaks.
-- Where a background job's completion notification goes when its session was
-  cleared before it finished (see §3).
+- Whether a completion notification arrives for an orphan **nobody addresses**.
+  Answered for the addressed case (§3: it arrives in the replacement session);
+  the untouched case is the experiment that has not been run — clear, touch
+  nothing, and wait. Until then `fleet.sh` says the work is reachable, which is
+  measured, and does not say it will announce itself, which is not.
+- Whether any of this holds outside the remote/container runtime it was measured
+  on (`entrypoint: remote_mobile`, CLI 2.1.268). Re-parenting on a stock local
+  `/clear` is untested.

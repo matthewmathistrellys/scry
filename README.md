@@ -426,9 +426,17 @@ machine is carrying. Independent checks and advisories fill that in.
   Records nobody claims are swept after a day.
 
   That fifth fact is the one that cost an hour. A subagent, a workflow agent or
-  a background job does not stop when the session that launched it is cleared —
-  but its result has nowhere to land, because the session id it reports to takes
-  no more turns and the new session was never handed it. Until 1.29.0 this hook
+  a background job does not stop when the session that launched it is cleared,
+  and — verified 2026-09-11, after this hook first shipped — neither does the
+  handle: the replacement conversation lists that work as its own and a message
+  addressed to the task id reaches the agent still running under it and is
+  answered. An earlier draft of this paragraph said the result had "nowhere to
+  land, because the session id it reports to takes no more turns". That was
+  inference stated as mechanism, and the experiment contradicted it: the agent
+  was re-parented to the replacement session, wrote its transcript there, and
+  its completion notification arrived there. What `/clear` ends is the knowledge
+  that the work exists, not the work and not the handle — so the exposure is
+  duplication, not loss. Until 1.29.0 this hook
   made that worse rather than better: it *saw* those subagents, found their
   session id was not this session's, and reported them as "from other sessions"
   — which reads as somebody else's work. On 2026-09-11 a session cleared

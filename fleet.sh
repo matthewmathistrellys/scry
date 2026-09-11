@@ -697,14 +697,16 @@ if start_source == "clear":
             lines.append(
                 "- IT LEFT WORK RUNNING: " + "; ".join(in_flight) + ". A subagent, "
                 "workflow agent or background job outlives the session that started "
-                "it, but its result has nowhere to land: the session id it reports to "
-                "takes no more turns, and this session was never handed it. Nothing "
-                "here will announce when it finishes, and the same job started again "
-                "runs twice over the same files and the same branch. A task id above "
-                "is the handle the runtime uses for that task, and a named agent "
-                "answers to its name; whether this session's own task list still "
-                "carries them across the clear is not something this hook can check "
-                "from disk, so the ids are reported as ids and the reader decides.")
+                "it — and so does the handle. Verified 2026-09-11: the replacement "
+                "conversation lists that work as its own, and a message addressed to "
+                "a task id above reaches the agent still running under it and is "
+                "answered. What the clear ends is not the work or the handle but the "
+                "knowledge that either exists, which is why the exposure here is "
+                "duplication rather than loss: the same job started again runs twice "
+                "over the same files and the same branch. The completion notification "
+                "for that agent did arrive in the replacement conversation, but it "
+                "had already been addressed from there; whether one nobody touches "
+                "announces itself is not established.")
 else:
     best = newest_other_transcript(exclude_live=True)
     if best:
