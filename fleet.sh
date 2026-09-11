@@ -712,8 +712,9 @@ if start_source == "clear":
                 "again runs twice over the same files and the same branch. Arriving "
                 "late means arriving to silence — a completion notification is "
                 "delivered once, to whichever conversation holds the seat at the "
-                "time; whether an orphan nobody touches announces itself is still not "
-                "established.")
+                "time. An orphan that had already finished will never announce "
+                "itself — its one notification fired when it stopped. Only one still "
+                "running when you cleared can still speak up.")
 else:
     best = newest_other_transcript(exclude_live=True)
     if best:

@@ -157,8 +157,9 @@ here so we know what we're doing").
   `<task-notification>` for its completion arrived in that conversation carrying
   the full result. **Confound,
   stated because it is the whole weight of the claim:** the session had already
-  addressed the agent before it finished. That an *untouched* orphan announces
-  itself is NOT established — see §Unknown. What is established is that the
+  addressed the agent before it finished. That an *untouched* orphan still
+  running at the clear announces itself is NOT established — see §Unknown. (An
+  untouched orphan that had already finished never will: §Unknown.) What is established is that the
   handle survives the clear, which is the difference between seeing orphaned
   work and being able to ask it what it is doing.
 - **Second replication, 2026-09-11 13:45 — a finished orphan is reachable but
@@ -184,8 +185,9 @@ here so we know what we're doing").
 - **A notification already delivered does not re-deliver.** The second
   replacement session received no `<task-notification>` on its own for the
   58 minutes it sat with the agent finished — the completion notice had been
-  consumed by the first replacement at 12:47. This is *not* evidence about an
-  untouched orphan announcing itself; that stays in §Unknown. What it does
+  consumed by the first replacement at 12:47. Delivered once means an orphan that
+  finished *before* the clear has no notification left to fire, so it will
+  never announce itself to the replacement — settled, not unknown (§Unknown). What it does
   establish is that arriving late means arriving to silence.
 - **`TaskOutput` on an agent task is the same context hazard as reading the
   symlink.** Called with `block:false, timeout:0` purely as a liveness probe,
@@ -310,11 +312,17 @@ here so we know what we're doing").
   silence rather than as "nothing running" — if the layout is wrong or absent
   the fifth fact simply loses its background-job half, and the subagent half,
   which is verified, still speaks.
-- Whether a completion notification arrives for an orphan **nobody addresses**.
-  Answered for the addressed case (§3: it arrives in the replacement session);
-  the untouched case is the experiment that has not been run — clear, touch
-  nothing, and wait. Until then `fleet.sh` says the work is reachable, which is
-  measured, and does not say it will announce itself, which is not.
+- Whether a completion notification arrives for an orphan **nobody addresses**
+  *that is still running at the clear*. Answered for the addressed case (§3: it
+  arrives in the replacement session); this one is the experiment that has not
+  been run — clear, touch nothing, and wait.
+  **Narrowed 2026-09-11.** The other half is no longer unknown: a notification
+  is delivered once, so an orphan that had already *finished* before the clear
+  has none left to fire and will never announce itself, however long anyone
+  waits. Observed — a session sat 58 minutes beside a finished agent in
+  silence. Only the still-running case can still speak up, which is why
+  `fleet.sh` printing the id is the only notice a reader gets for the finished
+  one.
 - Whether any of this holds outside the remote/container runtime it was measured
   on (`entrypoint: remote_mobile`, CLI 2.1.268). Re-parenting on a stock local
   `/clear` is untested.
