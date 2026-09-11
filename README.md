@@ -438,9 +438,15 @@ machine is carrying. Independent checks and advisories fill that in.
   session-id directory matches the session just cleared is now reported as this
   seat's own in-flight work, with how long it has been running and the
   consequence — *the same job started again runs twice over the same files and
-  the same branch* — and the same line counts the background jobs under that
-  session id whose output file is still empty, which is a job that never
-  reported: still running, or gone with the session. Attribution only ever uses
+  the same branch* — and the same line names the tasks registered under that
+  session id that have not recorded an exit, **by task id**, which is the
+  handle the runtime itself uses for them. A task's file under
+  `<task root>/<encoded cwd>/<session id>/tasks/` is a symlink when it belongs
+  to a spawned agent, pointing at that agent's transcript, so its liveness is
+  that transcript's mtime; a regular file is a shell task, finished once it
+  carries a trailing `[exited with code N]`. Emptiness is not the test — an
+  empty file is a command that has printed nothing yet, and a first cut of
+  this check got that wrong in the direction that invents work. Attribution only ever uses
   the **recorded** id, never the transcript guess: a guess good enough to name a
   conversation for a human to resume is nowhere near good enough to tell a
   session that work is its own. For the same reason the cleared session no
@@ -815,7 +821,7 @@ starts changing a decision.
 | Variable | Default | Controls |
 |---|---|---|
 | `SCRY_FLEET_ACTIVE_MINUTES` | `15` | how recently a session must have written to count as live |
-| `SCRY_TASK_STATE_DIR` | `$TMPDIR/claude-$(id -u)` | where background-job output files live, read after `/clear` to count the jobs a cleared session left with no result recorded; absent directory means silence |
+| `SCRY_TASK_STATE_DIR` | `$TMPDIR/claude-$(id -u)` | where task output files live, read after `/clear` to name the tasks a cleared session left without an exit; absent directory means silence |
 | `SCRY_LOAD_PER_CORE_WARN` | `1.5` | load-per-core before "oversubscribed" |
 | `SCRY_SWAP_USED_MB_WARN` | `2048` | swap in use before it's reported |
 | `SCRY_DISK_FREE_GB_WARN` | `20` | free-space floor |

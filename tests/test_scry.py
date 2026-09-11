@@ -347,13 +347,20 @@ class ScryHookTests(unittest.TestCase):
             (stranger / "reviewer.jsonl").write_text(
                 json.dumps({"cwd": str(repo)}) + "\n")
 
-            # Background jobs it registered: one that wrote its result before
-            # the clear, one still empty — no result recorded either way but
-            # only the empty one is unfinished.
+            # Tasks it registered. A shell task is finished when its output
+            # carries the exit marker and unfinished when it does not —
+            # emptiness says only that it has printed nothing yet. An agent
+            # task's file is a symlink to that agent's transcript, so its
+            # liveness is the transcript's mtime.
             tasks = base / "taskroot" / enc / prev_id / "tasks"
             tasks.mkdir(parents=True)
-            (tasks / "running.output").write_text("")
+            (tasks / "running.output").write_text("partial output so far\n")
             (tasks / "finished.output").write_text("done\n\n[exited with code 0]\n")
+            (tasks / "agent.output").symlink_to(mine / "builder.jsonl")
+            stale = claude_dir / prev_id / "subagents" / "old.jsonl"
+            stale.write_text(json.dumps({"cwd": str(repo)}) + "\n")
+            os.utime(stale, (time.time() - 7200, time.time() - 7200))
+            (tasks / "stale-agent.output").symlink_to(stale)
 
             env = {"HOME": str(base), "CODEX_HOME": str(base / ".codex"),
                    "SCRY_CACHE_HANDOFF_DIR": str(base / "handoffs"),
@@ -371,8 +378,12 @@ class ScryHookTests(unittest.TestCase):
             # Fact five: named as this seat's own, with the consequence.
             self.assertIn("IT LEFT WORK RUNNING", report)
             self.assertIn("1 subagent still writing (in this directory", report)
-            self.assertIn("1 background job(s) that recorded no result", report)
-            self.assertIn(str(tasks), report)
+            # Reported as ids — the handle the runtime itself uses — with the
+            # finished shell task and the long-idle agent both left out.
+            self.assertIn("2 task(s) it registered that have not recorded an exit: "
+                          "agent (agent), running (shell)", report)
+            self.assertNotIn("finished", report)
+            self.assertNotIn("stale-agent", report)
             self.assertIn("runs twice", report)
             # The stranger is still a stranger, and is counted once, not twice.
             self.assertIn("1 subagent from other sessions is working", report)

@@ -151,15 +151,35 @@ here so we know what we're doing").
   session that started it. That is what lets a post-`/clear` session tell its
   own orphaned agents from a stranger's. (run, verified in this repo
   2026-07-26, relied on for attribution 2026-09-11)
-- **Background jobs leave one file each, written once at exit.**
-  `$TMPDIR/claude-<uid>/<encoded cwd>/<session id>/tasks/<task id>.output` is
-  created empty when the job starts, does not grow while it runs, and is
-  written in one go at exit with the output and a trailing `[exited with code
-  N]` line. So mtime is useless as a liveness signal and **size is not**: a
-  zero-byte file is a job that never reported. The directory is keyed by
-  session id, so a `/clear` orphans the whole set by construction. (run, on a
-  remote Claude Code container, 2026-09-11 — by starting a 120s job and
-  watching the file)
+- **Every task leaves one file: `<task root>/<encoded cwd>/<session id>/tasks/<task
+  id>.output`.** Foreground and background alike; the name is the task id.
+  Two shapes. A **symlink** is a spawned agent's task and points at that
+  agent's own JSONL transcript — Claude Code's own `TaskOutput` tool
+  documents this verbatim and warns the file is the entire conversation. A
+  **regular file** is a shell task: appended to as output is produced, with a
+  trailing `[exited with code N]` once it is done. A foreground task's file is
+  deleted when it completes; a background one's is kept. (run + tool schema,
+  2026-09-11)
+- **Correction, same day.** An earlier note here claimed the file is "created
+  empty, does not grow while it runs, and is written in one go at exit", so
+  that a zero-byte file meant an unfinished job. That was a bad
+  generalisation from a single probe whose command printed nothing until its
+  last line. Re-observed: a foreground command's file sat at 8 bytes
+  mid-command and vanished on completion. **Empty means "has printed
+  nothing yet", not "has not finished"** — the exit marker is the finished
+  test, not the size. Worth keeping as a reminder that one observation of a
+  file is an observation of one command's output habits.
+- **`outputDir` is memoized per process, not per session.** `qt()` in the
+  bundle resolves `<task root>/<encoded cwd>/<session id>/tasks` once and
+  caches it on a module-level singleton, so it does not follow a later
+  session-id change. (binary, 2026-09-11, minified — read as a strong hint,
+  not a traced behaviour)
+- **`repointTaskOutputSymlinks` exists, but for cwd changes.** It runs inside
+  `relocateSessionTranscript`, which moves `<projects>/<encoded cwd>/<session
+  id>/` when a session changes directory — the session id is identical on
+  both sides. So it is evidence that the runtime works to keep live task
+  output resolvable when files move, and NOT evidence about `/clear`. Noted
+  because it reads like the latter at first glance. (binary, 2026-09-11)
 - **Cache scope.** Effectively one machine + one directory: the prefix
   carries cwd, platform, shell, OS version and the git snapshot at start.
   Worktrees of the same repo have different caches. Parallel sessions in the

@@ -591,25 +591,62 @@ def handoff_for(sid):
     return max(cands, key=os.path.getmtime) if cands else None
 
 def orphaned_tasks(sid):
-    """Background jobs that session registered, counted by the file the
-    runtime opens for each one. Verified by running one, 2026-09-11: the
-    file <task root>/<encoded cwd>/<session id>/tasks/<task id>.output is
-    created empty when the job starts and written once, at exit, carrying
-    the output and an "[exited with code N]" line. So a zero-byte file is
-    a job that never reported — still running, or gone with the session.
-    Names and sizes only; the files are never opened, and their contents
-    are command output, which is content (AGENTS.md). Returns None when
-    the root is absent, which is also how a client that does not use this
-    layout looks — silence, not a guess."""
+    """The background tasks that session registered which have not
+    finished, as <task id, kind> — the task id being the handle the
+    runtime itself uses for them.
+
+    Layout, read 2026-09-11: <task root>/<encoded cwd>/<session id>/tasks/
+    holds one <task id>.output per task the session registered, foreground
+    and background alike. Two shapes, and they need different liveness
+    tests:
+
+      - A SYMLINK is a spawned agent's task; it points at that agent's own
+        JSONL transcript (Claude Code's TaskOutput tool documents this
+        verbatim, and warns the file is the whole conversation). A
+        transcript grows while its agent works, so the target's mtime is
+        the same liveness signal section 1 already trusts for sessions.
+      - A REGULAR FILE is a shell task. It is appended to as output is
+        produced and carries a trailing "[exited with code N]" once the
+        command is done.
+
+    An earlier version of this function called a zero-byte file an
+    unfinished job. That was wrong, and wrong in the direction that
+    invents work: it generalised from one probe whose command happened to
+    print nothing until its last line. A foreground command's file is
+    zero bytes for as long as it has printed nothing, and is deleted when
+    it completes — so "empty" means "has not printed yet", not "has not
+    finished" (all three re-observed 2026-09-11).
+
+    The exit marker is read from the last 64 bytes and never emitted. It
+    is a status probe, not an ingest: command output is content, and none
+    of it leaves this function (AGENTS.md). Returns [] when the root is
+    absent, which is also how a client that does not use this layout
+    looks — silence, not a guess."""
     if not task_root or not sid:
-        return None
+        return []
     d = os.path.join(task_root, encode(cwd), sid, "tasks")
     try:
-        empty = [f for f in os.listdir(d) if f.endswith(".output")
-                 and os.path.getsize(os.path.join(d, f)) == 0]
+        entries = [f for f in os.listdir(d) if f.endswith(".output")]
     except OSError:
-        return None
-    return (len(empty), d) if empty else None
+        return []
+    running = []
+    for f in sorted(entries):
+        fp = os.path.join(d, f)
+        try:
+            if os.path.islink(fp):
+                # An agent task: liveness is its transcript's, not the
+                # link's — lstat on a symlink reports the link itself.
+                if now - os.stat(fp).st_mtime <= window:
+                    running.append((f[:-7], "agent"))
+                continue
+            with open(fp, "rb") as fh:
+                fh.seek(0, 2)
+                fh.seek(max(0, fh.tell() - 64))
+                if b"[exited with code" not in fh.read():
+                    running.append((f[:-7], "shell"))
+        except OSError:
+            continue
+    return running
 
 if start_source == "clear":
     rec = clear_rec
@@ -651,9 +688,11 @@ if start_source == "clear":
             in_flight.append(f"{total_own} {noun} still writing ({detail}{age})")
         orphans = orphaned_tasks(cleared_id)
         if orphans:
-            n_tasks, where = orphans
+            named = ", ".join(f"{tid} ({kind})" for tid, kind in orphans[:6])
+            more = f" and {len(orphans) - 6} more" if len(orphans) > 6 else ""
             in_flight.append(
-                f"{n_tasks} background job(s) that recorded no result ({where})")
+                f"{len(orphans)} task(s) it registered that have not recorded an "
+                f"exit: {named}{more}")
         if in_flight:
             lines.append(
                 "- IT LEFT WORK RUNNING: " + "; ".join(in_flight) + ". A subagent, "
@@ -661,7 +700,11 @@ if start_source == "clear":
                 "it, but its result has nowhere to land: the session id it reports to "
                 "takes no more turns, and this session was never handed it. Nothing "
                 "here will announce when it finishes, and the same job started again "
-                "runs twice over the same files and the same branch.")
+                "runs twice over the same files and the same branch. A task id above "
+                "is the handle the runtime uses for that task, and a named agent "
+                "answers to its name; whether this session's own task list still "
+                "carries them across the clear is not something this hook can check "
+                "from disk, so the ids are reported as ids and the reader decides.")
 else:
     best = newest_other_transcript(exclude_live=True)
     if best:
