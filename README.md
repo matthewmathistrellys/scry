@@ -428,9 +428,14 @@ machine is carrying. Independent checks and advisories fill that in.
   That fifth fact is the one that cost an hour. A subagent, a workflow agent or
   a background job does not stop when the session that launched it is cleared,
   and — verified 2026-09-11, after this hook first shipped — neither does the
-  handle: the replacement conversation lists that work as its own and a message
-  addressed to the task id reaches the agent still running under it and is
-  answered. An earlier draft of this paragraph said the result had "nowhere to
+  handle: a message addressed to the task id reaches that agent and is
+  answered, whether it is still running or finished hours ago. The id is the
+  whole handle, though, and it is the hook that has to supply it. A replacement
+  conversation is not shown the work: against an agent that has already
+  finished — the usual case by the time anyone reads the advisory — `ListAgents`
+  does not list it and `TaskOutput` answers `No task found with ID`. The message
+  is what re-registers the task; only after it do those two work. So the id is
+  not one door among several, it is the one that opens the others. An earlier draft of this paragraph said the result had "nowhere to
   land, because the session id it reports to takes no more turns". That was
   inference stated as mechanism, and the experiment contradicted it: the agent
   was re-parented to the replacement session, wrote its transcript there, and

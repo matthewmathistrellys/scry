@@ -697,16 +697,23 @@ if start_source == "clear":
             lines.append(
                 "- IT LEFT WORK RUNNING: " + "; ".join(in_flight) + ". A subagent, "
                 "workflow agent or background job outlives the session that started "
-                "it — and so does the handle. Verified 2026-09-11: the replacement "
-                "conversation lists that work as its own, and a message addressed to "
-                "a task id above reaches the agent still running under it and is "
-                "answered. What the clear ends is not the work or the handle but the "
-                "knowledge that either exists, which is why the exposure here is "
-                "duplication rather than loss: the same job started again runs twice "
-                "over the same files and the same branch. The completion notification "
-                "for that agent did arrive in the replacement conversation, but it "
-                "had already been addressed from there; whether one nobody touches "
-                "announces itself is not established.")
+                "it — and so does the handle, but the handle is the task id and "
+                "nothing else. Verified 2026-09-11 from three successive replacement "
+                "sessions: a message addressed to a task id above reaches that agent "
+                "and is answered, whether it is still running or finished hours ago. "
+                "Do not wait for the runtime to raise it first. Against an agent that "
+                "has already finished — the usual case by the time anyone reads this "
+                "— ListAgents does not list it and TaskOutput answers \"No task found "
+                "with ID\"; the message is what re-registers the task, and only after "
+                "it do those two work. The id is not one door among several, it is "
+                "the one that opens the others. What the clear ends is not the work "
+                "or the handle but the knowledge that either exists, which is why the "
+                "exposure here is duplication rather than loss: the same job started "
+                "again runs twice over the same files and the same branch. Arriving "
+                "late means arriving to silence — a completion notification is "
+                "delivered once, to whichever conversation holds the seat at the "
+                "time; whether an orphan nobody touches announces itself is still not "
+                "established.")
 else:
     best = newest_other_transcript(exclude_live=True)
     if best:

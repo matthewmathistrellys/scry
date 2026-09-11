@@ -192,6 +192,28 @@ here so we know what we're doing").
   it still returned roughly 25k tokens of raw transcript JSONL inline. The
   warning not to `Read` the `.output` file applies to `TaskOutput` on it too —
   the tool is a different door onto the same file.
+- **Third replication, 2026-09-11 14:16 — the send is what re-registers the
+  task.** Probed from a *third* replacement session (`4c97ca09`), 94 minutes
+  after the agent stopped. This run is the one with a clean before/after,
+  because every probe was called *before* anything was sent. Before:
+  `TaskList` -> `No tasks found`; `ListAgents` -> `No reachable agents`;
+  `TaskOutput` -> **`No task found with ID: abf2be96274ae9c55`**;
+  `ReadNotifications` -> `No queued notifications`. Then `SendMessage` to the
+  bare id -> `{"success":true,"message":"Resuming agent abf2be9"}`, answered
+  within seconds. After: `ListAgents` listed it (`general-purpose · completed`),
+  `TaskOutput` returned its full output, and a `<task-notification>` fired.
+  So the earlier note that "`TaskOutput` resolved it" carried the same missing
+  qualifier the `ListAgents` claim did: it resolves it *after* a send. The task
+  registry does not carry the task across the clear at all. **The id is not one
+  handle among several — it is the one that re-registers the others.**
+- **After a resume, `ListAgents` reports age from the resume, not the spawn.**
+  The same agent, spawned 12:40:20 and worked on until 12:42, was listed at
+  14:17:30 as `started 40s ago` — measured from the `SendMessage` at ~14:16:50,
+  nearly four hours off. This is a trap for exactly the reader `fleet.sh` is
+  written for: the advisory reports a true age from the transcript mtime, and a
+  reader who cross-checks it against `ListAgents` after sending will get a much
+  younger number and may conclude the work is fresh. Trust the hook's age, not
+  the listing's.
 - **The task file stays with the spawner; its target follows the seat.** The
   entry is `<task root>/<encoded cwd>/<SPAWNING session id>/tasks/<task
   id>.output`, and after the clear that symlink resolves to
@@ -227,7 +249,8 @@ here so we know what we're doing").
   `status` plus raw transcript JSONL — useful as a liveness probe, useless as a
   findings channel, and expensive. For a *running* agent, `ListAgents` for
   status and a message to the id for content; for a *finished* one the message
-  is the only channel, because `ListAgents` does not list it (below).
+  is the only channel that works unprompted, because `ListAgents` does not list
+  it and `TaskOutput` cannot find it until a send has re-registered it (below).
 - **Correction, same day.** An earlier note here claimed the file is "created
   empty, does not grow while it runs, and is written in one go at exit", so
   that a zero-byte file meant an unfinished job. That was a bad

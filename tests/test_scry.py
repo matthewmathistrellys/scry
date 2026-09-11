@@ -355,7 +355,7 @@ class ScryHookTests(unittest.TestCase):
             tasks = base / "taskroot" / enc / prev_id / "tasks"
             tasks.mkdir(parents=True)
             (tasks / "running.output").write_text("partial output so far\n")
-            (tasks / "finished.output").write_text("done\n\n[exited with code 0]\n")
+            (tasks / "zzdone.output").write_text("done\n\n[exited with code 0]\n")
             (tasks / "agent.output").symlink_to(mine / "builder.jsonl")
             stale = claude_dir / prev_id / "subagents" / "old.jsonl"
             stale.write_text(json.dumps({"cwd": str(repo)}) + "\n")
@@ -380,9 +380,11 @@ class ScryHookTests(unittest.TestCase):
             self.assertIn("1 subagent still writing (in this directory", report)
             # Reported as ids — the handle the runtime itself uses — with the
             # finished shell task and the long-idle agent both left out.
+            # Its id is "zzdone", not "finished", so this whole-report
+            # assertion tests the id and not the advisory's prose.
             self.assertIn("2 task(s) it registered that have not recorded an exit: "
                           "agent (agent), running (shell)", report)
-            self.assertNotIn("finished", report)
+            self.assertNotIn("zzdone", report)
             self.assertNotIn("stale-agent", report)
             self.assertIn("runs twice", report)
             # The stranger is still a stranger, and is counted once, not twice.
