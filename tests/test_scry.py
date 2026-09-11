@@ -314,6 +314,65 @@ class ScryHookTests(unittest.TestCase):
             self.assertNotIn("began with /clear", report)
             self.assertNotIn("0123abcd", report)
 
+    def test_health_reports_commits_another_session_pushed_to_this_branch(self):
+        # 2026-09-11: four commits landed on a shared branch while a session
+        # held an older HEAD. It found out when an edit failed to apply against
+        # text that had already changed, one --force from reverting work it had
+        # never read. health.sh reported commits that exist only on this disk
+        # and never the reverse. It also gated the branch block on being in a
+        # linked worktree, so the primary checkout — that session's case
+        # exactly — got nothing at all.
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            origin = base / "origin.git"
+            subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+
+            def git(wt, *a):
+                return subprocess.run(["git", "-C", str(wt), *a], check=True,
+                                      capture_output=True, text=True).stdout
+
+            repo = base / "repo"
+            subprocess.run(["git", "clone", "-q", str(origin), str(repo)], check=True)
+            git(repo, "config", "user.email", "a@b.c")
+            git(repo, "config", "user.name", "First Session")
+            (repo / "f.txt").write_text("one\n")
+            git(repo, "add", "-A")
+            git(repo, "commit", "-qm", "first")
+            git(repo, "branch", "-M", "main")
+            git(repo, "push", "-q", "-u", "origin", "main")
+            git(repo, "checkout", "-q", "-b", "shared-branch")
+            git(repo, "push", "-q", "-u", "origin", "shared-branch")
+
+            # A second session clones the same branch and pushes to it.
+            other = base / "other"
+            subprocess.run(["git", "clone", "-q", "--branch", "shared-branch",
+                            str(origin), str(other)], check=True)
+            git(other, "config", "user.email", "d@e.f")
+            git(other, "config", "user.name", "Second Session")
+            (other / "f.txt").write_text("two\n")
+            git(other, "add", "-A")
+            git(other, "commit", "-qm", "landed while you were reading")
+            git(other, "push", "-q", "origin", "shared-branch")
+
+            # The first session's checkout is now behind its own branch and
+            # has not noticed. This is the primary checkout, not a worktree.
+            payload = {"cwd": str(repo), "session_id": "s1",
+                       "transcript_path": str(base / "s1.jsonl"), "source": "startup"}
+            report = context(run_hook("health.sh", repo, payload,
+                                      {"HOME": str(base)}))
+            self.assertIn("SOMEONE ELSE PUSHED TO THIS BRANCH", report)
+            self.assertIn("origin/shared-branch is 1 commit(s) ahead", report)
+            self.assertIn("Second Session", report)
+            self.assertIn("this tree is not the branch", report)
+            self.assertIn("HEAD..origin/shared-branch", report)
+
+            # Silent once the checkout carries them — a signal that fires every
+            # session stops carrying information (README, the output budget).
+            git(repo, "pull", "-q", "--ff-only", "origin", "shared-branch")
+            report = context(run_hook("health.sh", repo, payload,
+                                      {"HOME": str(base)}))
+            self.assertNotIn("SOMEONE ELSE PUSHED", report)
+
     def test_fleet_after_clear_names_the_work_the_cleared_session_left_running(self):
         # 2026-09-11: a session was cleared mid-build. The builder it had
         # launched kept running, as subagents do — but its results reported to
