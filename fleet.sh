@@ -38,8 +38,22 @@
 # from clear_record.sh, written as the old session ended; with ten sessions
 # open the newest-transcript guess is wrong exactly when it matters, so the
 # guess is only a labelled fallback (council + Matt, 2026-09-10). Still no
-# prompts, no responses, no recipe: four facts, and the decision is the
+# prompts, no responses, no recipe: the facts, and the decision is the
 # reader's.
+#
+# The fifth fact is what that session left RUNNING. A subagent, a workflow
+# agent or a background job does not stop when the session that launched it
+# is cleared — but its results have nowhere to land, because the session id
+# they would report to takes no more turns and the new session was never
+# told they exist. Until 2026-09-11 this hook made that worse rather than
+# better: section 1b saw those subagents, found their id was not this
+# session's, and reported them as "from other sessions" — which reads as
+# somebody else's work, and is the one reading that makes a reader start
+# the same job a second time. That is not hypothetical: on 2026-09-11 a
+# session cleared mid-build, could not see its own still-running builder,
+# launched a second one on the same branch, and the two collided on the
+# same PR (Matt, 2026-09-11). Attribution is the whole fix — the subagents
+# were always visible, they were just filed under the wrong owner.
 #
 # Silence is the default and the point. A signal speaks only when it
 # would change a decision; one lone session in a quiet repo prints
@@ -118,6 +132,7 @@ START_SOURCE="$start_source" \
 SCRY_HANDOFF_ROOT="${SCRY_CACHE_HANDOFF_DIR:-$HOME/.claude/scry/handoffs}" \
 SCRY_CLEAR_ROOT="${SCRY_CLEAR_STATE_DIR:-${TMPDIR:-/tmp}/scry-last-cleared}" \
 SCRY_DEADLINE_ROOT="${SCRY_CACHE_STATE_DIR:-${TMPDIR:-/tmp}/scry-cache-deadline}" \
+SCRY_TASK_ROOT="${SCRY_TASK_STATE_DIR:-${TMPDIR:-/tmp}/claude-$(id -u 2>/dev/null || echo 0)}" \
 python3 - >"$fleet_tmp" 2>/dev/null <<'PY'
 import glob, json, os, re, subprocess, time
 
@@ -132,6 +147,7 @@ start_source = os.environ.get("START_SOURCE", "startup")
 handoff_root = os.environ.get("SCRY_HANDOFF_ROOT", "")
 clear_root = os.environ.get("SCRY_CLEAR_ROOT", "")
 deadline_root = os.environ.get("SCRY_DEADLINE_ROOT", "")
+task_root = os.environ.get("SCRY_TASK_ROOT", "")
 
 def encode(path):
     # Claude Code's transcript directory name: '/', '.' and '_' all become
@@ -185,6 +201,43 @@ def worktree_of(path):
             return root
     return None
 
+# ── 1a. Which session this one replaced ─────────────────────────────────
+# Claimed here, not in section 3, because 1b cannot attribute a subagent
+# without it. Only the RECORDED id is used for attribution: the newest-
+# transcript guess below is good enough to name a conversation for a human
+# to resume, and nowhere near good enough to tell a session that work is
+# its own. Guessing that wrong points a reader at a stranger's agents, or
+# hides its own.
+def claim_clear_record():
+    """The record clear_record.sh left for this directory, newest first,
+    deleted once read. None when the SessionEnd hook did not run."""
+    if not clear_root or not os.path.isdir(clear_root):
+        return None
+    best = None
+    for f in os.listdir(clear_root):
+        if not f.endswith(".json"):
+            continue
+        fp = os.path.join(clear_root, f)
+        try:
+            with open(fp) as fh:
+                rec = json.load(fh)
+        except Exception:
+            continue
+        if rec.get("cwd") != cwd or rec.get("session_id") == self_id:
+            continue
+        if best is None or rec.get("ended_at", 0) > best[0].get("ended_at", 0):
+            best = (rec, fp)
+    if best:
+        try:
+            os.unlink(best[1])
+        except OSError:
+            pass
+        return best[0]
+    return None
+
+clear_rec = claim_clear_record() if start_source == "clear" else None
+cleared_id = (clear_rec or {}).get("session_id") or ""
+
 # ── 1. Other live sessions in this repo family ──────────────────────────
 family_prefix = encode(family)
 self_prefix   = encode(cwd)
@@ -205,7 +258,13 @@ if os.path.isdir(projects):
             if not f.endswith(".jsonl"):
                 continue
             sid = f[:-6]
-            if sid == self_id:
+            if sid == self_id or sid == cleared_id:
+                # cleared_id: the session /clear just ended. Its transcript
+                # is seconds old, so the live window reads it as an active
+                # neighbour — and it would be counted as a collision with a
+                # session that no longer takes turns, in the same report that
+                # says it ended. Its subagents are live and are reported
+                # below; the conversation itself is not.
                 continue
             p = os.path.join(d, f)
             try:
@@ -263,27 +322,46 @@ def tail_cwds(path, limit=65536):
     return seen
 
 sub_here, sub_elsewhere = 0, []
+own_here, own_elsewhere, own_oldest = 0, [], None
 import glob as _glob
 for p in _glob.glob(os.path.join(projects, "*", "*", "subagents", "*.jsonl")):
     # Our own subagents are not a collision with ourselves.
     if self_id and os.sep + self_id + os.sep in p:
         continue
     try:
-        if now - os.stat(p).st_mtime > window:
+        st = os.stat(p)
+        if now - st.st_mtime > window:
             continue
     except OSError:
         continue
     seen = tail_cwds(p)
     if not seen:
         continue
+    # Whose subagent this is: the session-id directory that subagents/
+    # hangs off (<projects>/<encoded cwd>/<session id>/subagents/<id>.jsonl).
+    # Matching it against the session we just cleared is what separates
+    # "a stranger is editing here" from "this seat's own work is still
+    # running and nothing is listening for it".
+    mine = bool(cleared_id) and \
+        os.path.basename(os.path.dirname(os.path.dirname(p))) == cleared_id
+    counted = True
     if self_worktree and any(worktree_of(c) == self_worktree for c in seen):
-        sub_here += 1
-        continue
-    inside = [c for c in seen if c == family or c.startswith(family + os.sep)]
-    if inside:
-        # One subagent, one entry — report the deepest path it touched,
-        # which is the most specific thing true about it.
-        sub_elsewhere.append(os.path.relpath(max(inside, key=len), parent))
+        if mine:
+            own_here += 1
+        else:
+            sub_here += 1
+    else:
+        inside = [c for c in seen if c == family or c.startswith(family + os.sep)]
+        if inside:
+            # One subagent, one entry — report the deepest path it touched,
+            # which is the most specific thing true about it.
+            where = os.path.relpath(max(inside, key=len), parent)
+            (own_elsewhere if mine else sub_elsewhere).append(where)
+        else:
+            counted = False
+    if mine and counted:
+        start = getattr(st, "st_birthtime", st.st_ctime)
+        own_oldest = start if own_oldest is None else min(own_oldest, start)
 
 if live:
     from collections import Counter
@@ -378,8 +456,8 @@ if sub_elsewhere or sub_here:
         f"session in it."
     )
 
-if here or sub_here or codex_here or codex_sub_here:
-    n = here + sub_here + codex_here + codex_sub_here
+if here or sub_here or own_here or codex_here or codex_sub_here:
+    n = here + sub_here + own_here + codex_here + codex_sub_here
     which = "one of them is" if n == 1 else f"{n} of them are"
     # The consequence, not the instruction: what a checkout/reset/clean
     # here would actually cost right now, stated as a fact about current
@@ -486,33 +564,6 @@ def newest_other_transcript(exclude_live):
             best = (p, st.st_mtime)
     return best
 
-def claim_clear_record():
-    """The record clear_record.sh left for this directory, newest first,
-    deleted once read. None when the SessionEnd hook did not run."""
-    if not clear_root or not os.path.isdir(clear_root):
-        return None
-    best = None
-    for f in os.listdir(clear_root):
-        if not f.endswith(".json"):
-            continue
-        p = os.path.join(clear_root, f)
-        try:
-            with open(p) as fh:
-                rec = json.load(fh)
-        except Exception:
-            continue
-        if rec.get("cwd") != cwd or rec.get("session_id") == self_id:
-            continue
-        if best is None or rec.get("ended_at", 0) > best[0].get("ended_at", 0):
-            best = (rec, p)
-    if best:
-        try:
-            os.unlink(best[1])
-        except OSError:
-            pass
-        return best[0]
-    return None
-
 def cache_state(sid):
     """What resuming that session costs, from the deadline the status-line
     wrapper recorded for it. Cheap while its prompt cache is warm; a full
@@ -539,8 +590,66 @@ def handoff_for(sid):
     cands = [c for c in cands if os.path.isfile(c) and os.path.getsize(c) > 0]
     return max(cands, key=os.path.getmtime) if cands else None
 
+def orphaned_tasks(sid):
+    """The background tasks that session registered which have not
+    finished, as <task id, kind> — the task id being the handle the
+    runtime itself uses for them.
+
+    Layout, read 2026-09-11: <task root>/<encoded cwd>/<session id>/tasks/
+    holds one <task id>.output per task the session registered, foreground
+    and background alike. Two shapes, and they need different liveness
+    tests:
+
+      - A SYMLINK is a spawned agent's task; it points at that agent's own
+        JSONL transcript (Claude Code's TaskOutput tool documents this
+        verbatim, and warns the file is the whole conversation). A
+        transcript grows while its agent works, so the target's mtime is
+        the same liveness signal section 1 already trusts for sessions.
+      - A REGULAR FILE is a shell task. It is appended to as output is
+        produced and carries a trailing "[exited with code N]" once the
+        command is done.
+
+    An earlier version of this function called a zero-byte file an
+    unfinished job. That was wrong, and wrong in the direction that
+    invents work: it generalised from one probe whose command happened to
+    print nothing until its last line. A foreground command's file is
+    zero bytes for as long as it has printed nothing, and is deleted when
+    it completes — so "empty" means "has not printed yet", not "has not
+    finished" (all three re-observed 2026-09-11).
+
+    The exit marker is read from the last 64 bytes and never emitted. It
+    is a status probe, not an ingest: command output is content, and none
+    of it leaves this function (AGENTS.md). Returns [] when the root is
+    absent, which is also how a client that does not use this layout
+    looks — silence, not a guess."""
+    if not task_root or not sid:
+        return []
+    d = os.path.join(task_root, encode(cwd), sid, "tasks")
+    try:
+        entries = [f for f in os.listdir(d) if f.endswith(".output")]
+    except OSError:
+        return []
+    running = []
+    for f in sorted(entries):
+        fp = os.path.join(d, f)
+        try:
+            if os.path.islink(fp):
+                # An agent task: liveness is its transcript's, not the
+                # link's — lstat on a symlink reports the link itself.
+                if now - os.stat(fp).st_mtime <= window:
+                    running.append((f[:-7], "agent"))
+                continue
+            with open(fp, "rb") as fh:
+                fh.seek(0, 2)
+                fh.seek(max(0, fh.tell() - 64))
+                if b"[exited with code" not in fh.read():
+                    running.append((f[:-7], "shell"))
+        except OSError:
+            continue
+    return running
+
 if start_source == "clear":
-    rec = claim_clear_record()
+    rec = clear_rec
     if rec:
         prev_id, tpath, how = rec["session_id"], rec.get("transcript_path") or "", "recorded as it ended"
         ended = human(now - rec.get("ended_at", now))
@@ -564,6 +673,48 @@ if start_source == "clear":
         h = handoff_for(prev_id)
         lines.append(f"- A handoff was written for it: {h}" if h
                      else "- No handoff was written for it.")
+        # Fact five: what it left running. Gated on cleared_id, never on the
+        # guess — see 1a. Silent when it left nothing, like every other signal.
+        in_flight = []
+        if own_here or own_elsewhere:
+            from collections import Counter
+            total_own = own_here + len(own_elsewhere)
+            detail = ", ".join(f"{n} ({c})" if c > 1 else n
+                               for n, c in Counter(own_elsewhere).items())
+            if own_here:
+                detail = "in this directory" + (f"; {detail}" if detail else "")
+            noun = "subagent" if total_own == 1 else "subagents"
+            age = f", oldest started {human(now - own_oldest)} ago" if own_oldest else ""
+            in_flight.append(f"{total_own} {noun} still writing ({detail}{age})")
+        orphans = orphaned_tasks(cleared_id)
+        if orphans:
+            named = ", ".join(f"{tid} ({kind})" for tid, kind in orphans[:6])
+            more = f" and {len(orphans) - 6} more" if len(orphans) > 6 else ""
+            in_flight.append(
+                f"{len(orphans)} task(s) it registered that have not recorded an "
+                f"exit: {named}{more}")
+        if in_flight:
+            lines.append(
+                "- IT LEFT WORK RUNNING: " + "; ".join(in_flight) + ". A subagent, "
+                "workflow agent or background job outlives the session that started "
+                "it — and so does the handle, but the handle is the task id and "
+                "nothing else. Verified 2026-09-11 from three successive replacement "
+                "sessions: a message addressed to a task id above reaches that agent "
+                "and is answered, whether it is still running or finished hours ago. "
+                "Do not wait for the runtime to raise it first. Against an agent that "
+                "has already finished — the usual case by the time anyone reads this "
+                "— ListAgents does not list it and TaskOutput answers \"No task found "
+                "with ID\"; the message is what re-registers the task, and only after "
+                "it do those two work. The id is not one door among several, it is "
+                "the one that opens the others. What the clear ends is not the work "
+                "or the handle but the knowledge that either exists, which is why the "
+                "exposure here is duplication rather than loss: the same job started "
+                "again runs twice over the same files and the same branch. Arriving "
+                "late means arriving to silence — a completion notification is "
+                "delivered once, to whichever conversation holds the seat at the "
+                "time. An orphan that had already finished will never announce "
+                "itself — its one notification fired when it stopped. Only one still "
+                "running when you cleared can still speak up.")
 else:
     best = newest_other_transcript(exclude_live=True)
     if best:

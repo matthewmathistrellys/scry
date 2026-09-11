@@ -416,14 +416,56 @@ machine is carrying. Independent checks and advisories fill that in.
   replaced. `clear_record.sh`, a `SessionEnd` hook, writes that down as the old
   session ends — id, transcript path, directory, time — in one small file
   under `$TMPDIR/scry-last-cleared/`; the new session's `fleet.sh` reads the
-  record for its directory, deletes it, and states four facts: the session
+  record for its directory, deletes it, and states five facts: the session
   left (title, id), its transcript path, what resuming it costs (its prompt
-  cache is warm until HH:MM, a full re-read after), and whether a handoff was
-  written for it — the path, never the body. No recipe, no action: the reader
-  decides. If the record is missing the newest transcript stands in and is
-  labelled a guess, because with ten sessions open that guess is wrong exactly
-  when it matters (council + Matt, 2026-09-10). Records nobody claims are
-  swept after a day.
+  cache is warm until HH:MM, a full re-read after), whether a handoff was
+  written for it — the path, never the body — and **what it left running**. No
+  recipe, no action: the reader decides. If the record is missing the newest
+  transcript stands in and is labelled a guess, because with ten sessions open
+  that guess is wrong exactly when it matters (council + Matt, 2026-09-10).
+  Records nobody claims are swept after a day.
+
+  That fifth fact is the one that cost an hour. A subagent, a workflow agent or
+  a background job does not stop when the session that launched it is cleared,
+  and — verified 2026-09-11, after this hook first shipped — neither does the
+  handle: a message addressed to the task id reaches that agent and is
+  answered, whether it is still running or finished hours ago. The id is the
+  whole handle, though, and it is the hook that has to supply it. A replacement
+  conversation is not shown the work: against an agent that has already
+  finished — the usual case by the time anyone reads the advisory — `ListAgents`
+  does not list it and `TaskOutput` answers `No task found with ID`. The message
+  is what re-registers the task; only after it do those two work. So the id is
+  not one door among several, it is the one that opens the others. An earlier draft of this paragraph said the result had "nowhere to
+  land, because the session id it reports to takes no more turns". That was
+  inference stated as mechanism, and the experiment contradicted it: the agent
+  was re-parented to the replacement session, wrote its transcript there, and
+  its completion notification arrived there. What `/clear` ends is the knowledge
+  that the work exists, not the work and not the handle — so the exposure is
+  duplication, not loss. Until 1.29.0 this hook
+  made that worse rather than better: it *saw* those subagents, found their
+  session id was not this session's, and reported them as "from other sessions"
+  — which reads as somebody else's work. On 2026-09-11 a session cleared
+  mid-build, could not see its own still-running builder, launched a second one
+  on the same branch, and the two collided on the same PR. The subagents were
+  always visible; they were filed under the wrong owner. So a subagent whose
+  session-id directory matches the session just cleared is now reported as this
+  seat's own in-flight work, with how long it has been running and the
+  consequence — *the same job started again runs twice over the same files and
+  the same branch* — and the same line names the tasks registered under that
+  session id that have not recorded an exit, **by task id**, which is the
+  handle the runtime itself uses for them. A task's file under
+  `<task root>/<encoded cwd>/<session id>/tasks/` is a symlink when it belongs
+  to a spawned agent, pointing at that agent's transcript, so its liveness is
+  that transcript's mtime; a regular file is a shell task, finished once it
+  carries a trailing `[exited with code N]`. Emptiness is not the test — an
+  empty file is a command that has printed nothing yet, and a first cut of
+  this check got that wrong in the direction that invents work. Attribution only ever uses
+  the **recorded** id, never the transcript guess: a guess good enough to name a
+  conversation for a human to resume is nowhere near good enough to tell a
+  session that work is its own. For the same reason the cleared session no
+  longer counts as a live neighbour — its transcript is seconds old, so the live
+  window read it as an active session competing for this tree, in the same
+  report that said it had ended.
 - **`pressure.sh`** — load per core, swap in use, disk headroom, and which dev
   servers are already listening.
 
@@ -792,6 +834,7 @@ starts changing a decision.
 | Variable | Default | Controls |
 |---|---|---|
 | `SCRY_FLEET_ACTIVE_MINUTES` | `15` | how recently a session must have written to count as live |
+| `SCRY_TASK_STATE_DIR` | `$TMPDIR/claude-$(id -u)` | where task output files live, read after `/clear` to name the tasks a cleared session left without an exit; absent directory means silence |
 | `SCRY_LOAD_PER_CORE_WARN` | `1.5` | load-per-core before "oversubscribed" |
 | `SCRY_SWAP_USED_MB_WARN` | `2048` | swap in use before it's reported |
 | `SCRY_DISK_FREE_GB_WARN` | `20` | free-space floor |

@@ -357,6 +357,39 @@ if [ "$in_primary" -eq 0 ]; then
   fi
 fi
 
+# ── Someone else pushed to the branch this session is on ───────────────────
+# Above, this hook reports commits that exist only on this disk. The reverse
+# is the one that actually costs time: commits that exist only on the REMOTE,
+# pushed to this very branch by another session while this checkout holds an
+# older HEAD. On 2026-09-11 four commits landed on a shared branch that way.
+# The session holding the stale tree did not find out until an edit failed to
+# apply against text that had already changed — and it was one --force from
+# overwriting work it had never read. Nothing in a session start said a word.
+#
+# This runs for the primary checkout as well as a linked worktree: the branch
+# block above is gated on being in a worktree, so a session sitting in the
+# primary on a feature branch — the 2026-09-11 case exactly — got none of it.
+#
+# It fetches this branch first, and reports nothing if that fetch fails. The
+# fetch at the top of this script is `origin main` only, so a feature branch's
+# remote-tracking ref can be arbitrarily stale, and a count taken against a
+# stale ref reports "nobody else pushed" with total confidence — the one
+# answer that would put a session straight back into the collision.
+cur_branch="$(git -C "$session_wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+if [ -n "$cur_branch" ]; then
+  cur_remote="$(git -C "$session_wt" config --get "branch.${cur_branch}.remote" 2>/dev/null || true)"
+  if [ -n "$cur_remote" ] && ! git -C "$session_wt" fetch "$cur_remote" "$cur_branch" --quiet 2>/dev/null; then
+    cur_remote=""
+  fi
+  if [ -n "$cur_remote" ]; then
+    incoming="$(git -C "$session_wt" rev-list --count "HEAD..${cur_remote}/${cur_branch}" 2>/dev/null || echo 0)"
+    if [ "$incoming" -gt 0 ]; then
+      last_who="$(git -C "$session_wt" log -1 --format='%an, %ar' "${cur_remote}/${cur_branch}" 2>/dev/null || echo 'unknown')"
+      lines+=("- SOMEONE ELSE PUSHED TO THIS BRANCH: ${cur_remote}/${cur_branch} is $incoming commit(s) ahead of this checkout (newest by $last_who). Those commits are NOT in the files on disk here, so this tree is not the branch. An edit written against these files is written against superseded text: it can fail to apply, and where it does apply it can revert what landed. Read them before editing: git -C $session_wt log HEAD..${cur_remote}/${cur_branch} and git -C $session_wt diff HEAD..${cur_remote}/${cur_branch}.")
+    fi
+  fi
+fi
+
 # ── Worktree hygiene sweep ──────────────────────────────────────────────────
 # Parse `git worktree list --porcelain` into parallel path/branch arrays.
 wt_path=()
