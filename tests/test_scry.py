@@ -1115,7 +1115,13 @@ class ScryHookTests(unittest.TestCase):
 
             self.assertIn("2 linked worktree(s)", report)
             self.assertIn("already in origin/main", report)
-            self.assertIn("prune-worktrees", report)
+            # The removal instruction is chosen by what is on PATH (hook line
+            # 228), so assert the branch this machine actually takes. Asserting
+            # prune-worktrees unconditionally asserted the author's own tool,
+            # which made the suite red on every machine but the author's while
+            # the hook was behaving exactly as designed.
+            self.assertIn("prune-worktrees" if shutil.which("prune-worktrees")
+                          else "worktree remove", report)
             self.assertIn("deleted by this note", report)
             # Advisory means advisory: both worktrees still on disk and listed.
             listing = self._git(repo, "worktree", "list")
@@ -1123,6 +1129,33 @@ class ScryHookTests(unittest.TestCase):
             self.assertIn("agent-wip", listing)
             self.assertTrue((repo / ".claude/worktrees/agent-done").is_dir())
             self.assertTrue((repo / ".claude/worktrees/agent-wip").is_dir())
+
+    def test_disposal_advisory_names_prune_worktrees_when_it_is_on_path(self):
+        """The PATH-present branch of the removal instruction, tested without
+        depending on the author's machine having the tool. A stub is enough:
+        the hook branches on `command -v`, never on what the tool does."""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._worktree_repo(base)
+            state = base / "state"
+            state.mkdir()
+            stub_dir = base / "stub-bin"
+            stub_dir.mkdir()
+            stub = stub_dir / "prune-worktrees"
+            stub.write_text("#!/bin/sh\nexit 0\n")
+            stub.chmod(0o755)
+            env = {"TMPDIR": str(state),
+                   "SCRY_WORKTREE_REMINDER_MINUTES": "0",
+                   "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}"}
+
+            report = context(run_hook("session_disposal_advisory.sh", repo,
+                                      self._stop_payload(repo), env))
+
+            self.assertIn("prune-worktrees --dry-run", report)
+            self.assertIn("only when GitHub reports", report)
+            # Still advisory: naming a remover is not running one.
+            self.assertIn("deleted by this note", report)
+            self.assertTrue((repo / ".claude/worktrees/agent-done").is_dir())
 
     def test_disposal_advisory_recognises_a_squash_merged_worktree(self):
         """Squash merges rewrite SHAs and hide from --is-ancestor. Deciding on

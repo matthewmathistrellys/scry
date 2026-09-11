@@ -93,7 +93,9 @@ cache="$state_dir/p95-$repo_key-$ext"
 
 threshold=""
 if [ -f "$cache" ]; then
-  cache_age=$(( $(date +%s) - $(stat -f %m "$cache" 2>/dev/null || stat -c %Y "$cache" 2>/dev/null || echo 0) ))
+  mtime="$(stat -c %Y "$cache" 2>/dev/null || stat -f %m "$cache" 2>/dev/null || echo 0)"
+  case "$mtime" in ''|*[!0-9]*) mtime=0 ;; esac
+  cache_age=$(( $(date +%s) - mtime ))
   [ "$cache_age" -lt 86400 ] && threshold="$(cat "$cache" 2>/dev/null)"
 fi
 

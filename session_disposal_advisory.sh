@@ -114,7 +114,7 @@ marker="$marker_dir/$(printf '%s' "$session_key" | shasum | cut -c1-16)"
 MIN_MINUTES="${SCRY_WORKTREE_REMINDER_MINUTES:-45}"
 session_start=0
 if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
-  born="$(stat -f %B "$transcript_path" 2>/dev/null || stat -c %W "$transcript_path" 2>/dev/null || echo 0)"
+  born="$(stat -c %W "$transcript_path" 2>/dev/null || stat -f %B "$transcript_path" 2>/dev/null || echo 0)"
   case "$born" in ''|*[!0-9]*) born=0 ;; esac
   if [ "$born" -gt 0 ]; then
     session_start="$born"
@@ -257,7 +257,7 @@ if [ "$session_start" -gt 0 ]; then
       [ -n "$mdrel" ] || continue
       scry_md_standard_file "$mdrel" && continue
       [ -f "$tree_root/$mdrel" ] || continue
-      mdt="$(stat -f %m "$tree_root/$mdrel" 2>/dev/null || stat -c %Y "$tree_root/$mdrel" 2>/dev/null || echo 0)"
+      mdt="$(stat -c %Y "$tree_root/$mdrel" 2>/dev/null || stat -f %m "$tree_root/$mdrel" 2>/dev/null || echo 0)"
       case "$mdt" in ''|*[!0-9]*) mdt=0 ;; esac
       [ "$mdt" -ge "$session_start" ] || continue
       md_count=$((md_count+1))
