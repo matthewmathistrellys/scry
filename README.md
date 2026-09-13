@@ -278,8 +278,9 @@ machine is carrying. Independent checks and advisories fill that in.
   that is still writing — an `agent-*.jsonl` under the session, a workflow
   whose journal has an agent `started` with no `result`, or a `b*.output`
   shell task with no exit line, each written within
-  `SCRY_KEEPALIVE_FRESH_SECS` — the line asks for a one-line acknowledgement
-  and no action instead of the handoff, and names the work. That reply is a
+  `SCRY_KEEPALIVE_FRESH_SECS` — the line asks for one short plain-language
+  status line for the user, built only from the running-work list, and no
+  other action, instead of the handoff. That reply is a
   cached request, which moves the deadline an hour. One keep-alive per
   deadline; if the deadline has not moved half a lead later, the handoff is
   requested instead. `SCRY_KEEPALIVE_MAX` per user message and

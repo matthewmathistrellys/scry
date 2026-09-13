@@ -74,7 +74,8 @@
 # cache tokens instead of reading them. A notification turn on a warm cache is
 # a cache read (62aa5e9f: read 125,092, wrote 749). So at the lead window,
 # while THIS session has live work, the line printed is not the handoff
-# request but a keep-alive: acknowledge in one line, take no action. That ack
+# request but a keep-alive: reply with one short status line for the user,
+# built from the running-work list, take no other action. That reply
 # is the request that pushes the deadline out another hour.
 #
 #   live        an agent-*.jsonl, a workflow agent with a journal `started`
@@ -417,9 +418,11 @@ if roster and not why_not:
         f"{minutes} min, and work it started is still running: {listed}. When "
         "that work finishes, its notification wakes this session, and on a cold "
         "cache that wake re-reads the whole context at the full rate. Reply with "
-        "one short line acknowledging this and nothing else — no tool calls, no "
-        "checking on the work, no other action. The running work reports back by "
-        "itself; this reply is only what keeps the cache warm for it. "
+        "one short plain-language status line for the user, built only from the "
+        "running-work list above (e.g. \"Piece 2: 5 of 8 helpers done; build and "
+        "review still running\") — and nothing else: no tool calls, no checking "
+        "on the work, no other action. The running work reports back by itself; "
+        "this reply is only what keeps the cache warm for it. "
         f"Keep-alive {cycle + 1} of at most {ka_max} for this user message."
     )
     sys.exit(0)
