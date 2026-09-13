@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# cache_handoff_monitor.sh — plugin monitor: ask this session for one handoff
-# shortly before its prompt cache goes cold, or, while work it started is
-# still running, keep that cache warm for the work to report back into.
+# cache_handoff_monitor.sh — plugin monitor: shortly before this session's
+# prompt cache goes cold, either keep it warm for work the session started and
+# report that work's status as Scry can read it, or, when nothing is left to
+# wait for, ask the session for a summary written into the conversation.
 #
 # Claude Code keeps a prompt cache with a time-to-live (an hour on this
 # account's plan; the payload says which). Every request refreshes it. A
@@ -9,9 +10,30 @@
 # question — lets it run out, and the next request re-reads the whole context
 # at the full rate. An hour-old session with a large context is the expensive
 # case, and it is also the one where the most is lost if the session is
-# simply abandoned instead. A handoff written in the last minutes of the warm
-# window costs one cached request and leaves a file the next session can
-# start from.
+# simply abandoned instead. A summary written in the last minutes of the warm
+# window costs one cached request and leaves the record at the end of the
+# transcript, where a /clear'd successor or a new window can find it.
+#
+# WHAT SCRY DOES AND DOES NOT DO (Matt, 2026-09-13, approved "do what you think
+# is best"): "Scry is here to provide insight and information … make sure Scry
+# isn't doing too much compared to what the orchestrator should do with the
+# information. If it's deterministic and simple and reliable keep doing it; if
+# not, just tell the orchestrator you've got so many agents and here's their
+# status as far as I can tell." So this script reports facts read from file
+# metadata and the session judges them: no stored progress fingerprints, no
+# comparison between polls, no "stuck" verdict. (A fingerprint comparison was
+# tried and dropped: quiet workers fell out of the list before they were
+# compared, so its "no movement" was unreliable.) And: "Scry shouldn't say
+# anything about agent comms or ThreadTask or anything else" — its messages
+# name no other system.
+#
+# THE SUMMARY IS INLINE (same decision): "Why does it need a file, why can't it
+# just write it inline … tell the next agent post-clear that it can go and get
+# it as needed … dispatch a Sonnet subagent to go back through the
+# transcript." "Put the session ID there in case I need to start a new window
+# and work off of that chat." Until 1.31.0 the request named a file under
+# ~/.claude/scry/handoffs; nothing is written there any more, and what is
+# already there is left alone (it is the user's).
 #
 # How the pieces fit (designed with Codex, 2026-09-10):
 #
@@ -36,10 +58,10 @@
 # process and the monitor is not restarted (binary 2.1.270: monitors are
 # armed once per plugin:name key, no session in it). Before this change the
 # watcher kept following the launch id: session 60ef841d was cleared into
-# b1746f6b at 17:54 on 09-11, 60ef841d.state froze at "saved", b1746f6b sat
-# "armed" through a 36-hour idle and went cold at 13:56 on 09-13 with nothing
-# asked. Worse, the old id's frozen warm deadline fired a handoff for the
-# wrong session into the new one. So every poll resolves the CURRENT session:
+# b1746f6b at 17:54 on 09-11, 60ef841d.state froze, b1746f6b sat "armed"
+# through a 36-hour idle and went cold at 13:56 on 09-13 with nothing asked.
+# Worse, the old id's frozen warm deadline fired a request for the wrong
+# session into the new one. So every poll resolves the CURRENT session:
 #
 #   1. ~/.claude/sessions/$CLAUDE_PID.json `sessionId` — Claude Code's own
 #      per-process record, rewritten when /clear changes the id. Internal and
@@ -51,21 +73,25 @@
 # When 1 and 2 disagree the newer file wins. The winner and its source are
 # kept in pid/$CLAUDE_PID.watch (session ids only). When the answer changes,
 # the session left behind is marked `superseded` and its deadline is never
-# read again; its pending handoff is dropped, not fired into its successor.
+# read again; its pending request is dropped, not fired into its successor.
 # The new session is left alone until a user message arms it.
 #
 # The state machine, in the .state file:
 #
 #   armed       a user message arrived; follow the deadline.
-#   requested   the handoff notification was printed; print nothing more.
-#   saved       the handoff file appeared (silent bookkeeping).
+#   requested   the summary request was printed; print nothing more. fleet.sh
+#               reads this after a /clear to tell the successor that the last
+#               message(s) of the session it left hold a summary.
 #   missed      the deadline passed while armed with no request — the machine
 #               slept through it, or the lead time was shorter than the poll
 #               gap. Silent HERE, deliberately: a monitor line wakes the model,
 #               and waking it onto a cold cache is the cost this whole thing
 #               exists to avoid. cache_handoff_arm.sh says it on the next turn,
 #               which is already happening.
-#   superseded  this process moved on to another session (above).
+#   superseded  this process moved on to another session (above). The third
+#               field keeps what it was before — `requested:<time>` or
+#               `armed:<time>` — so fleet.sh can still say whether a summary
+#               was asked for.
 #
 # KEEP-ALIVE (Matt, 2026-09-13, approved: "go"). A subagent, workflow or
 # background shell that finishes wakes the session that started it. If that
@@ -73,17 +99,27 @@
 # b1746f6b a workflow completion 2h08m after the last request wrote 289,347
 # cache tokens instead of reading them. A notification turn on a warm cache is
 # a cache read (62aa5e9f: read 125,092, wrote 749). So at the lead window,
-# while THIS session has live work, the line printed is not the handoff
-# request but a keep-alive: reply with one short status line for the user,
-# built from the running-work list, take no other action. That reply
-# is the request that pushes the deadline out another hour.
+# while THIS session has unfinished work, the line printed is a keep-alive:
+# the roster, one short status line for the user, and the session compares
+# that status with its previous one and checks on any worker that has not
+# moved. That reply is the request that pushes the deadline out another hour.
 #
-#   live        an agent-*.jsonl, a workflow agent with a journal `started`
-#               and no `result`, or a b*.output shell task with no exit line —
-#               each written within SCRY_KEEPALIVE_FRESH_SECS (default 20 min).
-#               A hung job stops counting when it stops writing. The window is
-#               long on purpose: a wrong keep-alive costs one cache read and
-#               the cap bounds it; a wrong "dead" costs the whole re-read.
+#   roster      every unfinished worker this session started, with what Scry
+#               can read deterministically from metadata:
+#                 workflow — a journal with an agent `started` and no
+#                   `result`: "<finished> of <started> agents done, last
+#                   activity <age> ago". Listed however long it has been
+#                   quiet: the journal itself says it is unfinished.
+#                 background command — a b*.output with no exit or killed
+#                   marker in its last 64 bytes: "still running, last output
+#                   <age> ago". Listed however long it has been quiet, for
+#                   the same reason.
+#                 subagent — an agent-*.jsonl: "last activity <age> ago".
+#                   Nothing in a plain subagent's metadata says it finished,
+#                   so Scry cannot tell a finished one from a quiet one. It is
+#                   listed only while written within SCRY_KEEPALIVE_FRESH_SECS,
+#                   default 3600 — one cache TTL — so one silent that long is
+#                   left out rather than reported as running.
 #               Agents and workflows are looked up under the current session,
 #               shell tasks under both the launch and the current session —
 #               that is where Claude Code files each (read 2026-09-13).
@@ -92,17 +128,18 @@
 #               backstop if some other wake ever re-arms. Counted in
 #               <session>.keepalive BEFORE the line is printed.
 #   verified    one keep-alive per deadline. If the deadline has not moved
-#               half a lead later, the ack did not happen: ask for the handoff.
+#               half a lead later, the ack did not happen: ask for the summary.
 #
-# When nothing is live, a cap is reached, or a keep-alive did not take, the
-# handoff is requested as before, and when work is running it names that work
-# so the handoff can say where each result will land.
+# When nothing is unfinished, a cap is reached, or a keep-alive did not take,
+# the summary is requested: written as the session's reply in the
+# conversation, opening with the session id and how to pick it up in a new
+# window, and naming any still-unfinished workers from the roster.
 #
 # Every transition is written BEFORE its line is printed, so a restart between
 # the two cannot produce a second line. The monitor reads no conversation
-# content: small files of numbers, file names and times, agent labels from
-# metadata files, and the last 64 bytes of a shell task's output for its exit
-# marker, which is never emitted.
+# content: small files of numbers, file names and times, agent and workflow
+# labels from metadata, and the last 64 bytes of a shell task's output for its
+# exit marker, which is never emitted.
 #
 # SCRY_CACHE_HANDOFF=0 disables it (monitor exits at once). Claude only —
 # Codex has no monitor equivalent as of 2026-09-10.
@@ -116,22 +153,21 @@ sid="${CLAUDE_CODE_SESSION_ID:-}"
 if [ -z "$sid" ]; then
   # Never silently wrong: the watch cannot run without knowing whose cache it
   # is watching, and exiting quietly would look like "watching".
-  echo "Scry — cache deadline: automatic handoff unavailable in this session (no session id in the monitor environment). Nothing is watching the prompt-cache expiry."
+  echo "Scry — cache deadline: automatic summary request unavailable in this session (no session id in the monitor environment). Nothing is watching the prompt-cache expiry."
   exit 0
 fi
 
 state_dir="${SCRY_CACHE_STATE_DIR:-${TMPDIR:-/tmp}/scry-cache-deadline}"
 lead="${SCRY_CACHE_HANDOFF_LEAD_SECONDS:-120}"
 poll="${SCRY_CACHE_HANDOFF_POLL_SECONDS:-15}"
-handoff_root="${SCRY_CACHE_HANDOFF_DIR:-$HOME/.claude/scry/handoffs}"
 ka_max="${SCRY_KEEPALIVE_MAX:-8}"
 ka_session_max="${SCRY_KEEPALIVE_MAX_PER_SESSION:-24}"
-ka_fresh="${SCRY_KEEPALIVE_FRESH_SECS:-1200}"
+ka_fresh="${SCRY_KEEPALIVE_FRESH_SECS:-3600}"
 case "$lead" in ''|*[!0-9]*) lead=120 ;; esac
 case "$poll" in ''|*[!0-9]*) poll=15 ;; esac
 case "$ka_max" in ''|*[!0-9]*) ka_max=8 ;; esac
 case "$ka_session_max" in ''|*[!0-9]*) ka_session_max=24 ;; esac
-case "$ka_fresh" in ''|*[!0-9]*) ka_fresh=1200 ;; esac
+case "$ka_fresh" in ''|*[!0-9]*) ka_fresh=3600 ;; esac
 
 # Claude Code writes task output under /tmp/claude-<uid> whatever TMPDIR says
 # (this machine, 2026-09-13: TMPDIR is under /var/folders, tasks are not), so
@@ -139,11 +175,8 @@ case "$ka_fresh" in ''|*[!0-9]*) ka_fresh=1200 ;; esac
 uid="$(id -u 2>/dev/null || echo 0)"
 task_roots="${SCRY_TASK_STATE_DIR:-${TMPDIR:-/tmp}/claude-$uid:/tmp/claude-$uid}"
 
-repo_name="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")"
-
 pass() {
   SCRY_SID="$sid" SCRY_DIR="$state_dir" SCRY_LEAD="$lead" \
-  SCRY_HANDOFF_ROOT="$handoff_root" SCRY_REPO="$repo_name" \
   SCRY_PID="${CLAUDE_PID:-}" \
   SCRY_SESSIONS_DIR="${SCRY_CLAUDE_SESSIONS_DIR:-$HOME/.claude/sessions}" \
   SCRY_PROJECTS_DIR="${SCRY_CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}" \
@@ -226,7 +259,9 @@ if watched != sid:
     old = read_state(watched)
     if old[0] in ("armed", "requested"):
         try:
-            write_state(watched, "superseded", now, old[2])
+            # What it was, and since when: fleet.sh tells a /clear successor
+            # whether a summary was asked for.
+            write_state(watched, "superseded", now, f"{old[0]}:{old[1]}")
         except Exception:
             sys.exit(0)
 if watch_path:
@@ -238,10 +273,6 @@ if watch_path:
 # ---- the cycle ------------------------------------------------------------
 state, since, extra = read_state(sid)
 
-if state == "requested":
-    if extra and os.path.exists(extra):
-        write_state(sid, "saved", now, extra)
-    sys.exit(0)
 if state != "armed":
     sys.exit(0)
 
@@ -267,7 +298,7 @@ if now >= expires:
 if now < expires - lead:
     sys.exit(0)
 
-# ---- inside the lead window: keep-alive or handoff -------------------------
+# ---- inside the lead window: keep-alive or summary -------------------------
 ka_path = os.path.join(state_dir, sid + ".keepalive")
 try:
     with open(ka_path) as f:
@@ -300,25 +331,31 @@ projects = os.environ["SCRY_PROJECTS_DIR"]
 
 def age(t):
     s = max(0, now - int(t))
+    if s >= 3600:
+        return f"{s // 3600}h{(s % 3600) // 60:02d}m"
     return f"{s // 60}m" if s >= 60 else f"{s}s"
 
 def label(text):
     text = re.sub(r"\s+", " ", str(text or "")).strip()
     return text[:60]
 
-def live_work():
-    """What this session has running, newest-write first, as roster lines.
-    File names, times and metadata labels only."""
+def mtime(p):
+    try:
+        return os.path.getmtime(p)
+    except OSError:
+        return None
+
+def roster_items():
+    """Every unfinished worker this session started, newest activity first,
+    as roster lines. File names, times and metadata labels only — no
+    comparison with any earlier poll, no judgement of progress."""
     items = []
-    fresh_after = now - fresh
     for sdir in glob.glob(os.path.join(glob.escape(projects), "*", glob.escape(sid))):
         sub = os.path.join(sdir, "subagents")
+        # Subagents: nothing says "finished", so only a recent write counts.
         for j in glob.glob(os.path.join(sub, "agent-*.jsonl")):
-            try:
-                m = os.path.getmtime(j)
-            except OSError:
-                continue
-            if m < fresh_after:
+            m = mtime(j)
+            if m is None or m < now - fresh:
                 continue
             aid = os.path.basename(j)[len("agent-"):-len(".jsonl")]
             desc = ""
@@ -329,40 +366,44 @@ def live_work():
             except Exception:
                 pass
             named = f' "{desc}"' if desc else ""
-            items.append((m, f"subagent {aid}{named} — last write {age(m)} ago; transcript {j}"))
+            items.append((m, f"subagent {aid}{named}: last activity {age(m)} ago"))
+        # Workflows: the journal says which agents have no result yet, and
+        # that holds however long the workflow has been quiet.
         for wdir in glob.glob(os.path.join(sub, "workflows", "wf_*")):
-            started, finished = {}, set()
+            started, finished = set(), set()
+            journal = os.path.join(wdir, "journal.jsonl")
             try:
-                with open(os.path.join(wdir, "journal.jsonl"), errors="replace") as f:
+                with open(journal, errors="replace") as f:
                     for line in f:
                         # The record's head only: a `result` line carries the
                         # agent's output after these fields, and it is not read.
-                        head = line[:320]
-                        k = re.search(r'"type":"(started|result)","key":"([^"]+)"', head)
-                        if not k:
-                            continue
-                        if k.group(1) == "started":
-                            lab = re.search(r'"label":"([^"]{0,80})"', head)
-                            started[k.group(2)] = label(lab.group(1)) if lab else ""
-                        else:
-                            finished.add(k.group(2))
+                        k = re.search(r'"type":"(started|result)","key":"([^"]+)"', line[:320])
+                        if k:
+                            (started if k.group(1) == "started" else finished).add(k.group(2))
             except OSError:
                 continue
-            running = [started[k] for k in started if k not in finished]
-            if not running:
+            if not (started - finished):
                 continue
-            try:
-                m = max(os.path.getmtime(p) for p in glob.glob(os.path.join(wdir, "agent-*.jsonl")))
-            except (OSError, ValueError):
+            stamps = [t for t in (mtime(p) for p in [journal] + glob.glob(
+                os.path.join(glob.escape(wdir), "agent-*.jsonl"))) if t is not None]
+            if not stamps:
                 continue
-            if m < fresh_after:
-                continue
+            m = max(stamps)
             wid = os.path.basename(wdir)
-            names = ", ".join(r for r in running if r)
-            names = f", running: {names}" if names else ""
-            items.append((m, f"workflow {wid} — {len(finished)} of {len(started)} agents "
-                             f"finished{names}; last write {age(m)} ago; result "
-                             f"{os.path.join(sdir, 'workflows', wid + '.json')}"))
+            # The workflow's name is in its script's file name,
+            # <session>/workflows/scripts/<name>-<run id>.js, written at launch
+            # (read 2026-09-13 against a running workflow).
+            name = ""
+            for script in glob.glob(os.path.join(glob.escape(sdir), "workflows", "scripts",
+                                                 "*-" + glob.escape(wid) + ".js")):
+                name = label(os.path.basename(script)[:-len("-" + wid + ".js")])
+                break
+            shown = f"{name} ({wid})" if name else wid
+            done = len(finished & started)
+            items.append((m, f"workflow {shown}: {done} of {len(started)} agents done, "
+                             f"last activity {age(m)} ago"))
+    # Background commands: unfinished until the output records an exit, and
+    # that holds however long the command has been quiet.
     seen = set()
     for root in os.environ["SCRY_TASK_ROOTS"].split(":"):
         if not root:
@@ -375,8 +416,6 @@ def live_work():
                 seen.add(real)
                 try:
                     m = os.path.getmtime(out)
-                    if m < fresh_after:
-                        continue
                     with open(out, "rb") as fh:
                         fh.seek(0, 2)
                         fh.seek(max(0, fh.tell() - 64))
@@ -386,11 +425,11 @@ def live_work():
                 if b"[exited with code" in tail or b"[killed]" in tail:
                     continue
                 tid = os.path.basename(out)[:-len(".output")]
-                items.append((m, f"background shell {tid} — last output {age(m)} ago; output {out}"))
+                items.append((m, f"background command {tid}: still running, last output {age(m)} ago"))
     items.sort(key=lambda x: -x[0])
     return [text for _, text in items]
 
-roster = live_work()
+roster = roster_items()
 listed = "; ".join(roster[:8]) + (f"; and {len(roster) - 8} more" if len(roster) > 8 else "")
 ka_max = int(os.environ["SCRY_KA_MAX"])
 ka_session_max = int(os.environ["SCRY_KA_SESSION_MAX"])
@@ -415,49 +454,41 @@ if roster and not why_not:
     print(
         "Scry — cache keep-alive (this is a Scry monitor notification, not a user "
         f"message): this session's prompt cache goes cold at {at}, in about "
-        f"{minutes} min, and work it started is still running: {listed}. When "
-        "that work finishes, its notification wakes this session, and on a cold "
-        "cache that wake re-reads the whole context at the full rate. Reply with "
-        "one short plain-language status line for the user, built only from the "
-        "running-work list above (e.g. \"Piece 2: 5 of 8 helpers done; build and "
-        "review still running\") — and nothing else: no tool calls, no checking "
-        "on the work, no other action. The running work reports back by itself; "
-        "this reply is only what keeps the cache warm for it. "
-        f"Keep-alive {cycle + 1} of at most {ka_max} for this user message."
+        f"{minutes} min, and work it started has not finished. As far as Scry can "
+        f"tell from file metadata: {listed}. When that work finishes, its "
+        "notification wakes this session, and on a cold cache that wake re-reads "
+        "the whole context at the full rate; your reply to this keeps it warm. "
+        "Post ONE short plain-language status line for the user from this list "
+        "(e.g. \"Piece 2: 5 of 8 agents done; build and review still running\"). "
+        "Compare it with your previous status in this conversation: if a worker "
+        "shows no movement since then, check on it and handle it as the "
+        "orchestrator; otherwise take no other action — the work reports back by "
+        f"itself. Keep-alive {cycle + 1} of at most {ka_max} for this user message."
     )
     sys.exit(0)
 
-repo = os.environ["SCRY_REPO"] or "session"
-stamp = time.strftime("%Y-%m-%d-%H%M", time.localtime(now))
-handoff_dir = os.path.join(os.environ["SCRY_HANDOFF_ROOT"], repo)
-handoff = os.path.join(handoff_dir, f"{stamp}-{sid[:8]}.md")
-try:
-    os.makedirs(handoff_dir, exist_ok=True)
-except Exception:
-    pass
-
 # Written before printing: a restart between the two cannot ask twice.
-write_state(sid, "requested", now, handoff)
+write_state(sid, "requested", now)
 
 running = ""
 if roster:
     running = (
-        f" Work this session started is still running and will not be kept warm "
-        f"for ({why_not}): {listed}. Give the handoff a running-work section "
-        "naming each of those — what it is, how far it got, and where its "
-        "result lands — so whoever picks this up collects it rather than "
-        "starting it again."
+        f" Work this session started has not finished and will not be kept warm "
+        f"for ({why_not}). As far as Scry can tell from file metadata: {listed}. "
+        "End the summary with those still-running workers, as listed, so whoever "
+        "picks this up collects them rather than starting them again."
     )
 print(
     "Scry — cache deadline (this is a Scry monitor notification, not a user "
     f"message): this session's prompt cache goes cold at {at}, in about "
     f"{minutes} min. The first request after that re-reads the whole context "
     "at the full rate instead of the cached one. While it is still warm, write "
-    f"one handoff to {handoff} — the objective and the latest user direction; "
-    "decisions, constraints, and open questions; what was done and what was "
-    "actually verified; what remains and the next concrete step; the working "
-    "directory, branch, and any running jobs. Where agent-comms is available, "
-    "post the same text there as a handoff and pin it."
+    "a summary of this session as your reply here in the conversation — not to "
+    f"any file. Open it with \"Session {sid}\" and this line: \"To continue in "
+    f"a new window, say: pick up from session {sid}\". Then: the objective and "
+    "the latest user direction; decisions and open questions; what was done "
+    "and what was actually verified; what remains and the next concrete step; "
+    "the working directory and branch."
     f"{running} Then stop and wait for the user. This will not repeat until "
     "the user sends another message."
 )

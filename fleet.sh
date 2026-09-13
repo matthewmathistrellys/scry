@@ -33,8 +33,13 @@
 # was written moments ago, so the new session used to start knowing nothing
 # about where it came from (Matt, 2026-09-10: "the new one has no idea where
 # it just came from"). On "clear" this hook names that session — id, title,
-# what resuming it costs — and whether the cache-handoff monitor got a handoff
-# written for it (its path, never its body). Which session that was comes
+# what resuming it costs — and whether Scry's cache-deadline monitor asked it
+# for a summary before it went idle, read from Scry's own state file for that
+# session, never from the transcript. Since 1.31.0 that summary is written as
+# the session's last reply, not to a file (Matt, 2026-09-13: "tell the next
+# agent post-clear that it can go and get it as needed … dispatch a Sonnet
+# subagent to go back through the transcript"), so this hook says where to
+# look and never what it says. Which session that was comes
 # from clear_record.sh, written as the old session ended; with ten sessions
 # open the newest-transcript guess is wrong exactly when it matters, so the
 # guess is only a labelled fallback (council + Matt, 2026-09-10). Still no
@@ -129,7 +134,6 @@ SELF_ID="$self_id" SESSION_CWD="$session_cwd" FAMILY_ROOT="$family_root" \
 TRANSCRIPT_PATH="$transcript_path" ACTIVE_MINUTES="$ACTIVE_MINUTES" \
 AGENT_BINARIES="$AGENT_BINARIES" WORKTREE_PATHS="$worktree_paths" \
 START_SOURCE="$start_source" \
-SCRY_HANDOFF_ROOT="${SCRY_CACHE_HANDOFF_DIR:-$HOME/.claude/scry/handoffs}" \
 SCRY_CLEAR_ROOT="${SCRY_CLEAR_STATE_DIR:-${TMPDIR:-/tmp}/scry-last-cleared}" \
 SCRY_DEADLINE_ROOT="${SCRY_CACHE_STATE_DIR:-${TMPDIR:-/tmp}/scry-cache-deadline}" \
 SCRY_TASK_ROOT="${SCRY_TASK_STATE_DIR:-${TMPDIR:-/tmp}/claude-$(id -u 2>/dev/null || echo 0)}" \
@@ -144,7 +148,6 @@ agents   = set(os.environ["AGENT_BINARIES"].split())
 now      = time.time()
 transcript_path = os.environ.get("TRANSCRIPT_PATH", "")
 start_source = os.environ.get("START_SOURCE", "startup")
-handoff_root = os.environ.get("SCRY_HANDOFF_ROOT", "")
 clear_root = os.environ.get("SCRY_CLEAR_ROOT", "")
 deadline_root = os.environ.get("SCRY_DEADLINE_ROOT", "")
 task_root = os.environ.get("SCRY_TASK_ROOT", "")
@@ -582,13 +585,26 @@ def cache_state(sid):
     return (f"its prompt cache is cold or unrecorded, so `claude --resume {sid}` "
             f"re-reads the whole conversation at the full rate, as would a /compact inside it")
 
-def handoff_for(sid):
-    hd = os.path.join(handoff_root, os.path.basename(family)) if handoff_root else ""
-    if not hd or not os.path.isdir(hd):
+def summary_requested_at(sid):
+    """When Scry's cache-deadline monitor asked that session for a summary,
+    if that request was the last thing that happened to it — from the
+    monitor's own state file, never the transcript. `requested <time>` is
+    left alone until a user message re-arms it; a /clear seen by the monitor
+    turns it into `superseded <time> requested:<time>`. Anything else (armed,
+    missed, a later user message, no file) means no summary was asked for
+    after the last user message. Returns the epoch time or None."""
+    try:
+        with open(os.path.join(deadline_root, sid + ".state")) as fh:
+            parts = fh.read().split()
+    except Exception:
         return None
-    cands = [os.path.join(hd, f) for f in os.listdir(hd) if f.endswith(f"-{sid[:8]}.md")]
-    cands = [c for c in cands if os.path.isfile(c) and os.path.getsize(c) > 0]
-    return max(cands, key=os.path.getmtime) if cands else None
+    if len(parts) >= 2 and parts[0] == "requested" and parts[1].isdigit():
+        return int(parts[1])
+    if len(parts) >= 3 and parts[0] == "superseded":
+        was, _, when = parts[2].partition(":")
+        if was == "requested" and when.isdigit():
+            return int(when)
+    return None
 
 def orphaned_tasks(sid):
     """The background tasks that session registered which have not
@@ -670,9 +686,16 @@ if start_source == "clear":
         if tpath:
             lines.append(f"- Its transcript: {tpath}")
         lines.append(f"- Resuming it: {cache_state(prev_id)}.")
-        h = handoff_for(prev_id)
-        lines.append(f"- A handoff was written for it: {h}" if h
-                     else "- No handoff was written for it.")
+        asked = summary_requested_at(prev_id)
+        if asked:
+            hhmm = time.strftime("%H:%M", time.localtime(asked))
+            lines.append(
+                f"- Scry asked it for a summary at {hhmm}, before it went idle, and no "
+                "user message followed, so its last message(s) should contain that summary. "
+                "Read the end of its transcript first; if more detail is needed, send "
+                "a Sonnet subagent to search the transcript.")
+        else:
+            lines.append("- No summary was requested for it; its transcript is the record.")
         # Fact five: what it left running. Gated on cleared_id, never on the
         # guess — see 1a. Silent when it left nothing, like every other signal.
         in_flight = []
