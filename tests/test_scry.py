@@ -241,9 +241,11 @@ class ScryHookTests(unittest.TestCase):
         # /clear ends the session and starts a new one with source "clear".
         # clear_record.sh wrote the ending session down; fleet.sh reads that
         # record for this directory, deletes it, and states four facts: the
-        # session left, its transcript, what resuming it costs, and whether a
-        # handoff exists (path only). Insight, not action (council + Matt,
-        # 2026-09-10). Never the transcript's prompts, never the handoff body.
+        # session left, its transcript, what resuming it costs, and whether
+        # Scry asked it for a summary, from Scry's own state file (Matt,
+        # 2026-09-13: the summary lives in the conversation, not a file).
+        # Insight, not action (council + Matt, 2026-09-10). Never the
+        # transcript's prompts.
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             repo = base / "repo"
@@ -259,11 +261,7 @@ class ScryHookTests(unittest.TestCase):
             other = claude_dir / "other-live-session.jsonl"
             other.write_text(json.dumps({"type": "ai-title", "aiTitle": "Unrelated work"}) + "\n")
             os.utime(prev, (time.time() - 30, time.time() - 30))
-            handoffs = base / "handoffs" / "repo"
-            handoffs.mkdir(parents=True)
-            (handoffs / "20260910-1200-0123abcd.md").write_text("# Handoff\nHANDOFF BODY\n")
             env = {"HOME": str(base), "CODEX_HOME": str(base / ".codex"),
-                   "SCRY_CACHE_HANDOFF_DIR": str(base / "handoffs"),
                    "SCRY_CLEAR_STATE_DIR": str(base / "cleared"),
                    "SCRY_CACHE_STATE_DIR": str(base / "deadline")}
             # The old session ends with /clear: clear_record.sh writes it down.
@@ -275,6 +273,10 @@ class ScryHookTests(unittest.TestCase):
             self.assertNotIn("SECRET", rec_path.read_text())
             # Its cache deadline, as the status-line wrapper records it.
             (base / "deadline").mkdir()
+            # The monitor asked it for a summary and no user message followed.
+            asked = int(time.time()) - 600
+            state = base / "deadline" / "0123abcd-prev-session.state"
+            state.write_text(f"requested {asked}\n")
             (base / "deadline" / "0123abcd-prev-session.deadline").write_text(json.dumps(
                 {"session_id": "0123abcd-prev-session", "observed_at": int(time.time()),
                  "warm": True, "ttl": "1h", "expires_at": int(time.time()) + 1800, "requests": 9}))
@@ -290,23 +292,46 @@ class ScryHookTests(unittest.TestCase):
             self.assertRegex(report, r"warm until \d\d:\d\d")
             self.assertIn("claude --resume 0123abcd-prev-session", report)
             self.assertIn("full rate", report)
-            self.assertIn(f"A handoff was written for it: {handoffs / '20260910-1200-0123abcd.md'}", report)
-            self.assertNotIn("HANDOFF BODY", report)
+            hhmm = time.strftime("%H:%M", time.localtime(asked))
+            self.assertIn(f"Scry asked it for a summary at {hhmm}", report)
+            self.assertIn("last message(s) should contain that summary", report)
+            self.assertIn("Read the end of its transcript first", report)
+            self.assertIn("send a Sonnet subagent to search the transcript", report)
+            self.assertNotIn("handoff was written", report)
             self.assertNotIn("SECRET PROMPT", report)
             self.assertNotIn("Unrelated work", report)      # the guess would have said this
             self.assertNotIn("GUESS", report)
-            self.assertNotIn("subagent", report.lower())     # facts, not a recipe
+            self.assertNotIn("IT LEFT WORK RUNNING", report)  # it left nothing
             self.assertFalse(rec_path.exists())              # read once, then gone
+
+            # A /clear the monitor has already seen turns "requested" into
+            # "superseded"; the request is still the last thing that happened.
+            state.write_text(f"superseded {asked + 5} requested:{asked}\n")
+            run_hook("clear_record.sh", repo, {"session_id": "0123abcd-prev-session",
+                                              "transcript_path": str(prev), "cwd": str(repo),
+                                              "reason": "clear"}, env)
+            report = context(run_hook("fleet.sh", repo, payload, env))
+            self.assertIn(f"Scry asked it for a summary at {hhmm}", report)
+            # A user message after the request re-armed it; so did a clear of
+            # an armed session: no summary was asked for since.
+            for later in (f"armed {asked + 60}\n", f"superseded {asked + 60} armed:{asked + 30}\n"):
+                state.write_text(later)
+                run_hook("clear_record.sh", repo, {"session_id": "0123abcd-prev-session",
+                                                  "transcript_path": str(prev), "cwd": str(repo),
+                                                  "reason": "clear"}, env)
+                report = context(run_hook("fleet.sh", repo, payload, env))
+                self.assertIn("No summary was requested for it; its transcript is the record.", report)
+                self.assertNotIn("asked it for a summary", report)
 
             # With no record (the SessionEnd hook did not run) the guess stands
             # in, says so, and the cold-cache cost is stated.
             (base / "deadline" / "0123abcd-prev-session.deadline").unlink()
-            (handoffs / "20260910-1200-0123abcd.md").unlink()
+            state.unlink()
             report = context(run_hook("fleet.sh", repo, payload, env))
             self.assertIn("a GUESS", report)
             self.assertIn("Unrelated work", report)
             self.assertIn("cold or unrecorded", report)
-            self.assertIn("No handoff was written", report)
+            self.assertIn("No summary was requested for it", report)
 
             # A plain start keeps the old rule: the just-written transcript
             # counts as live and is not reported as the last session.
@@ -422,7 +447,6 @@ class ScryHookTests(unittest.TestCase):
             (tasks / "stale-agent.output").symlink_to(stale)
 
             env = {"HOME": str(base), "CODEX_HOME": str(base / ".codex"),
-                   "SCRY_CACHE_HANDOFF_DIR": str(base / "handoffs"),
                    "SCRY_CLEAR_STATE_DIR": str(base / "cleared"),
                    "SCRY_CACHE_STATE_DIR": str(base / "deadline"),
                    "SCRY_TASK_STATE_DIR": str(base / "taskroot")}
@@ -481,7 +505,6 @@ class ScryHookTests(unittest.TestCase):
             tasks.mkdir(parents=True)
             (tasks / "finished.output").write_text("done\n\n[exited with code 0]\n")
             env = {"HOME": str(base), "CODEX_HOME": str(base / ".codex"),
-                   "SCRY_CACHE_HANDOFF_DIR": str(base / "handoffs"),
                    "SCRY_CLEAR_STATE_DIR": str(base / "cleared"),
                    "SCRY_CACHE_STATE_DIR": str(base / "deadline"),
                    "SCRY_TASK_STATE_DIR": str(base / "taskroot")}
@@ -2975,9 +2998,11 @@ class BranchPointAdvisoryTests(unittest.TestCase):
 
 
 class CacheHandoffTests(unittest.TestCase):
-    """One handoff per user-work cycle, shortly before the prompt cache goes
-    cold, and only a user message re-arms it (designed with Codex,
-    2026-09-10). Three scripts share two small files of numbers per session.
+    """One summary request per user-work cycle, shortly before the prompt
+    cache goes cold, and only a user message re-arms it (designed with Codex,
+    2026-09-10). The summary is written in the conversation, never to a file,
+    and while work is unfinished a keep-alive reports its roster instead
+    (Matt, 2026-09-13). Three scripts share small files of numbers per session.
     """
 
     SID = "sess-cache-0001"
@@ -2989,7 +3014,6 @@ class CacheHandoffTests(unittest.TestCase):
         # CLAUDE_PID and ~/.claude would otherwise answer "which session".
         env = {
             "SCRY_CACHE_STATE_DIR": str(Path(td) / "state"),
-            "SCRY_CACHE_HANDOFF_DIR": str(Path(td) / "handoffs"),
             "CLAUDE_CODE_SESSION_ID": self.SID,
             "CLAUDE_PID": self.PID,
             "SCRY_CLAUDE_SESSIONS_DIR": str(Path(td) / "sessions"),
@@ -3067,6 +3091,27 @@ class CacheHandoffTests(unittest.TestCase):
         os.utime(out, (t, t))
         return out
 
+    def _workflow(self, td, wid="wf_abc-123", age=0, name=None, finished_all=False):
+        sdir = self._session_dir(td)
+        wf = sdir / "subagents" / "workflows" / wid
+        wf.mkdir(parents=True)
+        journal = ('{"type":"launched"}\n'
+                   '{"type":"started","key":"v2:k1","agentId":"a1","label":"spike:facts","phase":"Spike"}\n'
+                   '{"type":"result","key":"v2:k1","agentId":"a1","result":"SECRET RESULT"}\n'
+                   '{"type":"started","key":"v2:k2","agentId":"a2","label":"build:opus","phase":"Build"}\n')
+        if finished_all:
+            journal += '{"type":"result","key":"v2:k2","agentId":"a2","result":"r"}\n'
+        (wf / "journal.jsonl").write_text(journal)
+        (wf / "agent-a2.jsonl").write_text('{"message":"SECRET AGENT TEXT"}\n')
+        if name:
+            scripts = sdir / "workflows" / "scripts"
+            scripts.mkdir(parents=True, exist_ok=True)
+            (scripts / f"{name}-{wid}.js").write_text("export const meta = {}\n")
+        t = time.time() - age
+        for f in wf.iterdir():
+            os.utime(f, (t, t))
+        return wf
+
     def test_the_status_line_records_the_deadline_and_nothing_else(self):
         with tempfile.TemporaryDirectory() as td:
             self._statusline(td, 3000)
@@ -3138,12 +3183,9 @@ class CacheHandoffTests(unittest.TestCase):
             first = self._monitor(td)
             self.assertIn("goes cold", first.stdout)
             self.assertEqual(first.stdout.count("\n"), 1)
-            path = self._state(td)[2]
-            self.assertIn(os.path.basename(td.rstrip("/")), path)
-            self.assertIn(self.SID[:8], path)
-            self.assertTrue(Path(path).parent.is_dir())
             self.assertEqual(self._state(td)[0], "requested")
-            # The handoff itself refreshes the cache; that must not re-arm.
+            self.assertEqual(len(self._state(td)), 2)  # no path, nothing else
+            # The summary itself refreshes the cache; that must not re-arm.
             self._statusline(td, 3500)
             self.assertEqual(self._monitor(td).stdout, "")
             self._statusline(td, 90)
@@ -3191,16 +3233,29 @@ class CacheHandoffTests(unittest.TestCase):
             self.assertEqual(self._state(td)[0], "armed")
             self.assertEqual(self._arm(td).stdout, "")  # said once
 
-    def test_it_notes_the_saved_handoff_silently(self):
+    def test_the_summary_is_asked_for_in_the_conversation_with_the_full_session_id(self):
+        # Matt, 2026-09-13: "Why does it need a file, why can't it just write
+        # it inline" and "Put the session ID there in case I need to start a
+        # new window". And Scry names no other system.
         with tempfile.TemporaryDirectory() as td:
-            self._arm(td)
-            time.sleep(1.1)
-            self._statusline(td, 90)
-            self._monitor(td)
-            path = self._state(td)[2]
-            Path(path).write_text("# handoff\n")
-            self.assertEqual(self._monitor(td).stdout, "")
-            self.assertEqual(self._state(td)[0], "saved")
+            self._armed_near_expiry(td)
+            said = self._monitor(td, HOME=td).stdout
+            self.assertIn("as your reply here in the conversation — not to any file", said)
+            self.assertIn(f'"Session {self.SID}"', said)
+            self.assertIn(f"To continue in a new window, say: pick up from session {self.SID}", said)
+            for part in ("objective and the latest user direction",
+                         "decisions and open questions",
+                         "what was done and what was actually verified",
+                         "what remains and the next concrete step",
+                         "the working directory and branch"):
+                self.assertIn(part, said)
+            self.assertNotIn(".md", said)
+            self.assertNotIn("/", said.replace("goes cold", ""))  # no path of any kind
+            for other in ("agent-comms", "agent comms", "ThreadTask", "handoff"):
+                self.assertNotIn(other.lower(), said.lower())
+            # No handoff directory, under the default or anywhere else.
+            self.assertFalse((Path(td) / ".claude" / "scry" / "handoffs").exists())
+            self.assertEqual(sorted(p.name for p in Path(td).iterdir()), ["state"])
 
     def test_the_lead_time_is_configurable_not_hardcoded(self):
         with tempfile.TemporaryDirectory() as td:
@@ -3245,10 +3300,20 @@ class CacheHandoffTests(unittest.TestCase):
             self._sessions_file(td, new, when=time.time() + 5)
             first = self._monitor(td)
             self.assertIn("goes cold", first.stdout)
-            self.assertIn(new[:8] + ".md", first.stdout)
+            self.assertIn(f"pick up from session {new}", first.stdout)
+            self.assertNotIn(self.SID, first.stdout)
             self.assertEqual(self._state(td, new)[0], "requested")
             self.assertEqual(self._state(td)[0], "superseded")
+            # It was armed, not asked, when the clear came.
+            self.assertTrue(self._state(td)[2].startswith("armed:"))
             self.assertEqual(self._monitor(td).stdout, "")
+            # A clear after the request keeps the fact that it was asked, for
+            # fleet.sh to tell the next session.
+            asked_at = self._state(td, new)[1]
+            self._sessions_file(td, "sess-cache-0009", when=time.time() + 10)
+            self.assertEqual(self._monitor(td).stdout, "")
+            self.assertEqual(self._state(td, new), ["superseded", self._state(td, new)[1],
+                                                    f"requested:{asked_at}"])
 
     def test_the_hook_record_alone_is_enough_to_follow_the_session(self):
         # Claude Code's sessions file is internal; the arm hook's own
@@ -3264,7 +3329,7 @@ class CacheHandoffTests(unittest.TestCase):
             self.assertEqual(self._monitor(td).stdout, "")
             self.assertEqual(self._state(td)[0], "superseded")
             self._armed_near_expiry(td, sid=new)
-            self.assertIn(new[:8] + ".md", self._monitor(td).stdout)
+            self.assertIn(f"pick up from session {new}", self._monitor(td).stdout)
 
     def test_without_any_record_it_watches_the_environment_session(self):
         with tempfile.TemporaryDirectory() as td:
@@ -3272,13 +3337,13 @@ class CacheHandoffTests(unittest.TestCase):
             (Path(td) / "state" / "pid" / self.PID).unlink()
             time.sleep(1.1)
             self._statusline(td, 90)
-            self.assertIn(self.SID[:8] + ".md", self._monitor(td).stdout)
+            self.assertIn(f"pick up from session {self.SID}", self._monitor(td).stdout)
 
     # ---- only a user message arms
 
     def test_a_notification_does_not_arm_or_rearm(self):
         # b1746f6b read "armed" the second a workflow completion arrived
-        # (2026-09-13), and 62aa5e9f was asked for a handoff every hour
+        # (2026-09-13), and 62aa5e9f was asked for a summary every hour
         # because each request re-armed the next.
         with tempfile.TemporaryDirectory() as td:
             for prompt in ("<task-notification>\n<task-id>wabc</task-id> SECRET",
@@ -3300,17 +3365,22 @@ class CacheHandoffTests(unittest.TestCase):
 
     # ---- keep-alive while this session's work is running
 
-    def test_fresh_running_work_gets_a_keep_alive_not_a_handoff(self):
+    def test_unfinished_work_gets_a_keep_alive_with_the_roster_not_a_summary(self):
         with tempfile.TemporaryDirectory() as td:
             self._subagent(td)
             self._armed_near_expiry(td)
             first = self._monitor(td)
             self.assertIn("keep-alive", first.stdout)
-            self.assertIn('subagent a1b2c3 "build:opus"', first.stdout)
-            self.assertIn("no tool calls", first.stdout)
-            self.assertIn("one short plain-language status line for the user", first.stdout)
-            self.assertIn("running-work list", first.stdout)
+            self.assertRegex(first.stdout, r'subagent a1b2c3 "build:opus": last activity \d+s ago')
+            self.assertIn("As far as Scry can tell from file metadata", first.stdout)
+            self.assertIn("Post ONE short plain-language status line for the user from this list",
+                          first.stdout)
+            # Scry reports; the session judges (Matt, 2026-09-13).
+            self.assertIn("Compare it with your previous status in this conversation: if a "
+                          "worker shows no movement since then, check on it and handle it as "
+                          "the orchestrator; otherwise take no other action", first.stdout)
             self.assertNotIn("SECRET", first.stdout)
+            self.assertNotIn("summary", first.stdout)
             self.assertEqual(first.stdout.count("\n"), 1)
             self.assertEqual(self._state(td)[0], "armed")
             # Once per deadline: nothing more while its ack lands.
@@ -3323,57 +3393,82 @@ class CacheHandoffTests(unittest.TestCase):
             self._statusline(td, 90)
             self.assertIn("Keep-alive 2 of", self._monitor(td).stdout)
 
-    def test_stale_work_is_not_live_and_gets_the_plain_handoff(self):
+    def test_no_progress_fingerprint_is_stored(self):
+        # PR #27's stored-fingerprint comparison was dropped as unreliable.
+        # The only per-session files are the deadline, the state, and the
+        # keep-alive counter — and the counter holds counts and times only.
         with tempfile.TemporaryDirectory() as td:
-            self._subagent(td, age=1300)  # past the 20-minute default
-            self._shell_task(td, "compiling\n", age=1300)
+            self._subagent(td)
+            self._workflow(td, name="piece-2")
+            self._shell_task(td, "compiling\n")
+            self._armed_near_expiry(td)
+            self.assertIn("keep-alive", self._monitor(td).stdout)
+            state = Path(td) / "state"
+            files = sorted(str(p.relative_to(state)) for p in state.rglob("*") if p.is_file())
+            self.assertEqual(files, sorted([f"{self.SID}.deadline", f"{self.SID}.keepalive",
+                                            f"{self.SID}.state", f"pid/{self.PID}",
+                                            f"pid/{self.PID}.watch"]))
+            ka = json.loads((state / f"{self.SID}.keepalive").read_text())
+            self.assertEqual(set(ka), {"armed_at", "cycle", "total", "sent_at", "sent_expires"})
+
+    def test_a_subagent_is_listed_only_within_one_ttl_of_its_last_write(self):
+        # Nothing in a plain subagent's metadata says it finished, so its
+        # window is the only bound: SCRY_KEEPALIVE_FRESH_SECS, default 3600.
+        with tempfile.TemporaryDirectory() as td:
+            self._subagent(td, age=1300)  # quiet for 20+ minutes, inside one TTL
+            self._armed_near_expiry(td)
+            self.assertRegex(self._monitor(td).stdout,
+                             r'keep-alive.*subagent a1b2c3 "build:opus": last activity 2\dm ago')
+        with tempfile.TemporaryDirectory() as td:
+            self._subagent(td, age=3700)  # outside the window
             self._armed_near_expiry(td)
             out = self._monitor(td).stdout
             self.assertIn("goes cold", out)
             self.assertNotIn("keep-alive", out)
-            self.assertNotIn("running-work", out)
+            self.assertNotIn("a1b2c3", out)
+            self.assertNotIn("has not finished", out)
             self.assertEqual(self._state(td)[0], "requested")
-            self.assertIn(self.SID[:8] + ".md", self._state(td)[2])
 
-    def test_a_shell_task_is_live_until_it_records_an_exit(self):
+    def test_a_background_command_is_listed_until_it_records_an_exit_however_quiet(self):
         with tempfile.TemporaryDirectory() as td:
-            out = self._shell_task(td, "SECRET OUTPUT\n[exited with code 0]\n")
+            self._shell_task(td, "SECRET OUTPUT\n[exited with code 0]\n")
             self._armed_near_expiry(td)
             self.assertNotIn("keep-alive", self._monitor(td).stdout)
         with tempfile.TemporaryDirectory() as td:
-            out = self._shell_task(td, "SECRET OUTPUT still going\n")
+            out = self._shell_task(td, "SECRET OUTPUT still going\n", age=7200)
             self._armed_near_expiry(td)
             said = self._monitor(td).stdout
-            self.assertIn(f"background shell bq7shell1", said)
-            self.assertIn(str(out), said)
+            self.assertIn("keep-alive", said)
+            self.assertRegex(said, r"background command bq7shell1: still running, "
+                                   r"last output 2h0\dm ago")
+            self.assertNotIn(str(out), said)
             self.assertNotIn("SECRET", said)
 
-    def test_a_workflow_is_live_while_an_agent_has_no_result(self):
+    def test_a_workflow_is_listed_while_an_agent_has_no_result_however_quiet(self):
         with tempfile.TemporaryDirectory() as td:
-            wf = self._session_dir(td) / "subagents" / "workflows" / "wf_abc-123"
-            wf.mkdir(parents=True)
-            (wf / "journal.jsonl").write_text(
-                '{"type":"launched"}\n'
-                '{"type":"started","key":"v2:k1","agentId":"a1","label":"spike:facts","phase":"Spike"}\n'
-                '{"type":"result","key":"v2:k1","agentId":"a1","result":"SECRET RESULT"}\n'
-                '{"type":"started","key":"v2:k2","agentId":"a2","label":"build:opus","phase":"Build"}\n')
-            (wf / "agent-a2.jsonl").write_text("{}\n")
+            self._workflow(td, name="piece-2-build-inspect")
             self._armed_near_expiry(td)
             said = self._monitor(td).stdout
-            self.assertIn("workflow wf_abc-123 — 1 of 2 agents finished, running: build:opus", said)
-            self.assertIn("workflows/wf_abc-123.json", said)
+            self.assertRegex(said, r"workflow piece-2-build-inspect \(wf_abc-123\): 1 of 2 agents "
+                                   r"done, last activity \d+s ago")
             self.assertNotIn("SECRET", said)
         with tempfile.TemporaryDirectory() as td:
-            wf = self._session_dir(td) / "subagents" / "workflows" / "wf_done"
-            wf.mkdir(parents=True)
-            (wf / "journal.jsonl").write_text(
-                '{"type":"started","key":"v2:k1","agentId":"a1","label":"x"}\n'
-                '{"type":"result","key":"v2:k1","agentId":"a1","result":"r"}\n')
-            (wf / "agent-a1.jsonl").write_text("{}\n")
+            # Three hours without a write, no script file: still unfinished
+            # by its own journal, so still listed, by id, with its age.
+            self._workflow(td, age=3 * 3600)
             self._armed_near_expiry(td)
-            self.assertNotIn("keep-alive", self._monitor(td).stdout)
+            said = self._monitor(td).stdout
+            self.assertIn("keep-alive", said)
+            self.assertRegex(said, r"workflow wf_abc-123: 1 of 2 agents done, "
+                                   r"last activity 3h0\dm ago")
+        with tempfile.TemporaryDirectory() as td:
+            self._workflow(td, wid="wf_done", finished_all=True)
+            self._armed_near_expiry(td)
+            said = self._monitor(td).stdout
+            self.assertNotIn("keep-alive", said)
+            self.assertNotIn("wf_done", said)
 
-    def test_the_cap_ends_keep_alives_with_a_handoff_that_names_the_work(self):
+    def test_the_cap_ends_keep_alives_with_a_summary_that_names_the_work(self):
         with tempfile.TemporaryDirectory() as td:
             self._subagent(td)
             self._armed_near_expiry(td)
@@ -3383,8 +3478,9 @@ class CacheHandoffTests(unittest.TestCase):
             said = self._monitor(td, SCRY_KEEPALIVE_MAX="1").stdout
             self.assertIn("goes cold", said)
             self.assertIn("allowed per user message are spent", said)
-            self.assertIn("running-work section", said)
-            self.assertIn('subagent a1b2c3 "build:opus"', said)
+            self.assertIn("End the summary with those still-running workers", said)
+            self.assertIn(f"pick up from session {self.SID}", said)
+            self.assertRegex(said, r'subagent a1b2c3 "build:opus": last activity \d+s ago')
             self.assertEqual(self._state(td)[0], "requested")
             self.assertEqual(self._monitor(td, SCRY_KEEPALIVE_MAX="1").stdout, "")
 
@@ -3402,7 +3498,7 @@ class CacheHandoffTests(unittest.TestCase):
             self.assertIn("allowed per session are spent", said)
             self.assertEqual(self._state(td)[0], "requested")
 
-    def test_a_keep_alive_that_does_not_move_the_deadline_falls_back_to_the_handoff(self):
+    def test_a_keep_alive_that_does_not_move_the_deadline_falls_back_to_the_summary(self):
         with tempfile.TemporaryDirectory() as td:
             self._subagent(td)
             self._armed_near_expiry(td)
@@ -3415,6 +3511,7 @@ class CacheHandoffTests(unittest.TestCase):
             ka_path.write_text(json.dumps(ka))
             said = self._monitor(td).stdout
             self.assertIn("did not refresh the cache", said)
+            self.assertIn("as your reply here in the conversation", said)
             self.assertEqual(self._state(td)[0], "requested")
 
 

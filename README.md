@@ -21,7 +21,7 @@ machine is carrying. Independent checks and advisories fill that in.
 | **`pressure.sh`** | What shape is this machine in? |
 | **`main_drift_advisory.sh`** | Is the tree this subagent was handed the current one? |
 | **`session_disposal_advisory.sh`** | What is this session leaving behind? |
-| **`cache_handoff_monitor.sh`** | Is this session about to lose its prompt cache, and is anything written down? |
+| **`cache_handoff_monitor.sh`** | Is this session about to lose its prompt cache — and what is still unfinished, or what should be summarised first? |
 | **Markdown trust** | What goes wrong when repository prose is mistaken for authority? |
 
 - **`architecture.sh`** — a map of the codebase. It is a *dispatcher*, not a
@@ -210,14 +210,25 @@ machine is carrying. Independent checks and advisories fill that in.
   when something is actually reclaimable, or the pile exceeds
   `SCRY_WORKTREE_DISK_MB_WARN` (default 2048).
 
-- **Cache handoff** — `cache_handoff_monitor.sh` (Claude only) asks the
-  session, at most once per user message, to write a handoff shortly before
-  its prompt cache goes cold. Claude Code's prompt cache has a time-to-live;
-  every request refreshes it, and an idle session lets it run out, after which
-  the next request re-reads the whole context at the full rate. That idle
-  session is also the one most likely to be abandoned with nothing written
-  down. One cached request in the last minutes of the warm window buys a
-  handoff file the next session can start from.
+- **Cache deadline** — `cache_handoff_monitor.sh` (Claude only) speaks
+  shortly before this session's prompt cache goes cold. Claude Code's prompt
+  cache has a time-to-live; every request refreshes it, and an idle session
+  lets it run out, after which the next request re-reads the whole context at
+  the full rate. While work the session started is unfinished it sends a
+  keep-alive with that work's status as Scry can read it; otherwise, at most
+  once per user message, it asks the session to write a summary as its reply
+  in the conversation. One cached request in the last minutes of the warm
+  window leaves that summary at the end of the transcript, where a `/clear`'d
+  successor or a new window can find it. No file is written: until 1.31.0 the
+  summary went to `~/.claude/scry/handoffs/`, and anything already there is
+  left alone (Matt, 2026-09-13: "Why does it need a file, why can't it just
+  write it inline").
+
+  Scry reports and the session judges (same decision: "If it's deterministic
+  and simple and reliable keep doing it; if not, just tell the orchestrator
+  you've got so many agents and here's their status as far as I can tell").
+  It stores no progress fingerprints, compares nothing between polls, and
+  calls nothing stuck. Its messages name no other system.
 
   Three pieces, two small files of numbers per session:
 
@@ -234,13 +245,13 @@ machine is carrying. Independent checks and advisories fill that in.
   Code's own `recache_tokens_if_cold` — what the next request re-reads at the
   full rate if nobody speaks first. Nothing avoids that re-read once the cache
   is cold: a `/compact` sends the same history to write its summary, and
-  resuming does too. The only free move is `/clear`, which is why the handoff
-  exists and why the new session is handed it (see `fleet.sh`).
+  resuming does too. The only free move is `/clear`, which is why the summary
+  is asked for and why the new session is told where it is (see `fleet.sh`).
 
   *`cache_handoff_arm.sh`* is a `UserPromptSubmit` hook that writes "armed".
   It is the whole re-arm rule: only a user message starts a new cycle. Tool
-  calls, cache hits, monitor notifications, and the handoff itself never do —
-  the handoff is a request, a request refreshes the cache, and a monitor that
+  calls, cache hits, monitor notifications, and the summary itself never do —
+  the summary is a request, a request refreshes the cache, and a monitor that
   re-armed on a warm cache would ask every hour forever with no user in the
   loop (designed with Codex, 2026-09-10). Claude Code runs `UserPromptSubmit`
   for task and monitor notifications as well as user messages, and the payload
@@ -256,10 +267,15 @@ machine is carrying. Independent checks and advisories fill that in.
   a background process Claude Code arms at session start whose every stdout
   line reaches the model as a notification — which is what wakes an idle
   session. It polls those files with no model calls and, when the session
-  is armed and the deadline is within the lead window, prints one line naming
-  the expiry time and the path to write the handoff to
-  (`~/.claude/scry/handoffs/<repo>/<date>-<session>.md`), then marks the
-  cycle `requested` before printing so a restart cannot ask twice. A deadline
+  is armed and the deadline is within the lead window, prints one line: the
+  expiry time and a request for a summary written as the session's reply in
+  the conversation, not to any file. The summary opens with the full session
+  id and the line "To continue in a new window, say: pick up from session
+  <id>", then covers the objective and latest user direction, decisions and
+  open questions, what was done and verified, what remains and the next step,
+  the working directory and branch, and any still-unfinished workers from the
+  roster below. The cycle is marked `requested` before printing so a restart
+  cannot ask twice. A deadline
   that passes while armed is marked `missed` and said on the *next* user turn
   by the arm hook, never by the monitor: a monitor line wakes the model onto a
   cold cache, which is the exact cost this exists to avoid.
@@ -268,31 +284,43 @@ machine is carrying. Independent checks and advisories fill that in.
   it, so on every poll it works out which session the process is running now:
   Claude Code's `~/.claude/sessions/<pid>.json`, then the arm hook's record,
   the newer of the two, then its own environment only if neither exists. The
-  session a `/clear` left is marked `superseded` and its deadline is never read
-  again, so its handoff is not fired into the new session; the new session is
-  watched from its first user message.
+  session a `/clear` left is marked `superseded` (keeping `requested:<time>`
+  or `armed:<time>`, what it was before) and its deadline is never read again,
+  so its request is not fired into the new session; the new session is watched
+  from its first user message.
 
   *Keep-alive.* A subagent, workflow or background shell that finishes wakes
   the session that started it, and on a cold cache that wake re-reads the
-  whole context. So when the lead window arrives while this session has work
-  that is still writing — an `agent-*.jsonl` under the session, a workflow
-  whose journal has an agent `started` with no `result`, or a `b*.output`
-  shell task with no exit line, each written within
-  `SCRY_KEEPALIVE_FRESH_SECS` — the line asks for one short plain-language
-  status line for the user, built only from the running-work list, and no
-  other action, instead of the handoff. That reply is a
-  cached request, which moves the deadline an hour. One keep-alive per
-  deadline; if the deadline has not moved half a lead later, the handoff is
+  whole context. So when the lead window arrives while this session has
+  unfinished work, the line is a keep-alive instead of the summary request. It
+  carries the roster — every unfinished worker the session started, with what
+  Scry can read deterministically from metadata:
+
+  | Worker | Listed while | Reported as |
+  |---|---|---|
+  | workflow | its journal has an agent `started` with no `result`, however long it has been quiet | `workflow <name> (<id>): <finished> of <started> agents done, last activity <age> ago` — the name from `workflows/scripts/<name>-<id>.js`, else the id alone |
+  | background command | its `b*.output` has no exit or killed marker in the last 64 bytes, however long it has been quiet | `background command <task id>: still running, last output <age> ago` |
+  | subagent | its `agent-*.jsonl` was written within `SCRY_KEEPALIVE_FRESH_SECS` (default 3600, one TTL) | `subagent <id> "<description>": last activity <age> ago` |
+
+  A plain subagent's metadata has nothing that says it finished, so Scry
+  cannot tell a finished one from a quiet one; the one-TTL window is its only
+  bound, and one silent longer than that is left out rather than reported as
+  running. The keep-alive asks the session to post ONE short plain-language
+  status line for the user from that list, and to compare it with its previous
+  status in the conversation: if a worker shows no movement, check on it and
+  handle it as the orchestrator; otherwise take no other action. That reply is
+  a cached request, which moves the deadline an hour. One keep-alive per
+  deadline; if the deadline has not moved half a lead later, the summary is
   requested instead. `SCRY_KEEPALIVE_MAX` per user message and
   `SCRY_KEEPALIVE_MAX_PER_SESSION` in all, counted in `<session>.keepalive`
-  before the line is printed. When nothing is live or a cap is reached, the
-  handoff is requested, and running work is listed with a request for a
-  running-work section.
+  (counts and times only) before the line is printed. When nothing is
+  unfinished, a cap is reached, or a keep-alive did not take, the summary is
+  requested, and any unfinished workers are listed for it to end with.
 
-  Bounded: at most one handoff request per user message, none without one,
+  Bounded: at most one summary request per user message, none without one,
   and at most `SCRY_KEEPALIVE_MAX` keep-alives before it.
-  `SCRY_CACHE_HANDOFF=0` switches it off. It writes the handoff to nothing
-  itself; the session does, with its own context.
+  `SCRY_CACHE_HANDOFF=0` switches it off. It writes the summary nowhere
+  itself; the session does, in its own conversation.
 - **Scale** — `scale_advisory.sh` speaks on first contact with a source file
   that is both large *and* actively worked, whether that contact is a Read or
   an Edit. It reports the file's length, its churn, and — on a Read of a file
@@ -451,8 +479,13 @@ machine is carrying. Independent checks and advisories fill that in.
   under `$TMPDIR/scry-last-cleared/`; the new session's `fleet.sh` reads the
   record for its directory, deletes it, and states five facts: the session
   left (title, id), its transcript path, what resuming it costs (its prompt
-  cache is warm until HH:MM, a full re-read after), whether a handoff was
-  written for it — the path, never the body — and **what it left running**. No
+  cache is warm until HH:MM, a full re-read after), whether a summary was
+  requested for it — from Scry's own state file for that session: if the
+  cache-deadline monitor asked and no user message followed, its last
+  message(s) should hold that summary, so read the end of its transcript
+  first and send a Sonnet subagent to search the transcript if more detail is
+  needed; otherwise no summary was requested and the transcript is the record
+  — and **what it left running**. No
   recipe, no action: the reader decides. If the record is missing the newest
   transcript stands in and is labelled a guess, because with ten sessions open
   that guess is wrong exactly when it matters (council + Matt, 2026-09-10).
@@ -524,7 +557,7 @@ industrialise that problem.
 | Disk | 60% used | ≥90% used, or <20GB free |
 | Sessions in this repo | just you | any other live one |
 | Last session | none recorded | a title exists |
-| Session left by `/clear` | start was not a `/clear` | always: id, title, transcript path, resume cost, handoff path if one exists |
+| Session left by `/clear` | start was not a `/clear` | always: id, title, transcript path, resume cost, whether a summary was requested for it |
 | Session worktree location | never silent | states primary-worktree consequences, or the linked-worktree lock + `ExitWorktree` escape hatch — whichever applies |
 | Session worktree merged | not merged | content already in main |
 | Session worktree drift | up to date | origin/main ahead of fork point |
@@ -730,7 +763,7 @@ scripts, and scanners, so there is no copied implementation to drift.
 
 Three of the hooks ride events Claude Code defines — `SubagentStart`
 (`main_drift_advisory.sh`), `Stop` (`session_disposal_advisory.sh`), and
-`UserPromptSubmit` (`cache_handoff_arm.sh`). The cache-handoff monitor itself
+`UserPromptSubmit` (`cache_handoff_arm.sh`). The cache-deadline monitor itself
 (`monitors/monitors.json`) is a Claude Code plugin component with no Codex
 equivalent as of 2026-09-10, and its status-line adapter reads a payload only
 Claude Code produces; on Codex those two files are inert.
@@ -867,7 +900,7 @@ starts changing a decision.
 | Variable | Default | Controls |
 |---|---|---|
 | `SCRY_FLEET_ACTIVE_MINUTES` | `15` | how recently a session must have written to count as live |
-| `SCRY_TASK_STATE_DIR` | `$TMPDIR/claude-$(id -u)` | where task output files live, read after `/clear` to name the tasks a cleared session left without an exit; absent directory means silence. The cache-handoff monitor also looks in `/tmp/claude-$(id -u)` when this is unset |
+| `SCRY_TASK_STATE_DIR` | `$TMPDIR/claude-$(id -u)` | where task output files live, read after `/clear` to name the tasks a cleared session left without an exit; absent directory means silence. The cache-deadline monitor also looks in `/tmp/claude-$(id -u)` when this is unset |
 | `SCRY_LOAD_PER_CORE_WARN` | `1.5` | load-per-core before "oversubscribed" |
 | `SCRY_SWAP_USED_MB_WARN` | `2048` | swap in use before it's reported |
 | `SCRY_DISK_FREE_GB_WARN` | `20` | free-space floor |
@@ -879,13 +912,12 @@ starts changing a decision.
 | `SCRY_WORKTREE_DU_BUDGET` | `4` | seconds of `du` allowed before the size is reported as a floor |
 | `SCRY_SCRATCH_MD_LIST_MAX` | `5` | scratch `.md` files named in the disposal note before the rest become a count |
 | `SCRY_BRANCH_POINT_FETCH_HOURS` | `2` | age of the last fetch past which a branch-point count is reported as dated |
-| `SCRY_CACHE_HANDOFF_LEAD_SECONDS` | `120` | how long before the prompt cache expires the handoff is requested |
+| `SCRY_CACHE_HANDOFF_LEAD_SECONDS` | `120` | how long before the prompt cache expires the monitor speaks (keep-alive or summary request) |
 | `SCRY_CACHE_HANDOFF_POLL_SECONDS` | `15` | how often the monitor re-reads the deadline (no model calls) |
-| `SCRY_CACHE_HANDOFF_DIR` | `~/.claude/scry/handoffs` | where handoff files are asked to be written |
-| `SCRY_CACHE_HANDOFF` | `1` | `0` disables the cache-handoff monitor entirely |
+| `SCRY_CACHE_HANDOFF` | `1` | `0` disables the cache-deadline monitor entirely |
 | `SCRY_KEEPALIVE_MAX` | `8` | keep-alives per user message while this session's work is running; `0` turns keep-alives off |
 | `SCRY_KEEPALIVE_MAX_PER_SESSION` | `24` | keep-alives per session in all, whatever re-arms |
-| `SCRY_KEEPALIVE_FRESH_SECS` | `1200` | how recently running work must have written to count as live for a keep-alive |
+| `SCRY_KEEPALIVE_FRESH_SECS` | `3600` | how recently a subagent must have written to be listed in the keep-alive roster (one TTL); workflows and background commands are listed until they record a finish, however quiet |
 
 Raising a threshold buys silence. Lowering one buys warning. Neither changes
 what is measured.
@@ -910,9 +942,11 @@ detail, ask for it in-session, so it arrives as something you went and got
 rather than something you were handed as fact.
 The `/clear` case is not an exception to this, only a sharper question —
 *which* session was left — answered by a record the ending session wrote,
-not by content. Even the handoff that session may have written is reported
-as a path; the first cut printed its body, and that was content flowing
-through Scry, so it went (council + Matt, 2026-09-10).
+not by content. Even the summary that session may have written is never
+read: Scry says a summary was requested and where to look, from its own state
+file. The first cut printed a handoff file's body, and that was content
+flowing through Scry, so it went (council + Matt, 2026-09-10); since 1.31.0
+there is no file at all (Matt, 2026-09-13).
 
 **Merged means content, not commits.** Whether a branch is merged is decided by
 ancestry *and* patch-id equivalence, so a squash or rebase merge — which
