@@ -3308,6 +3308,8 @@ class CacheHandoffTests(unittest.TestCase):
             self.assertIn("keep-alive", first.stdout)
             self.assertIn('subagent a1b2c3 "build:opus"', first.stdout)
             self.assertIn("no tool calls", first.stdout)
+            self.assertIn("one short plain-language status line for the user", first.stdout)
+            self.assertIn("running-work list", first.stdout)
             self.assertNotIn("SECRET", first.stdout)
             self.assertEqual(first.stdout.count("\n"), 1)
             self.assertEqual(self._state(td)[0], "armed")
