@@ -289,6 +289,20 @@ machine is carrying. Independent checks and advisories fill that in.
   handoff is requested, and running work is listed with a request for a
   running-work section.
 
+  *No progress since the last check.* The keep-alive is also what the user and
+  the session see of running work, so Scry compares it with the previous one.
+  Each item gets a fingerprint from metadata only — a workflow's finished and
+  started agent counts, a subagent transcript's size, a shell task output's
+  size — stored in `<session>.keepalive` in the same write as the count. At the
+  next keep-alive for a later deadline, an item whose fingerprint has not
+  changed is marked "no progress since the last check about N min ago — worth
+  a look", and the status line for the user must carry that mark. Scry makes
+  the call; the session only relays it and still takes no action. A stuck item
+  still counts as live, and the caps are unchanged. A handoff that follows a
+  keep-alive carries the same marks in its running-work section. The first
+  keep-alive of a session, and every keep-alive of a session a `/clear`
+  started, has nothing to compare against and marks nothing.
+
   Bounded: at most one handoff request per user message, none without one,
   and at most `SCRY_KEEPALIVE_MAX` keep-alives before it.
   `SCRY_CACHE_HANDOFF=0` switches it off. It writes the handoff to nothing

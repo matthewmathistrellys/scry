@@ -3416,6 +3416,141 @@ class CacheHandoffTests(unittest.TestCase):
             said = self._monitor(td).stdout
             self.assertIn("did not refresh the cache", said)
             self.assertEqual(self._state(td)[0], "requested")
+            # Compared with a keep-alive for this same deadline, nothing is
+            # "stuck": that is a minute of no progress, not a finding.
+            self.assertNotIn("worth a look", said)
+
+    # ---- no progress since the last keep-alive (Matt, 2026-09-13)
+
+    FLAG = "no progress since the last check about"
+
+    def _next_window(self, td, **extra):
+        """The ack refreshed the deadline; an hour later the next lead window
+        arrives. The stored check is backdated so its age reads as time."""
+        time.sleep(1.1)
+        self._statusline(td, 3500)
+        ka_path = Path(td) / "state" / f"{self.SID}.keepalive"
+        ka = json.loads(ka_path.read_text())
+        ka["sent_at"] -= 3000
+        ka_path.write_text(json.dumps(ka))
+        self._statusline(td, 90)
+        return self._monitor(td, **extra).stdout
+
+    def test_the_first_keep_alive_marks_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._shell_task(td, "compiling\n")
+            self._armed_near_expiry(td)
+            said = self._monitor(td).stdout
+            self.assertIn("background shell bq7shell1", said)
+            self.assertNotIn("worth a look", said)
+
+    def test_an_unchanged_fingerprint_is_marked_worth_a_look(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = self._shell_task(td, "compiling\n")
+            self._subagent(td)
+            self._armed_near_expiry(td)
+            self.assertNotIn("worth a look", self._monitor(td).stdout)
+            # Same sizes, still fresh: neither moved.
+            self._shell_task(td, "compiling\n")
+            self._subagent(td)
+            said = self._next_window(td)
+            self.assertIn("Keep-alive 2 of", said)
+            self.assertIn(f"output {out} — {self.FLAG} 50 min ago — worth a look", said)
+            self.assertIn(f"agent-a1b2c3.jsonl — {self.FLAG} 50 min ago — worth a look", said)
+            self.assertIn("the status line must say so", said)
+            self.assertIn("do not investigate it yourself", said)
+            self.assertIn("no tool calls", said)
+            self.assertEqual(said.count("\n"), 1)
+            self.assertEqual(self._state(td)[0], "armed")  # still live, still kept warm
+
+    def test_a_changed_fingerprint_is_not_marked(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._shell_task(td, "compiling\n")
+            self._armed_near_expiry(td)
+            self._monitor(td)
+            self._shell_task(td, "compiling\nlinking\n")  # grew
+            said = self._next_window(td)
+            self.assertIn("Keep-alive 2 of", said)
+            self.assertNotIn("worth a look", said)
+            self.assertNotIn("the status line must say so", said)
+
+    def test_a_workflow_is_fingerprinted_by_its_counts(self):
+        with tempfile.TemporaryDirectory() as td:
+            wf = self._session_dir(td) / "subagents" / "workflows" / "wf_abc-123"
+            wf.mkdir(parents=True)
+            journal = wf / "journal.jsonl"
+            journal.write_text(
+                '{"type":"started","key":"v2:k1","agentId":"a1","label":"build"}\n'
+                '{"type":"started","key":"v2:k2","agentId":"a2","label":"review"}\n')
+            (wf / "agent-a1.jsonl").write_text("{}\n")
+            self._armed_near_expiry(td)
+            self._monitor(td)
+            # A transcript grew but no agent finished: the counts are the
+            # fingerprint, so this is no progress.
+            (wf / "agent-a1.jsonl").write_text("{}\n{}\n")
+            said = self._next_window(td)
+            self.assertIn("0 of 2 agents finished", said)
+            self.assertIn("worth a look", said)
+            # One finishes: progress, no mark.
+            with journal.open("a") as f:
+                f.write('{"type":"result","key":"v2:k1","agentId":"a1","result":"SECRET"}\n')
+            (wf / "agent-a2.jsonl").write_text("{}\n")
+            said = self._next_window(td)
+            self.assertIn("1 of 2 agents finished", said)
+            self.assertNotIn("worth a look", said)
+            self.assertNotIn("SECRET", said)
+
+    def test_fingerprints_are_stored_before_the_line_is_printed(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = self._shell_task(td, "compiling\n")
+            self._subagent(td)
+            self._armed_near_expiry(td)
+            self._monitor(td)
+            ka = json.loads((Path(td) / "state" / f"{self.SID}.keepalive").read_text())
+            self.assertEqual(ka["progress"], {
+                "shell:bq7shell1": ["bq7shell1", out.stat().st_size],
+                "subagent:a1b2c3": ["a1b2c3", (self._session_dir(td) / "subagents" / "agent-a1b2c3.jsonl").stat().st_size],
+            })
+            self.assertNotIn("SECRET", json.dumps(ka))
+        with tempfile.TemporaryDirectory() as td:
+            # The count and the fingerprints are one write; when it cannot
+            # land, nothing is printed.
+            self._shell_task(td, "compiling\n")
+            self._armed_near_expiry(td)
+            (Path(td) / "state" / f"{self.SID}.keepalive").mkdir()
+            self.assertEqual(self._monitor(td).stdout, "")
+
+    def test_a_handoff_after_a_keep_alive_carries_the_mark(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._shell_task(td, "compiling\n")
+            cap = {"SCRY_KEEPALIVE_MAX": "1"}
+            self._armed_near_expiry(td)
+            self.assertIn("keep-alive", self._monitor(td, **cap).stdout)
+            self._shell_task(td, "compiling\n")
+            said = self._next_window(td, **cap)
+            self.assertIn("goes cold", said)
+            self.assertIn("running-work section", said)
+            self.assertIn(f"{self.FLAG} 50 min ago — worth a look", said)
+            self.assertIn('Carry each "worth a look" mark into that section', said)
+            self.assertEqual(self._state(td)[0], "requested")
+
+    def test_a_new_session_starts_with_no_stored_fingerprints(self):
+        new = "sess-cache-0004"
+        with tempfile.TemporaryDirectory() as td:
+            # A shell task filed under the launch session is live for both.
+            self._shell_task(td, "compiling\n")
+            self._armed_near_expiry(td)
+            self.assertIn("keep-alive", self._monitor(td).stdout)
+            self._sessions_file(td, new, when=time.time() + 5)  # /clear
+            self.assertEqual(self._monitor(td).stdout, "")
+            self.assertEqual(self._state(td)[0], "superseded")
+            self._armed_near_expiry(td, sid=new)
+            self._sessions_file(td, new, when=time.time() + 5)
+            self._shell_task(td, "compiling\n")
+            said = self._monitor(td).stdout
+            self.assertIn("Keep-alive 1 of", said)
+            self.assertIn("background shell bq7shell1", said)
+            self.assertNotIn("worth a look", said)
 
 
 class StatuslineTests(unittest.TestCase):

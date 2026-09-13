@@ -93,6 +93,18 @@
 #               <session>.keepalive BEFORE the line is printed.
 #   verified    one keep-alive per deadline. If the deadline has not moved
 #               half a lead later, the ack did not happen: ask for the handoff.
+#   stuck       (Matt, 2026-09-13: "if the status hasn't changed since the
+#               last update then it's worth looking into".) Each live item has
+#               a key and a fingerprint from metadata alone — a workflow's
+#               finished and started counts, a subagent transcript's size, a
+#               shell task output's size. They are stored in <session>.keepalive
+#               in the same write as the count. At the next keep-alive for a
+#               later deadline, an item whose fingerprint is unchanged is marked
+#               "no progress since the last check about N min ago — worth a
+#               look", and the status line must carry that mark. Scry decides;
+#               the model only relays, and still takes no action. A stuck item
+#               is still live. A handoff that follows a keep-alive carries the
+#               same marks. A new session has its own file, so nothing to compare.
 #
 # When nothing is live, a cap is reached, or a keep-alive did not take, the
 # handoff is requested as before, and when work is running it names that work
@@ -307,17 +319,19 @@ def label(text):
     return text[:60]
 
 def live_work():
-    """What this session has running, newest-write first, as roster lines.
-    File names, times and metadata labels only."""
+    """What this session has running, newest-write first, as
+    (key, fingerprint, roster line). File names, sizes, times, counts and
+    metadata labels only — a fingerprint never reads content."""
     items = []
     fresh_after = now - fresh
     for sdir in glob.glob(os.path.join(glob.escape(projects), "*", glob.escape(sid))):
         sub = os.path.join(sdir, "subagents")
         for j in glob.glob(os.path.join(sub, "agent-*.jsonl")):
             try:
-                m = os.path.getmtime(j)
+                st = os.stat(j)
             except OSError:
                 continue
+            m = st.st_mtime
             if m < fresh_after:
                 continue
             aid = os.path.basename(j)[len("agent-"):-len(".jsonl")]
@@ -329,7 +343,8 @@ def live_work():
             except Exception:
                 pass
             named = f' "{desc}"' if desc else ""
-            items.append((m, f"subagent {aid}{named} — last write {age(m)} ago; transcript {j}"))
+            items.append((m, f"subagent:{aid}", [aid, st.st_size],
+                          f"subagent {aid}{named} — last write {age(m)} ago; transcript {j}"))
         for wdir in glob.glob(os.path.join(sub, "workflows", "wf_*")):
             started, finished = {}, set()
             try:
@@ -360,7 +375,8 @@ def live_work():
             wid = os.path.basename(wdir)
             names = ", ".join(r for r in running if r)
             names = f", running: {names}" if names else ""
-            items.append((m, f"workflow {wid} — {len(finished)} of {len(started)} agents "
+            items.append((m, f"workflow:{wid}", [wid, len(finished), len(started)],
+                          f"workflow {wid} — {len(finished)} of {len(started)} agents "
                              f"finished{names}; last write {age(m)} ago; result "
                              f"{os.path.join(sdir, 'workflows', wid + '.json')}"))
     seen = set()
@@ -374,7 +390,8 @@ def live_work():
                     continue
                 seen.add(real)
                 try:
-                    m = os.path.getmtime(out)
+                    st = os.stat(out)
+                    m = st.st_mtime
                     if m < fresh_after:
                         continue
                     with open(out, "rb") as fh:
@@ -386,11 +403,33 @@ def live_work():
                 if b"[exited with code" in tail or b"[killed]" in tail:
                     continue
                 tid = os.path.basename(out)[:-len(".output")]
-                items.append((m, f"background shell {tid} — last output {age(m)} ago; output {out}"))
+                items.append((m, f"shell:{tid}", [tid, st.st_size],
+                              f"background shell {tid} — last output {age(m)} ago; output {out}"))
     items.sort(key=lambda x: -x[0])
-    return [text for _, text in items]
+    return [(key, fp, text) for _, key, fp, text in items]
 
-roster = live_work()
+work = live_work()
+progress = {key: fp for key, fp, _ in work}
+
+# ---- no progress since the last keep-alive (Matt, 2026-09-13) --------------
+# The keep-alive is also the user's and the model's view of running work, so
+# an item whose fingerprint is identical to the one stored at the last
+# keep-alive says so. Compared only against a keep-alive for an EARLIER
+# deadline: one sent for this same deadline did not take (the handoff below),
+# and "no progress in the last minute" is noise, not a finding.
+prev = ka.get("progress")
+prev_at = int(ka.get("sent_at") or 0)
+prev_expires = ka.get("sent_expires")
+compare = (isinstance(prev, dict) and prev_at > 0
+           and isinstance(prev_expires, int) and expires > prev_expires)
+stuck_mins = max(1, round((now - prev_at) / 60))
+roster, stuck = [], 0
+for key, fp, text in work:
+    if compare and prev.get(key) == fp:
+        text += (f" — no progress since the last check about {stuck_mins} min "
+                 "ago — worth a look")
+        stuck += 1
+    roster.append(text)
 listed = "; ".join(roster[:8]) + (f"; and {len(roster) - 8} more" if len(roster) > 8 else "")
 ka_max = int(os.environ["SCRY_KA_MAX"])
 ka_session_max = int(os.environ["SCRY_KA_SESSION_MAX"])
@@ -408,10 +447,15 @@ if roster and not why_not:
     try:
         atomic_write(ka_path, json.dumps({
             "armed_at": since, "cycle": cycle + 1, "total": total + 1,
-            "sent_at": now, "sent_expires": expires,
+            "sent_at": now, "sent_expires": expires, "progress": progress,
         }))
     except Exception:
         sys.exit(0)
+    flag_note = (
+        " Anything marked \"worth a look\" above has shown no progress since the "
+        "last keep-alive: the status line must say so, naming it, so the user "
+        "can decide — do not investigate it yourself." if stuck else ""
+    )
     print(
         "Scry — cache keep-alive (this is a Scry monitor notification, not a user "
         f"message): this session's prompt cache goes cold at {at}, in about "
@@ -422,7 +466,7 @@ if roster and not why_not:
         "running-work list above (e.g. \"Piece 2: 5 of 8 helpers done; build and "
         "review still running\") — and nothing else: no tool calls, no checking "
         "on the work, no other action. The running work reports back by itself; "
-        "this reply is only what keeps the cache warm for it. "
+        f"this reply is only what keeps the cache warm for it.{flag_note} "
         f"Keep-alive {cycle + 1} of at most {ka_max} for this user message."
     )
     sys.exit(0)
@@ -447,6 +491,8 @@ if roster:
         "naming each of those — what it is, how far it got, and where its "
         "result lands — so whoever picks this up collects it rather than "
         "starting it again."
+        + (" Carry each \"worth a look\" mark into that section: that item "
+           "showed no progress since the last keep-alive." if stuck else "")
     )
 print(
     "Scry — cache deadline (this is a Scry monitor notification, not a user "
