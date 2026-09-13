@@ -155,7 +155,7 @@ class ScryHookTests(unittest.TestCase):
             for group in hooks["hooks"]["SessionStart"]
             for item in group["hooks"]
         ]
-        self.assertEqual(len(commands), 6)
+        self.assertEqual(len(commands), 7)
         self.assertTrue(all("PLUGIN_ROOT" in command for command in commands))
         self.assertTrue(all("CLAUDE_PLUGIN_ROOT" in command for command in commands))
         entry = marketplace["plugins"][0]
@@ -2981,12 +2981,20 @@ class CacheHandoffTests(unittest.TestCase):
     """
 
     SID = "sess-cache-0001"
+    PID = "424242"
 
     def _env(self, td, **extra):
+        # Every Claude Code location the monitor reads is pointed into the
+        # temp dir: these tests run inside real sessions, whose own
+        # CLAUDE_PID and ~/.claude would otherwise answer "which session".
         env = {
             "SCRY_CACHE_STATE_DIR": str(Path(td) / "state"),
             "SCRY_CACHE_HANDOFF_DIR": str(Path(td) / "handoffs"),
             "CLAUDE_CODE_SESSION_ID": self.SID,
+            "CLAUDE_PID": self.PID,
+            "SCRY_CLAUDE_SESSIONS_DIR": str(Path(td) / "sessions"),
+            "SCRY_CLAUDE_PROJECTS_DIR": str(Path(td) / "projects"),
+            "SCRY_TASK_STATE_DIR": str(Path(td) / "tasks"),
             "SCRY_CACHE_HANDOFF_ONCE": "1",
         }
         env.update(extra)
@@ -3010,9 +3018,10 @@ class CacheHandoffTests(unittest.TestCase):
         }
         return run_hook("cache_deadline_statusline.sh", td, payload, env=env)
 
-    def _arm(self, td):
+    def _arm(self, td, sid=None, prompt="SECRET PROMPT TEXT", event="UserPromptSubmit"):
         return run_hook("cache_handoff_arm.sh", td,
-                        {"session_id": self.SID, "prompt": "SECRET PROMPT TEXT"},
+                        {"session_id": sid or self.SID, "prompt": prompt,
+                         "hook_event_name": event},
                         env=self._env(td))
 
     def _monitor(self, td, **extra):
@@ -3022,9 +3031,41 @@ class CacheHandoffTests(unittest.TestCase):
             env={**os.environ, **self._env(td, **extra)},
         )
 
-    def _state(self, td):
-        p = Path(td) / "state" / f"{self.SID}.state"
+    def _state(self, td, sid=None):
+        p = Path(td) / "state" / f"{sid or self.SID}.state"
         return p.read_text().split() if p.exists() else []
+
+    def _armed_near_expiry(self, td, sid=None):
+        """A user message, then the status line reporting a warm cache that
+        goes cold in 90 s — inside the default two-minute lead."""
+        self._arm(td, sid=sid)
+        time.sleep(1.1)  # the deadline must be observed after arming
+        self._statusline(td, 90, sid=sid)
+
+    def _session_dir(self, td, sid=None):
+        d = Path(td) / "projects" / "-Users-someone-repo" / (sid or self.SID)
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _subagent(self, td, age=0, description="build:opus"):
+        sub = self._session_dir(td) / "subagents"
+        sub.mkdir(parents=True, exist_ok=True)
+        j = sub / "agent-a1b2c3.jsonl"
+        j.write_text('{"type":"assistant","message":"SECRET AGENT TEXT"}\n')
+        (sub / "agent-a1b2c3.meta.json").write_text(json.dumps(
+            {"agentType": "general-purpose", "description": description}))
+        t = time.time() - age
+        os.utime(j, (t, t))
+        return j
+
+    def _shell_task(self, td, text, age=0, sid=None):
+        d = Path(td) / "tasks" / "-Users-someone-repo" / (sid or self.SID) / "tasks"
+        d.mkdir(parents=True, exist_ok=True)
+        out = d / "bq7shell1.output"
+        out.write_text(text)
+        t = time.time() - age
+        os.utime(out, (t, t))
+        return out
 
     def test_the_status_line_records_the_deadline_and_nothing_else(self):
         with tempfile.TemporaryDirectory() as td:
@@ -3085,8 +3126,9 @@ class CacheHandoffTests(unittest.TestCase):
             r = self._arm(td)
             self.assertEqual(r.stdout, "")
             self.assertEqual(self._state(td)[0], "armed")
-            for p in (Path(td) / "state").iterdir():
-                self.assertNotIn("SECRET", p.read_text())
+            for p in (Path(td) / "state").rglob("*"):
+                if p.is_file():
+                    self.assertNotIn("SECRET", p.read_text())
 
     def test_it_asks_once_inside_the_lead_window_and_never_again(self):
         with tempfile.TemporaryDirectory() as td:
@@ -3176,6 +3218,202 @@ class CacheHandoffTests(unittest.TestCase):
             self.assertEqual(self._monitor(td, SCRY_CACHE_HANDOFF="0").stdout, "")
             self.assertEqual(self._state(td)[0], "armed")
             self.assertIn("unavailable", self._monitor(td, CLAUDE_CODE_SESSION_ID="").stdout)
+
+    # ---- which session: /clear inside a process whose monitor never restarts
+
+    def _sessions_file(self, td, sid, when=None):
+        d = Path(td) / "sessions"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f"{self.PID}.json"
+        p.write_text(json.dumps({"pid": int(self.PID), "sessionId": sid, "status": "idle"}))
+        t = when or time.time()
+        os.utime(p, (t, t))
+
+    def test_the_monitor_follows_the_session_a_clear_starts(self):
+        # 60ef841d cleared into b1746f6b (2026-09-11): the old id's warm
+        # deadline must not fire into the new session, and the new session
+        # must be watched once a user message arms it.
+        new = "sess-cache-0002"
+        with tempfile.TemporaryDirectory() as td:
+            self._armed_near_expiry(td)  # the launch session, about to fire
+            self._sessions_file(td, new, when=time.time() + 5)  # /clear
+            self.assertEqual(self._monitor(td).stdout, "")
+            self.assertEqual(self._state(td)[0], "superseded")
+            self.assertEqual(self._state(td, new), [])  # not armed by the clear
+            self.assertEqual(self._monitor(td).stdout, "")  # and said nothing, twice
+            self._armed_near_expiry(td, sid=new)
+            self._sessions_file(td, new, when=time.time() + 5)
+            first = self._monitor(td)
+            self.assertIn("goes cold", first.stdout)
+            self.assertIn(new[:8] + ".md", first.stdout)
+            self.assertEqual(self._state(td, new)[0], "requested")
+            self.assertEqual(self._state(td)[0], "superseded")
+            self.assertEqual(self._monitor(td).stdout, "")
+
+    def test_the_hook_record_alone_is_enough_to_follow_the_session(self):
+        # Claude Code's sessions file is internal; the arm hook's own
+        # pid -> session record covers a release that drops or renames it.
+        new = "sess-cache-0003"
+        with tempfile.TemporaryDirectory() as td:
+            self._armed_near_expiry(td)
+            run_hook("cache_handoff_arm.sh", td,
+                     {"session_id": new, "hook_event_name": "SessionStart", "source": "clear"},
+                     env=self._env(td))
+            self.assertEqual((Path(td) / "state" / "pid" / self.PID).read_text().split()[0], new)
+            self.assertEqual(self._state(td, new), [])  # a start never arms
+            self.assertEqual(self._monitor(td).stdout, "")
+            self.assertEqual(self._state(td)[0], "superseded")
+            self._armed_near_expiry(td, sid=new)
+            self.assertIn(new[:8] + ".md", self._monitor(td).stdout)
+
+    def test_without_any_record_it_watches_the_environment_session(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._arm(td)
+            (Path(td) / "state" / "pid" / self.PID).unlink()
+            time.sleep(1.1)
+            self._statusline(td, 90)
+            self.assertIn(self.SID[:8] + ".md", self._monitor(td).stdout)
+
+    # ---- only a user message arms
+
+    def test_a_notification_does_not_arm_or_rearm(self):
+        # b1746f6b read "armed" the second a workflow completion arrived
+        # (2026-09-13), and 62aa5e9f was asked for a handoff every hour
+        # because each request re-armed the next.
+        with tempfile.TemporaryDirectory() as td:
+            for prompt in ("<task-notification>\n<task-id>wabc</task-id> SECRET",
+                           "Another Claude session sent a message: SECRET"):
+                with self.subTest(prompt=prompt[:20]):
+                    self.assertEqual(self._arm(td, prompt=prompt).stdout, "")
+                    self.assertEqual(self._state(td), [])
+            self._armed_near_expiry(td)
+            self.assertIn("goes cold", self._monitor(td).stdout)
+            # Scry's own request comes back through UserPromptSubmit.
+            self._arm(td, prompt="<task-notification>\n<summary>Monitor event</summary>")
+            self.assertEqual(self._state(td)[0], "requested")
+            time.sleep(1.1)
+            self._statusline(td, 90)
+            self.assertEqual(self._monitor(td).stdout, "")
+            for p in (Path(td) / "state").rglob("*"):
+                if p.is_file():
+                    self.assertNotIn("SECRET", p.read_text())
+
+    # ---- keep-alive while this session's work is running
+
+    def test_fresh_running_work_gets_a_keep_alive_not_a_handoff(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._subagent(td)
+            self._armed_near_expiry(td)
+            first = self._monitor(td)
+            self.assertIn("keep-alive", first.stdout)
+            self.assertIn('subagent a1b2c3 "build:opus"', first.stdout)
+            self.assertIn("no tool calls", first.stdout)
+            self.assertNotIn("SECRET", first.stdout)
+            self.assertEqual(first.stdout.count("\n"), 1)
+            self.assertEqual(self._state(td)[0], "armed")
+            # Once per deadline: nothing more while its ack lands.
+            self.assertEqual(self._monitor(td).stdout, "")
+            # The ack is a request; the deadline moves; the next window
+            # gets the next keep-alive.
+            time.sleep(1.1)
+            self._statusline(td, 3500)
+            self.assertEqual(self._monitor(td).stdout, "")
+            self._statusline(td, 90)
+            self.assertIn("Keep-alive 2 of", self._monitor(td).stdout)
+
+    def test_stale_work_is_not_live_and_gets_the_plain_handoff(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._subagent(td, age=1300)  # past the 20-minute default
+            self._shell_task(td, "compiling\n", age=1300)
+            self._armed_near_expiry(td)
+            out = self._monitor(td).stdout
+            self.assertIn("goes cold", out)
+            self.assertNotIn("keep-alive", out)
+            self.assertNotIn("running-work", out)
+            self.assertEqual(self._state(td)[0], "requested")
+            self.assertIn(self.SID[:8] + ".md", self._state(td)[2])
+
+    def test_a_shell_task_is_live_until_it_records_an_exit(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = self._shell_task(td, "SECRET OUTPUT\n[exited with code 0]\n")
+            self._armed_near_expiry(td)
+            self.assertNotIn("keep-alive", self._monitor(td).stdout)
+        with tempfile.TemporaryDirectory() as td:
+            out = self._shell_task(td, "SECRET OUTPUT still going\n")
+            self._armed_near_expiry(td)
+            said = self._monitor(td).stdout
+            self.assertIn(f"background shell bq7shell1", said)
+            self.assertIn(str(out), said)
+            self.assertNotIn("SECRET", said)
+
+    def test_a_workflow_is_live_while_an_agent_has_no_result(self):
+        with tempfile.TemporaryDirectory() as td:
+            wf = self._session_dir(td) / "subagents" / "workflows" / "wf_abc-123"
+            wf.mkdir(parents=True)
+            (wf / "journal.jsonl").write_text(
+                '{"type":"launched"}\n'
+                '{"type":"started","key":"v2:k1","agentId":"a1","label":"spike:facts","phase":"Spike"}\n'
+                '{"type":"result","key":"v2:k1","agentId":"a1","result":"SECRET RESULT"}\n'
+                '{"type":"started","key":"v2:k2","agentId":"a2","label":"build:opus","phase":"Build"}\n')
+            (wf / "agent-a2.jsonl").write_text("{}\n")
+            self._armed_near_expiry(td)
+            said = self._monitor(td).stdout
+            self.assertIn("workflow wf_abc-123 — 1 of 2 agents finished, running: build:opus", said)
+            self.assertIn("workflows/wf_abc-123.json", said)
+            self.assertNotIn("SECRET", said)
+        with tempfile.TemporaryDirectory() as td:
+            wf = self._session_dir(td) / "subagents" / "workflows" / "wf_done"
+            wf.mkdir(parents=True)
+            (wf / "journal.jsonl").write_text(
+                '{"type":"started","key":"v2:k1","agentId":"a1","label":"x"}\n'
+                '{"type":"result","key":"v2:k1","agentId":"a1","result":"r"}\n')
+            (wf / "agent-a1.jsonl").write_text("{}\n")
+            self._armed_near_expiry(td)
+            self.assertNotIn("keep-alive", self._monitor(td).stdout)
+
+    def test_the_cap_ends_keep_alives_with_a_handoff_that_names_the_work(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._subagent(td)
+            self._armed_near_expiry(td)
+            self.assertIn("keep-alive", self._monitor(td, SCRY_KEEPALIVE_MAX="1").stdout)
+            time.sleep(1.1)
+            self._statusline(td, 90)
+            said = self._monitor(td, SCRY_KEEPALIVE_MAX="1").stdout
+            self.assertIn("goes cold", said)
+            self.assertIn("allowed per user message are spent", said)
+            self.assertIn("running-work section", said)
+            self.assertIn('subagent a1b2c3 "build:opus"', said)
+            self.assertEqual(self._state(td)[0], "requested")
+            self.assertEqual(self._monitor(td, SCRY_KEEPALIVE_MAX="1").stdout, "")
+
+    def test_a_new_user_message_resets_the_message_cap_but_not_the_session_cap(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._subagent(td)
+            cap = {"SCRY_KEEPALIVE_MAX": "1", "SCRY_KEEPALIVE_MAX_PER_SESSION": "2"}
+            for n in (1, 2):
+                self._armed_near_expiry(td)
+                self._subagent(td)
+                self.assertIn("Keep-alive 1 of at most 1", self._monitor(td, **cap).stdout)
+                time.sleep(1.1)
+            self._armed_near_expiry(td)
+            said = self._monitor(td, **cap).stdout
+            self.assertIn("allowed per session are spent", said)
+            self.assertEqual(self._state(td)[0], "requested")
+
+    def test_a_keep_alive_that_does_not_move_the_deadline_falls_back_to_the_handoff(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._subagent(td)
+            self._armed_near_expiry(td)
+            self.assertIn("keep-alive", self._monitor(td).stdout)
+            # Half the lead passes and the status line still reports the
+            # same expiry: the ack did not happen.
+            ka_path = Path(td) / "state" / f"{self.SID}.keepalive"
+            ka = json.loads(ka_path.read_text())
+            ka["sent_at"] -= 100
+            ka_path.write_text(json.dumps(ka))
+            said = self._monitor(td).stdout
+            self.assertIn("did not refresh the cache", said)
+            self.assertEqual(self._state(td)[0], "requested")
 
 
 class StatuslineTests(unittest.TestCase):

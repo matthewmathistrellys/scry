@@ -242,13 +242,20 @@ machine is carrying. Independent checks and advisories fill that in.
   calls, cache hits, monitor notifications, and the handoff itself never do —
   the handoff is a request, a request refreshes the cache, and a monitor that
   re-armed on a warm cache would ask every hour forever with no user in the
-  loop (designed with Codex, 2026-09-10). It reads `session_id` and nothing
-  else from the payload.
+  loop (designed with Codex, 2026-09-10). Claude Code runs `UserPromptSubmit`
+  for task and monitor notifications as well as user messages, and the payload
+  has no field that tells them apart (binary 2.1.270, 2026-09-13), so the hook
+  compares the opening of `prompt` against two fixed prefixes —
+  `<task-notification>` and `Another Claude session sent a message:` — and a
+  match does not arm. That comparison is the only place Scry looks at any part
+  of a prompt; nothing of it is stored or printed. The same hook, on
+  `SessionStart` and every `UserPromptSubmit`, records which session this
+  Claude process is running (`pid/<CLAUDE_PID>`).
 
   *`cache_handoff_monitor.sh`* is a plugin monitor (`monitors/monitors.json`):
   a background process Claude Code arms at session start whose every stdout
   line reaches the model as a notification — which is what wakes an idle
-  session. It polls the two files with no model calls and, when the session
+  session. It polls those files with no model calls and, when the session
   is armed and the deadline is within the lead window, prints one line naming
   the expiry time and the path to write the handoff to
   (`~/.claude/scry/handoffs/<repo>/<date>-<session>.md`), then marks the
@@ -257,7 +264,32 @@ machine is carrying. Independent checks and advisories fill that in.
   by the arm hook, never by the monitor: a monitor line wakes the model onto a
   cold cache, which is the exact cost this exists to avoid.
 
-  Bounded: at most one request per user message, none without one.
+  The monitor is started once per Claude process and `/clear` does not restart
+  it, so on every poll it works out which session the process is running now:
+  Claude Code's `~/.claude/sessions/<pid>.json`, then the arm hook's record,
+  the newer of the two, then its own environment only if neither exists. The
+  session a `/clear` left is marked `superseded` and its deadline is never read
+  again, so its handoff is not fired into the new session; the new session is
+  watched from its first user message.
+
+  *Keep-alive.* A subagent, workflow or background shell that finishes wakes
+  the session that started it, and on a cold cache that wake re-reads the
+  whole context. So when the lead window arrives while this session has work
+  that is still writing — an `agent-*.jsonl` under the session, a workflow
+  whose journal has an agent `started` with no `result`, or a `b*.output`
+  shell task with no exit line, each written within
+  `SCRY_KEEPALIVE_FRESH_SECS` — the line asks for a one-line acknowledgement
+  and no action instead of the handoff, and names the work. That reply is a
+  cached request, which moves the deadline an hour. One keep-alive per
+  deadline; if the deadline has not moved half a lead later, the handoff is
+  requested instead. `SCRY_KEEPALIVE_MAX` per user message and
+  `SCRY_KEEPALIVE_MAX_PER_SESSION` in all, counted in `<session>.keepalive`
+  before the line is printed. When nothing is live or a cap is reached, the
+  handoff is requested, and running work is listed with a request for a
+  running-work section.
+
+  Bounded: at most one handoff request per user message, none without one,
+  and at most `SCRY_KEEPALIVE_MAX` keep-alives before it.
   `SCRY_CACHE_HANDOFF=0` switches it off. It writes the handoff to nothing
   itself; the session does, with its own context.
 - **Scale** — `scale_advisory.sh` speaks on first contact with a source file
@@ -834,7 +866,7 @@ starts changing a decision.
 | Variable | Default | Controls |
 |---|---|---|
 | `SCRY_FLEET_ACTIVE_MINUTES` | `15` | how recently a session must have written to count as live |
-| `SCRY_TASK_STATE_DIR` | `$TMPDIR/claude-$(id -u)` | where task output files live, read after `/clear` to name the tasks a cleared session left without an exit; absent directory means silence |
+| `SCRY_TASK_STATE_DIR` | `$TMPDIR/claude-$(id -u)` | where task output files live, read after `/clear` to name the tasks a cleared session left without an exit; absent directory means silence. The cache-handoff monitor also looks in `/tmp/claude-$(id -u)` when this is unset |
 | `SCRY_LOAD_PER_CORE_WARN` | `1.5` | load-per-core before "oversubscribed" |
 | `SCRY_SWAP_USED_MB_WARN` | `2048` | swap in use before it's reported |
 | `SCRY_DISK_FREE_GB_WARN` | `20` | free-space floor |
@@ -850,6 +882,9 @@ starts changing a decision.
 | `SCRY_CACHE_HANDOFF_POLL_SECONDS` | `15` | how often the monitor re-reads the deadline (no model calls) |
 | `SCRY_CACHE_HANDOFF_DIR` | `~/.claude/scry/handoffs` | where handoff files are asked to be written |
 | `SCRY_CACHE_HANDOFF` | `1` | `0` disables the cache-handoff monitor entirely |
+| `SCRY_KEEPALIVE_MAX` | `8` | keep-alives per user message while this session's work is running; `0` turns keep-alives off |
+| `SCRY_KEEPALIVE_MAX_PER_SESSION` | `24` | keep-alives per session in all, whatever re-arms |
+| `SCRY_KEEPALIVE_FRESH_SECS` | `1200` | how recently running work must have written to count as live for a keep-alive |
 
 Raising a threshold buys silence. Lowering one buys warning. Neither changes
 what is measured.
