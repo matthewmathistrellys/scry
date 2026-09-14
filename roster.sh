@@ -6,5 +6,5 @@
 # a hook payload on stdin. Prints plain lines; exits 0 always.
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-python3 "$here/roster.py" 2>/dev/null
+python3 "$here/roster.py" </dev/null 2>/dev/null
 exit 0

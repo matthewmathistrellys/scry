@@ -3634,12 +3634,21 @@ class RosterTests(unittest.TestCase):
         "'\"/Users/x/.claude/plugins/cache/scry/scry/1.29.0\"/cache_handoff_monitor.sh' < /dev/null",
         "  424244 424243 Sun Sep 13 11:31:51 2026 bash /Users/x/.claude/plugins/cache/scry/scry/1.29.0/cache_handoff_monitor.sh",
         "  424245 424242 Sun Sep 13 11:31:50 2026 node /Users/x/.hindsight/mcp-server.js",
+        # A hook running under the same process, from the plugin cache: not a monitor.
+        "  424246 424242 Sun Sep 13 11:31:52 2026 bash /Users/x/.claude/plugins/cache/scry/scry/1.29.0/fleet.sh",
+        "  424247 424242 Sun Sep 13 11:31:52 2026 python3 /Users/x/.claude/plugins/cache/guard/security/2.0.8/hooks/reminder.py",
         "  999999 999998 Sun Sep 13 11:31:51 2026 bash /Users/x/.claude/plugins/cache/scry/scry/1.31.0/cache_handoff_monitor.sh",
     ])
 
     def _env(self, td, installed="1.31.0", **extra):
         base = Path(td)
         (base / "plugins").mkdir(exist_ok=True)
+        for ver in ("1.29.0", "1.31.0"):
+            mon = base / "plugins" / "cache" / "scry" / "scry" / ver / "monitors"
+            mon.mkdir(parents=True, exist_ok=True)
+            (mon / "monitors.json").write_text(json.dumps([
+                {"name": "cache-handoff",
+                 "command": "\"${CLAUDE_PLUGIN_ROOT}\"/cache_handoff_monitor.sh"}]))
         (base / "plugins" / "installed_plugins.json").write_text(json.dumps({
             "version": 2, "plugins": {"scry@scry": [{"version": installed, "scope": "user"}]}}))
         env = {
@@ -3650,6 +3659,7 @@ class RosterTests(unittest.TestCase):
             "SCRY_TASK_STATE_DIR": str(base / "tasks"),
             "SCRY_CACHE_STATE_DIR": str(base / "state"),
             "SCRY_INSTALLED_PLUGINS": str(base / "plugins" / "installed_plugins.json"),
+            "SCRY_PLUGINS_ROOT": str(base / "plugins"),
             "SCRY_PS_OUTPUT": self.PS,
         }
         env.update(extra)
@@ -3667,8 +3677,11 @@ class RosterTests(unittest.TestCase):
     def _roster(self, td, **extra):
         merged = os.environ.copy()
         merged.update(self._env(td, **extra))
+        # stdin is an open pipe nobody closes — exactly the shape that hung a
+        # backgrounded call on 2026-09-14. A timeout here is the test failing.
         return subprocess.run(["bash", str(ROOT / "roster.sh")], cwd=td, text=True,
-                              capture_output=True, check=True, env=merged, stdin=subprocess.DEVNULL)
+                              capture_output=True, check=True, env=merged,
+                              stdin=subprocess.PIPE, timeout=20)
 
     def test_a_forgotten_watcher_is_listed_by_its_file_not_by_memory(self):
         # 62aa5e9f: four tails stopped, a fifth missed, "nothing running" said
@@ -3712,6 +3725,10 @@ class RosterTests(unittest.TestCase):
             # One line per script, not one per wrapper process; the stranger
             # under another Claude process is not this session's.
             self.assertEqual(out.count("cache_handoff_monitor.sh"), 1)
+            # Hooks and skills run under the same process from the same cache;
+            # only what monitors/monitors.json registers is a monitor.
+            self.assertNotIn("fleet.sh", out)
+            self.assertNotIn("reminder.py", out)
             self.assertIn("- plugin monitor scry/cache_handoff_monitor.sh (v1.29.0, started Sep 13 11:31; "
                           "installed is v1.31.0 — a monitor keeps the copy its session launched with "
                           "until the session restarts)", out)
@@ -3754,11 +3771,16 @@ class RosterTests(unittest.TestCase):
             (base / "plugins").mkdir()
             (base / "plugins" / "installed_plugins.json").write_text(json.dumps(
                 {"plugins": {"scry@scry": [{"version": "1.31.0"}]}}))
+            mon = base / "plugins" / "cache" / "scry" / "scry" / "1.29.0" / "monitors"
+            mon.mkdir(parents=True)
+            (mon / "monitors.json").write_text(json.dumps(
+                [{"command": "\"${CLAUDE_PLUGIN_ROOT}\"/cache_handoff_monitor.sh"}]))
             env = {"HOME": str(base), "CODEX_HOME": str(base / ".codex"),
                    "SCRY_CLEAR_STATE_DIR": str(base / "cleared"),
                    "SCRY_CACHE_STATE_DIR": str(base / "deadline"),
                    "SCRY_TASK_STATE_DIR": str(base / "taskroot"),
                    "SCRY_INSTALLED_PLUGINS": str(base / "plugins" / "installed_plugins.json"),
+                   "SCRY_PLUGINS_ROOT": str(base / "plugins"),
                    "SCRY_PS_OUTPUT": self.PS, "CLAUDE_PID": self.PID}
             payload = {"cwd": str(repo), "session_id": self.SID,
                        "transcript_path": str(base / ".claude/projects" / enc / f"{self.SID}.jsonl"),

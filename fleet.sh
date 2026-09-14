@@ -774,7 +774,8 @@ try:
     monitors = plugin_monitors(
         os.environ.get("SCRY_PID", ""),
         os.environ.get("SCRY_INSTALLED_PLUGINS") or os.path.expanduser("~/.claude/plugins/installed_plugins.json"),
-        os.environ.get("SCRY_PS_OUTPUT"))
+        os.environ.get("SCRY_PS_OUTPUT"),
+        plugins_root=os.environ.get("SCRY_PLUGINS_ROOT"))
     if monitors:
         lines.append("- Plugin monitor(s) under this Claude process: " + "; ".join(monitors)
                      + ". These are the harness's, not agents; the status line counts them.")
