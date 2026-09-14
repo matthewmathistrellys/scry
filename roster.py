@@ -35,7 +35,9 @@ What is listed, and what Scry can read for each:
                       file stays behind with no marker). Both were listed as
                       "still running" when first read live, 2026-09-14.
   plugin monitor      a process under this Claude process running a script
-                      from ~/.claude/plugins/cache/<market>/<plugin>/<ver>/.
+                      from ~/.claude/plugins/cache/<market>/<plugin>/<ver>/
+                      that the plugin's monitors/monitors.json registers (a
+                      hook or skill run under the same process is not one).
                       Claude Code starts these once per process and never
                       restarts them, so the version in the path is what is
                       actually running; when it differs from the installed
@@ -200,7 +202,32 @@ def installed_versions(installed_json):
     return out
 
 
-def plugin_monitors(claude_pid, installed_json, ps_text=None):
+def registered_monitors(root_tail, plugins_root):
+    """Basenames of the scripts <plugin root>/monitors/monitors.json
+    registers, read once per root. `root_tail` is the path from
+    "/plugins/cache/..." to the version directory; `plugins_root` is the
+    directory that holds "cache/"."""
+    root = os.path.join(plugins_root, root_tail[len("/plugins/"):])
+    cached = registered_monitors.cache.get(root)
+    if cached is not None:
+        return cached
+    names = set()
+    try:
+        with open(os.path.join(root, "monitors", "monitors.json")) as f:
+            for entry in json.load(f):
+                c = str((entry or {}).get("command") or "")
+                if c:
+                    names.add(os.path.basename(c.strip().strip("\"'")))
+    except Exception:
+        pass
+    registered_monitors.cache[root] = names
+    return names
+
+
+registered_monitors.cache = {}
+
+
+def plugin_monitors(claude_pid, installed_json, ps_text=None, plugins_root=None):
     """Plugin monitor processes running under this Claude process, as lines.
     A monitor is a child (or grandchild, through the shell wrapper Claude
     Code starts it with) whose command names a script under the plugin
@@ -221,6 +248,7 @@ def plugin_monitors(claude_pid, installed_json, ps_text=None):
             continue
         # lstart is five tokens: "Sun Sep 13 11:31:51 2026".
         procs.append((int(parts[0]), int(parts[1]), " ".join(parts[2:7]), parts[7]))
+    plugins_root = plugins_root or os.path.join(os.path.expanduser("~"), ".claude", "plugins")
     root = int(claude_pid)
     children = {p for p, pp, _, _ in procs if pp == root}
     family = children | {p for p, pp, _, _ in procs if pp in children}
@@ -232,7 +260,13 @@ def plugin_monitors(claude_pid, installed_json, ps_text=None):
         m = _PLUGIN_PATH.search(cmd)
         if not m:
             continue
-        _, plugin, version, script = m.groups()
+        market, plugin, version, script = m.groups()
+        # A hook or skill run also lives briefly under this process with a
+        # plugin-cache path in its command (a security hook and roster.sh
+        # itself were both listed as monitors when first read live,
+        # 2026-09-14). A monitor is what the plugin registers as one.
+        if script not in registered_monitors(cmd[m.start():m.end(3)], plugins_root):
+            continue
         # The shell wrapper and the script it runs both name the path; one
         # line per script.
         key = (plugin, version, script)
@@ -287,8 +321,10 @@ def main():
     env = os.environ
     home = os.path.expanduser("~")
     sid = ""
-    # A hook payload on stdin names the session; a terminal does not.
-    if not sys.stdin.isatty():
+    # A hook payload on stdin names the session, and only a caller that says
+    # so is sending one: reading stdin unasked blocked on an open pipe with
+    # no writer (a backgrounded Bash call, 2026-09-14).
+    if env.get("SCRY_ROSTER_STDIN") == "1":
         try:
             d = json.loads(sys.stdin.read() or "{}")
             sid = str(d.get("session_id") or "")
@@ -316,7 +352,8 @@ def main():
     installed = env.get("SCRY_INSTALLED_PLUGINS") or os.path.join(
         home, ".claude", "plugins", "installed_plugins.json")
     ps_text = env.get("SCRY_PS_OUTPUT")  # tests inject a process table
-    lines += plugin_monitors(env.get("CLAUDE_PID", ""), installed, ps_text)
+    lines += plugin_monitors(env.get("CLAUDE_PID", ""), installed, ps_text,
+                             plugins_root=env.get("SCRY_PLUGINS_ROOT"))
     if not lines:
         print(f"Scry — roster for session {sid}: nothing this session started is "
               "still unfinished, as far as file metadata and the process table show.")
