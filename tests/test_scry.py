@@ -3621,3 +3621,157 @@ class StatuslineTests(unittest.TestCase):
             plain.mkdir()
             out = self._run(td, str(plain))
             self.assertTrue(out.startswith(" \x1b[1;36mnotes\x1b[0m  Fable 5.1  $4.20"), out)
+
+
+class RosterTests(unittest.TestCase):
+    """roster.sh / roster.py: what this session started that has not
+    finished, read from disk and the process table (2026-09-14)."""
+    SID = "sess-roster-0001"
+    PID = "424242"
+    PS = "\n".join([
+        "  424242   1000 Sun Sep 13 11:31:48 2026 /Users/x/.local/bin/claude",
+        "  424243 424242 Sun Sep 13 11:31:51 2026 /bin/zsh -c source snap.sh && eval "
+        "'\"/Users/x/.claude/plugins/cache/scry/scry/1.29.0\"/cache_handoff_monitor.sh' < /dev/null",
+        "  424244 424243 Sun Sep 13 11:31:51 2026 bash /Users/x/.claude/plugins/cache/scry/scry/1.29.0/cache_handoff_monitor.sh",
+        "  424245 424242 Sun Sep 13 11:31:50 2026 node /Users/x/.hindsight/mcp-server.js",
+        "  999999 999998 Sun Sep 13 11:31:51 2026 bash /Users/x/.claude/plugins/cache/scry/scry/1.31.0/cache_handoff_monitor.sh",
+    ])
+
+    def _env(self, td, installed="1.31.0", **extra):
+        base = Path(td)
+        (base / "plugins").mkdir(exist_ok=True)
+        (base / "plugins" / "installed_plugins.json").write_text(json.dumps({
+            "version": 2, "plugins": {"scry@scry": [{"version": installed, "scope": "user"}]}}))
+        env = {
+            "CLAUDE_CODE_SESSION_ID": self.SID,
+            "CLAUDE_PID": self.PID,
+            "SCRY_CLAUDE_SESSIONS_DIR": str(base / "sessions"),
+            "SCRY_CLAUDE_PROJECTS_DIR": str(base / "projects"),
+            "SCRY_TASK_STATE_DIR": str(base / "tasks"),
+            "SCRY_CACHE_STATE_DIR": str(base / "state"),
+            "SCRY_INSTALLED_PLUGINS": str(base / "plugins" / "installed_plugins.json"),
+            "SCRY_PS_OUTPUT": self.PS,
+        }
+        env.update(extra)
+        return env
+
+    def _task(self, td, tid, text, age=0, sid=None):
+        d = Path(td) / "tasks" / "-Users-someone-repo" / (sid or self.SID) / "tasks"
+        d.mkdir(parents=True, exist_ok=True)
+        out = d / f"{tid}.output"
+        out.write_text(text)
+        t = time.time() - age
+        os.utime(out, (t, t))
+        return out
+
+    def _roster(self, td, **extra):
+        merged = os.environ.copy()
+        merged.update(self._env(td, **extra))
+        return subprocess.run(["bash", str(ROOT / "roster.sh")], cwd=td, text=True,
+                              capture_output=True, check=True, env=merged, stdin=subprocess.DEVNULL)
+
+    def test_a_forgotten_watcher_is_listed_by_its_file_not_by_memory(self):
+        # 62aa5e9f: four tails stopped, a fifth missed, "nothing running" said
+        # twice. Its b*.output had no exit marker all night.
+        with tempfile.TemporaryDirectory() as td:
+            self._task(td, "b55udo2rk", "[round 3] SECRET compile exit=1\n", age=7 * 3600 + 30)
+            self._task(td, "b2287w1k9", "SECRET\n\n[killed]\n", age=7 * 3600)
+            self._task(td, "b4jdo82tu", "SECRET\n[exited with code 0]\n")
+            out = self._roster(td).stdout
+            self.assertIn(f"roster for session {self.SID}", out)
+            self.assertRegex(out, r"- background command b55udo2rk: still running, last output 7h0\dm ago")
+            self.assertNotIn("b2287w1k9", out)
+            self.assertNotIn("b4jdo82tu", out)
+            self.assertNotIn("SECRET", out)
+            self.assertIn("Scry stops nothing", out)
+
+    def test_the_monitors_own_stream_and_a_persisted_foreground_result_are_not_work(self):
+        # Read live in 62aa5e9f, 2026-09-14: the cache monitor's notifications
+        # land in a b*.output that never records an exit while it lives, and a
+        # foreground command whose large result Claude Code saved under
+        # tool-results/ leaves its task file behind with no marker. The tip's
+        # keep-alive would have called both "unfinished work" and kept the
+        # cache warm for them instead of asking for the summary.
+        with tempfile.TemporaryDirectory() as td:
+            self._task(td, "bmonitor1", "Scry — cache deadline (this is a Scry monitor "
+                                        "notification, not a user message): SECRET\n", age=3600)
+            self._task(td, "bbigfind1", "/Users/x/a\n/Users/x/b\n", age=1500)
+            tr = Path(td) / "projects" / "-Users-someone-repo" / self.SID / "tool-results"
+            tr.mkdir(parents=True)
+            (tr / "bbigfind1.txt").write_text("SECRET persisted result\n")
+            self._task(td, "bstillon1", "going\n", age=1530)
+            out = self._roster(td, SCRY_PS_OUTPUT="").stdout
+            self.assertNotIn("bmonitor1", out)
+            self.assertNotIn("bbigfind1", out)
+            self.assertIn("background command bstillon1: still running, last output 25m ago", out)
+            self.assertNotIn("SECRET", out)
+
+    def test_a_plugin_monitor_is_listed_with_the_version_it_is_running(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = self._roster(td).stdout
+            # One line per script, not one per wrapper process; the stranger
+            # under another Claude process is not this session's.
+            self.assertEqual(out.count("cache_handoff_monitor.sh"), 1)
+            self.assertIn("- plugin monitor scry/cache_handoff_monitor.sh (v1.29.0, started Sep 13 11:31; "
+                          "installed is v1.31.0 — a monitor keeps the copy its session launched with "
+                          "until the session restarts)", out)
+            self.assertNotIn("1.31.0/cache", out)
+        with tempfile.TemporaryDirectory() as td:
+            out = self._roster(td, installed="1.29.0").stdout
+            self.assertIn("(v1.29.0, started Sep 13 11:31)", out)
+            self.assertNotIn("installed is", out)
+
+    def test_nothing_running_says_so_in_one_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = self._roster(td, SCRY_PS_OUTPUT="").stdout
+            self.assertIn("nothing this session started is still unfinished", out)
+            self.assertEqual(out.count("\n"), 1)
+
+    def test_it_follows_a_clear_to_the_current_session(self):
+        # The environment id is the launch id; /clear changes the session
+        # without restarting the process, and Claude Code's own record says so.
+        with tempfile.TemporaryDirectory() as td:
+            new = "sess-roster-0002"
+            sd = Path(td) / "sessions"
+            sd.mkdir()
+            (sd / f"{self.PID}.json").write_text(json.dumps({"sessionId": new}))
+            self._task(td, "bnew00001", "going\n", sid=new)
+            out = self._roster(td, SCRY_PS_OUTPUT="").stdout
+            self.assertIn(f"roster for session {new}", out)
+            self.assertIn("background command bnew00001: still running", out)
+
+    def test_fleet_names_this_sessions_unfinished_work_on_resume_and_its_monitors(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = base / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            enc = re.sub(r"[/._]", "-", str(repo.resolve()))
+            tasks = base / "taskroot" / enc / self.SID / "tasks"
+            tasks.mkdir(parents=True)
+            (tasks / "bwatch001.output").write_text("SECRET partial\n")
+            (tasks / "bdone0001.output").write_text("SECRET\n[exited with code 0]\n")
+            (base / "plugins").mkdir()
+            (base / "plugins" / "installed_plugins.json").write_text(json.dumps(
+                {"plugins": {"scry@scry": [{"version": "1.31.0"}]}}))
+            env = {"HOME": str(base), "CODEX_HOME": str(base / ".codex"),
+                   "SCRY_CLEAR_STATE_DIR": str(base / "cleared"),
+                   "SCRY_CACHE_STATE_DIR": str(base / "deadline"),
+                   "SCRY_TASK_STATE_DIR": str(base / "taskroot"),
+                   "SCRY_INSTALLED_PLUGINS": str(base / "plugins" / "installed_plugins.json"),
+                   "SCRY_PS_OUTPUT": self.PS, "CLAUDE_PID": self.PID}
+            payload = {"cwd": str(repo), "session_id": self.SID,
+                       "transcript_path": str(base / ".claude/projects" / enc / f"{self.SID}.jsonl"),
+                       "source": "resume"}
+            report = context(run_hook("fleet.sh", repo, payload, env))
+            self.assertIn("WORK THIS SESSION STARTED HAS NOT FINISHED", report)
+            self.assertIn("background command bwatch001: still running", report)
+            self.assertNotIn("bdone0001", report)
+            self.assertNotIn("SECRET", report)
+            self.assertIn("Plugin monitor(s) under this Claude process: plugin monitor "
+                          "scry/cache_handoff_monitor.sh (v1.29.0, started Sep 13 11:31; "
+                          "installed is v1.31.0", report)
+            # A clear reports the cleared session's work instead, unchanged.
+            payload["source"] = "clear"
+            report = context(run_hook("fleet.sh", repo, payload, env))
+            self.assertNotIn("WORK THIS SESSION STARTED", report)

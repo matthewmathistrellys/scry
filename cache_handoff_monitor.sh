@@ -176,6 +176,7 @@ uid="$(id -u 2>/dev/null || echo 0)"
 task_roots="${SCRY_TASK_STATE_DIR:-${TMPDIR:-/tmp}/claude-$uid:/tmp/claude-$uid}"
 
 pass() {
+  SCRY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" \
   SCRY_SID="$sid" SCRY_DIR="$state_dir" SCRY_LEAD="$lead" \
   SCRY_PID="${CLAUDE_PID:-}" \
   SCRY_SESSIONS_DIR="${SCRY_CLAUDE_SESSIONS_DIR:-$HOME/.claude/sessions}" \
@@ -329,107 +330,12 @@ if isinstance(sent_expires, int) and expires <= sent_expires:
 fresh = int(os.environ["SCRY_KA_FRESH"])
 projects = os.environ["SCRY_PROJECTS_DIR"]
 
-def age(t):
-    s = max(0, now - int(t))
-    if s >= 3600:
-        return f"{s // 3600}h{(s % 3600) // 60:02d}m"
-    return f"{s // 60}m" if s >= 60 else f"{s}s"
+# The roster is shared with fleet.sh and roster.sh (roster.py, 2026-09-14):
+# one reader of "what did this session start that has not finished".
+sys.path.insert(0, os.environ["SCRY_ROOT"])
+from roster import roster_lines
 
-def label(text):
-    text = re.sub(r"\s+", " ", str(text or "")).strip()
-    return text[:60]
-
-def mtime(p):
-    try:
-        return os.path.getmtime(p)
-    except OSError:
-        return None
-
-def roster_items():
-    """Every unfinished worker this session started, newest activity first,
-    as roster lines. File names, times and metadata labels only — no
-    comparison with any earlier poll, no judgement of progress."""
-    items = []
-    for sdir in glob.glob(os.path.join(glob.escape(projects), "*", glob.escape(sid))):
-        sub = os.path.join(sdir, "subagents")
-        # Subagents: nothing says "finished", so only a recent write counts.
-        for j in glob.glob(os.path.join(sub, "agent-*.jsonl")):
-            m = mtime(j)
-            if m is None or m < now - fresh:
-                continue
-            aid = os.path.basename(j)[len("agent-"):-len(".jsonl")]
-            desc = ""
-            try:
-                with open(j[:-len(".jsonl")] + ".meta.json") as f:
-                    meta = json.load(f)
-                desc = label(meta.get("description") or meta.get("name"))
-            except Exception:
-                pass
-            named = f' "{desc}"' if desc else ""
-            items.append((m, f"subagent {aid}{named}: last activity {age(m)} ago"))
-        # Workflows: the journal says which agents have no result yet, and
-        # that holds however long the workflow has been quiet.
-        for wdir in glob.glob(os.path.join(sub, "workflows", "wf_*")):
-            started, finished = set(), set()
-            journal = os.path.join(wdir, "journal.jsonl")
-            try:
-                with open(journal, errors="replace") as f:
-                    for line in f:
-                        # The record's head only: a `result` line carries the
-                        # agent's output after these fields, and it is not read.
-                        k = re.search(r'"type":"(started|result)","key":"([^"]+)"', line[:320])
-                        if k:
-                            (started if k.group(1) == "started" else finished).add(k.group(2))
-            except OSError:
-                continue
-            if not (started - finished):
-                continue
-            stamps = [t for t in (mtime(p) for p in [journal] + glob.glob(
-                os.path.join(glob.escape(wdir), "agent-*.jsonl"))) if t is not None]
-            if not stamps:
-                continue
-            m = max(stamps)
-            wid = os.path.basename(wdir)
-            # The workflow's name is in its script's file name,
-            # <session>/workflows/scripts/<name>-<run id>.js, written at launch
-            # (read 2026-09-13 against a running workflow).
-            name = ""
-            for script in glob.glob(os.path.join(glob.escape(sdir), "workflows", "scripts",
-                                                 "*-" + glob.escape(wid) + ".js")):
-                name = label(os.path.basename(script)[:-len("-" + wid + ".js")])
-                break
-            shown = f"{name} ({wid})" if name else wid
-            done = len(finished & started)
-            items.append((m, f"workflow {shown}: {done} of {len(started)} agents done, "
-                             f"last activity {age(m)} ago"))
-    # Background commands: unfinished until the output records an exit, and
-    # that holds however long the command has been quiet.
-    seen = set()
-    for root in os.environ["SCRY_TASK_ROOTS"].split(":"):
-        if not root:
-            continue
-        for s in {launch, sid}:
-            for out in glob.glob(os.path.join(glob.escape(root), "*", glob.escape(s), "tasks", "b*.output")):
-                real = os.path.realpath(out)
-                if real in seen or os.path.islink(out):
-                    continue
-                seen.add(real)
-                try:
-                    m = os.path.getmtime(out)
-                    with open(out, "rb") as fh:
-                        fh.seek(0, 2)
-                        fh.seek(max(0, fh.tell() - 64))
-                        tail = fh.read()
-                except OSError:
-                    continue
-                if b"[exited with code" in tail or b"[killed]" in tail:
-                    continue
-                tid = os.path.basename(out)[:-len(".output")]
-                items.append((m, f"background command {tid}: still running, last output {age(m)} ago"))
-    items.sort(key=lambda x: -x[0])
-    return [text for _, text in items]
-
-roster = roster_items()
+roster = roster_lines(sid, projects, os.environ["SCRY_TASK_ROOTS"], fresh=fresh, launch=launch, now=now)
 listed = "; ".join(roster[:8]) + (f"; and {len(roster) - 8} more" if len(roster) > 8 else "")
 ka_max = int(os.environ["SCRY_KA_MAX"])
 ka_session_max = int(os.environ["SCRY_KA_SESSION_MAX"])
