@@ -6,7 +6,7 @@ description: Run Scry's health, fleet, pressure, and architecture checks on dema
 # Scry — on-demand state of the world
 
 Run the same four checks that fire at SessionStart in Claude Code and Codex,
-right now. Each script lives in the plugin root and emits JSON — extract the
+right now, plus the roster of what this session has running. Each script lives in the plugin root and emits JSON — extract the
 `additionalContext` field for the human-readable report.
 
 ## Steps
@@ -34,7 +34,19 @@ echo "$PAYLOAD" | bash "$SCRY_ROOT/architecture.sh" 2>/dev/null
 echo "$PAYLOAD" | bash "$SCRY_ROOT/health.sh" 2>/dev/null
 echo "$PAYLOAD" | bash "$SCRY_ROOT/fleet.sh" 2>/dev/null
 echo "$PAYLOAD" | bash "$SCRY_ROOT/pressure.sh" 2>/dev/null
+bash "$SCRY_ROOT/roster.sh" 2>/dev/null
 ```
+
+   `roster.sh` is the fifth check (added 2026-09-14): what THIS session
+   started that has not finished — subagents, workflows, background commands
+   and Monitor tasks, read from their files on disk, plus the plugin monitors
+   running under this Claude process and the version each is actually
+   running. It takes no payload; it reads `CLAUDE_CODE_SESSION_ID` and
+   `CLAUDE_PID` from the environment the Bash tool already carries, and
+   prints plain lines rather than JSON. Run it whenever the question is "is
+   anything still running?" — that answer must come from this list, not
+   from memory (2026-09-13: a session stopped four log-watchers, missed a
+   fifth, and said "nothing running" twice).
 
 4. Each script emits a JSON object. Extract the readable report from
    `hookSpecificOutput.additionalContext` (and `systemMessage` if present).

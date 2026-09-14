@@ -22,6 +22,7 @@ machine is carrying. Independent checks and advisories fill that in.
 | **`main_drift_advisory.sh`** | Is the tree this subagent was handed the current one? |
 | **`session_disposal_advisory.sh`** | What is this session leaving behind? |
 | **`cache_handoff_monitor.sh`** | Is this session about to lose its prompt cache — and what is still unfinished, or what should be summarised first? |
+| **`roster.sh`** | What did *this* session start that has not finished — and is it what I remember? |
 | **Markdown trust** | What goes wrong when repository prose is mistaken for authority? |
 
 - **`architecture.sh`** — a map of the codebase. It is a *dispatcher*, not a
@@ -299,7 +300,7 @@ machine is carrying. Independent checks and advisories fill that in.
   | Worker | Listed while | Reported as |
   |---|---|---|
   | workflow | its journal has an agent `started` with no `result`, however long it has been quiet | `workflow <name> (<id>): <finished> of <started> agents done, last activity <age> ago` — the name from `workflows/scripts/<name>-<id>.js`, else the id alone |
-  | background command | its `b*.output` has no exit or killed marker in the last 64 bytes, however long it has been quiet | `background command <task id>: still running, last output <age> ago` |
+  | background command | its `b*.output` has no exit or killed marker in the last 64 bytes, however long it has been quiet — except a Scry monitor's own notification stream (opens with "Scry — ") and a finished foreground command whose result was persisted to `tool-results/<id>.txt`, both read live as false "still running" on 2026-09-14 | `background command <task id>: still running, last output <age> ago` |
   | subagent | its `agent-*.jsonl` was written within `SCRY_KEEPALIVE_FRESH_SECS` (default 3600, one TTL) | `subagent <id> "<description>": last activity <age> ago` |
 
   A plain subagent's metadata has nothing that says it finished, so Scry
@@ -321,6 +322,25 @@ machine is carrying. Independent checks and advisories fill that in.
   and at most `SCRY_KEEPALIVE_MAX` keep-alives before it.
   `SCRY_CACHE_HANDOFF=0` switches it off. It writes the summary nowhere
   itself; the session does, in its own conversation.
+- **Roster** — `roster.py` is that same list, made available outside the
+  deadline window (2026-09-14). Three readers: the monitor above; `fleet.sh`
+  at every SessionStart other than a clear, which names what this session
+  started and has not finished (a resume or a compaction is exactly when a
+  session answers "is anything running?" from memory); and `roster.sh`, run
+  on demand by the `/scry` skill or any Bash call, using the
+  `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID` the Bash tool's environment
+  carries. It adds one row to the table above: **plugin monitor** — a
+  process under this Claude process running a script from the plugin cache,
+  reported with the version in its path, which is the version actually
+  running; when that differs from `installed_plugins.json`, the line says so,
+  because Claude Code starts a monitor once per process and never restarts it
+  (not on a plugin update, not on `/reload-plugins`). Why: on 2026-09-13 a
+  session stopped four log-watchers, missed a fifth, and told its user
+  "nothing running" twice across a night — the fifth's output file had no
+  exit marker the whole time. The same session ran a 1.29.0 monitor all night
+  while 1.31.0, which fixed that monitor's hourly re-arm loop, had been
+  installed since the afternoon. The session had no list of its own; the file
+  system did. Scry reports the list; the session judges and stops nothing.
 - **Scale** — `scale_advisory.sh` speaks on first contact with a source file
   that is both large *and* actively worked, whether that contact is a Read or
   an Edit. It reports the file's length, its churn, and — on a Read of a file

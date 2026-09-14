@@ -137,8 +137,10 @@ START_SOURCE="$start_source" \
 SCRY_CLEAR_ROOT="${SCRY_CLEAR_STATE_DIR:-${TMPDIR:-/tmp}/scry-last-cleared}" \
 SCRY_DEADLINE_ROOT="${SCRY_CACHE_STATE_DIR:-${TMPDIR:-/tmp}/scry-cache-deadline}" \
 SCRY_TASK_ROOT="${SCRY_TASK_STATE_DIR:-${TMPDIR:-/tmp}/claude-$(id -u 2>/dev/null || echo 0)}" \
+SCRY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" \
+SCRY_PID="${CLAUDE_PID:-}" \
 python3 - >"$fleet_tmp" 2>/dev/null <<'PY'
-import glob, json, os, re, subprocess, time
+import glob, json, os, re, subprocess, sys, time
 
 self_id  = os.environ["SELF_ID"]
 cwd      = os.path.realpath(os.environ["SESSION_CWD"])
@@ -747,6 +749,37 @@ else:
                 f'- Last session in this directory: "{title}" '
                 f"(ended {human(now - best[1])} ago)."
             )
+
+# ── 4. What THIS session started that has not finished ──────────────────
+# The same roster the cache monitor reads (roster.py, 2026-09-14). On a
+# resume or a compaction the session is the one that started the work and
+# is about to answer "is anything running?" from memory; on 2026-09-13
+# session 62aa5e9f did exactly that and missed a log-watcher whose output
+# file had no exit marker all night. The clear branch above reports the
+# cleared session's work, so this is for every other start. Plugin monitors
+# are listed on every start: they belong to the process, not the session,
+# and the version in their path is the version running — Claude Code never
+# restarts one (62aa5e9f ran a 1.29.0 monitor all night with 1.31.0 installed).
+try:
+    sys.path.insert(0, os.environ.get("SCRY_ROOT", ""))
+    from roster import roster_lines, plugin_monitors
+    mine = [] if start_source == "clear" or not self_id else roster_lines(
+        self_id, projects, task_root, launch=self_id, now=now)
+    if mine:
+        shown = "; ".join(mine[:8]) + (f"; and {len(mine) - 8} more" if len(mine) > 8 else "")
+        lines.append(
+            "- WORK THIS SESSION STARTED HAS NOT FINISHED, as far as Scry can tell "
+            f"from file metadata: {shown}. Scry stops nothing; check on what is "
+            "yours before saying nothing is running.")
+    monitors = plugin_monitors(
+        os.environ.get("SCRY_PID", ""),
+        os.environ.get("SCRY_INSTALLED_PLUGINS") or os.path.expanduser("~/.claude/plugins/installed_plugins.json"),
+        os.environ.get("SCRY_PS_OUTPUT"))
+    if monitors:
+        lines.append("- Plugin monitor(s) under this Claude process: " + "; ".join(monitors)
+                     + ". These are the harness's, not agents; the status line counts them.")
+except Exception:
+    pass
 
 print("\n".join(lines))
 PY
