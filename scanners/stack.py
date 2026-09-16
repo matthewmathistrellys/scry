@@ -38,6 +38,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -135,6 +136,31 @@ DEV_TOOLING = [
     ("tidewave", "Tidewave (evaluate against the running app instead of recompiling)"),
     ("livebook", "Livebook"),
     ("phoenix_live_reload", "LiveReload (code changes apply without a restart)"),
+]
+
+# Repo-implied CLIs, in reporting order (most consequential first): a marker
+# in the repo's live config that implies a command-line tool an agent can
+# run. Both halves of the report exist for the same reason DEV_TOOLING does
+# (Matt, 2026-09-15): an agent that is never TOLD a tool exists never runs
+# `command -v` for it -- and one that is told too late discovers the gap
+# mid-deploy instead of at session start. Presence is stated in one line;
+# a miss is its own line, phrased as the PATH fact it is: hooks run in a
+# non-interactive environment whose PATH can differ from a login shell's
+# (rc-file additions like asdf/mise shims are invisible here), so a miss
+# says "the PATH this session sees", never a bare "not installed".
+#
+# The roster is DERIVED, never enumerated: a tool is checked only when the
+# config that implies it was actually found, so the line cannot grow into a
+# PATH dump. `SCRY_REPO_CLI_CHECK=0` switches the whole thing off.
+REPO_CLIS = [
+    # (tool, fact that implies it, role label shown in output)
+    ("fly",     lambda facts, db_roles: bool(facts["fly_apps"]), "deploys"),
+    ("mix",     lambda facts, db_roles: bool(facts["mix"]), "Elixir"),
+    ("psql",    lambda facts, db_roles: bool(db_roles), "database client"),
+    ("python3", lambda facts, db_roles: facts["python"], "Python"),
+    ("node",    lambda facts, db_roles: facts["node"], "Node"),
+    ("docker",  lambda facts, db_roles: facts["docker"], "containers"),
+    ("gh",      lambda facts, db_roles: facts["ci"], "PRs/CI"),
 ]
 
 # Transaction-mode pooler fingerprints. A pooler is the right default for app
@@ -328,6 +354,42 @@ def walk_config(root: str) -> dict:
     return facts
 
 
+def implied_clis(db_roles: dict, facts: dict, resolve=None) -> list:
+    """(tool, present, role) for each CLI the repo's config implies.
+
+    `resolve` is injectable so tests are not at the mercy of the host PATH;
+    production uses shutil.which against the hook's own environment.
+    """
+    if resolve is None:
+        resolve = shutil.which
+    out = []
+    for tool, needed, role in REPO_CLIS:
+        if not needed(facts, db_roles):
+            continue
+        out.append((tool, bool(resolve(tool)), role))
+    return out
+
+
+def repo_cli_lines(db_roles: dict, facts: dict) -> list[str]:
+    """One presence line, plus a miss line only when a miss exists.
+
+    Always at most two lines, and empty when the repo implies no CLI at all.
+    """
+    if os.environ.get("SCRY_REPO_CLI_CHECK") == "0":
+        return []
+    implied = implied_clis(db_roles, facts)
+    if not implied:
+        return []
+    here = [f"{tool} ({role})" for tool, present, role in implied if present]
+    missing = [f"{tool} ({role})" for tool, present, role in implied if not present]
+    lines = []
+    if here:
+        lines.append("- Repo CLIs on PATH: " + ", ".join(here))
+    if missing:
+        lines.append("- Repo CLIs NOT on the PATH this session sees: " + ", ".join(missing))
+    return lines
+
+
 def is_pooled(host: str, port: str) -> bool:
     return any(f in host for f in POOLER_FINGERPRINTS) or port in POOLER_PORTS
 
@@ -437,6 +499,11 @@ def render(db_roles: dict, env_names: set, facts: dict) -> str:
     # DEV TOOLING -- what this project gives an agent that it may not know it has.
     if facts["dev_tools"]:
         lines.append("- Dev tooling available: " + "; ".join(sorted(facts["dev_tools"])))
+
+    # REPO-IMPLIED CLIs -- same rule, for executables: named when present so a
+    # session learns `fly` exists before it needs it, flagged the moment the
+    # repo implies one the session cannot see.
+    lines.extend(repo_cli_lines(db_roles, facts))
 
     # SERVICES -- from env var NAMES. Wired, which is not the same as live.
     services = set()
