@@ -19,9 +19,7 @@
 # this one reports whenever it finds anything -- the owner wants the stack
 # stated every session (Matt, 2026-08-21), because the failure mode is a
 # doc quietly going stale, which crosses no threshold and fires no alarm.
-# It pays for that exemption by being at most eight lines (2026-09-15: six
-# became eight when repo-implied CLIs joined -- presence and, only when one
-# exists, a miss line).
+# It pays for that exemption by being at most six lines.
 set -uo pipefail
 
 root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$PWD
