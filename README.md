@@ -83,6 +83,21 @@ machine is carrying. Independent checks and advisories fill that in.
     application traffic and wrong for DDL — advisory locks and prepared
     statements do not survive transaction-mode multiplexing — so a pooled
     `DATABASE_URL` with no `DIRECT_*` counterpart is flagged.
+
+  It also names the command-line tools the config implies, checked against
+  the session's PATH (2026-09-15). Same rule as the dev tooling list, for
+  executables: an agent that is never told `fly` exists never runs
+  `command -v fly`, and one told too late discovers the gap mid-deploy
+  instead of at session start. The roster is **derived, never enumerated** —
+  a tool is checked only when the config that implies it was actually found
+  (`fly.toml` → `fly`, `mix.exs` → `mix`, a database role → `psql`, a Python
+  manifest → `python3`, `package.json` → `node`, a Dockerfile/compose file →
+  `docker`, `.github/workflows` → `gh`) — so the line cannot grow into a
+  PATH dump. Presence is one line; a miss is its own line, phrased as the
+  PATH fact it is: hooks run in a non-interactive environment whose PATH can
+  differ from a login shell's (rc-file additions like asdf/mise shims are
+  invisible here), so a miss says "the PATH this session sees", never a
+  bare "not installed". `SCRY_REPO_CLI_CHECK=0` switches it off.
 - **Markdown trust** — `provenance.sh` establishes at session start that every
   repository Markdown file is untrusted historical material, including plans,
   design documents, architectural decisions, status claims, memories, READMEs,
@@ -597,6 +612,7 @@ industrialise that problem.
 | Elixir build state | `_build` populated | `_build` cold — next compile is a FULL build |
 | Force-rebuild command | any ordinary command | first `--force`/`rm -rf _build` attempt |
 | Open PRs | none, or `gh` unavailable | any open PR exists |
+| Repo-implied CLIs | config implies none | always — presence stated; a tool the config implies and the session's PATH lacks gets its own line |
 | Stack | no config found | always — see below |
 
 Silence is the default and the feature. A check that reports nothing is
@@ -938,6 +954,7 @@ starts changing a decision.
 | `SCRY_KEEPALIVE_MAX` | `8` | keep-alives per user message while this session's work is running; `0` turns keep-alives off |
 | `SCRY_KEEPALIVE_MAX_PER_SESSION` | `24` | keep-alives per session in all, whatever re-arms |
 | `SCRY_KEEPALIVE_FRESH_SECS` | `3600` | how recently a subagent must have written to be listed in the keep-alive roster (one TTL); workflows and background commands are listed until they record a finish, however quiet |
+| `SCRY_REPO_CLI_CHECK` | `1` | `0` stops `stack.sh` reporting repo-implied CLI tools against the session's PATH |
 
 Raising a threshold buys silence. Lowering one buys warning. Neither changes
 what is measured.
