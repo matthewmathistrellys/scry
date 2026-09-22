@@ -3859,6 +3859,47 @@ class TeammateRosterTests(unittest.TestCase):
             self.assertEqual(self._run(td, skip_sid=me), "")
             self.assertIn("teammate mine", self._run(td))
 
+    def test_a_reused_pid_does_not_inherit_a_dead_processs_sessions(self):
+        # pid/<pid>.sessions is never swept; a new claude on the same pid
+        # must not report the dead one's teammates (review, 2026-09-21).
+        with tempfile.TemporaryDirectory() as td:
+            sid = "73249ef1-48bb-4d27-9cbf-f0111a441857"
+            self._chain(td, self.LIVE_PID, sid)
+            self._teammate(td, sid, "phantom", age=3600)
+            chain = Path(td) / "state" / "pid" / f"{self.LIVE_PID}.sessions"
+            before = time.mktime(time.strptime("Sun Sep 13 11:31:48 2026", "%a %b %d %H:%M:%S %Y")) - 60
+            os.utime(chain, (before, before))
+            self.assertEqual(self._run(td), "")
+
+    def test_a_same_named_teammate_from_a_later_session_is_still_reported(self):
+        with tempfile.TemporaryDirectory() as td:
+            a = "aaaaaaaa-0000-0000-0000-000000000001"
+            b = "bbbbbbbb-0000-0000-0000-000000000002"
+            self._chain(td, self.LIVE_PID, a, b)
+            self._teammate(td, a, "reviewer", age=600)
+            self.assertIn("teammate reviewer (session aaaaaaaa)", self._run(td))
+            d = Path(td) / "projects" / "-Users-x-repo" / b / "subagents"
+            d.mkdir(parents=True)
+            (d / "agent-areviewer-9999.meta.json").write_text(json.dumps(
+                {"name": "reviewer", "taskKind": "in_process_teammate"}))
+            (d / "agent-areviewer-9999.jsonl").write_text("{}\n")
+            self.assertIn("teammate reviewer (session bbbbbbbb)", self._run(td))
+
+    def test_the_stop_hook_does_not_consume_the_one_shot_the_clear_successor_needs(self):
+        # Session A's Stop reminds A of its own teammate; the session /clear
+        # starts next in the same process must still be told (review).
+        with tempfile.TemporaryDirectory() as td:
+            a = "aaaaaaaa-0000-0000-0000-000000000001"
+            self._chain(td, self.LIVE_PID, a)
+            self._teammate(td, a, "left-behind", age=600)
+            sys.path.insert(0, str(ROOT))
+            import roster
+            fam = [str(Path(td) / "projects" / "-Users-x-repo")]
+            args = (fam, str(Path(td) / "state"), str(Path(td) / "told"), self.LIVE_PID)
+            self.assertIn("left-behind", roster.teammate_finding(*args, ps_text=self.PS, mark=False))
+            self.assertIn("left-behind", roster.teammate_finding(
+                *args, ps_text=self.PS, skip_sid="bbbbbbbb-0000-0000-0000-000000000002"))
+
     def test_said_once_per_process_then_only_for_new_names(self):
         # Stopping a teammate writes nothing to disk, so without a marker
         # every later session in the process would be told the same names.
@@ -3875,13 +3916,15 @@ class TeammateRosterTests(unittest.TestCase):
 
     def test_the_arm_hook_records_every_session_a_process_has_held(self):
         with tempfile.TemporaryDirectory() as td:
-            env = {"CLAUDE_PID": self.LIVE_PID, "SCRY_CACHE_STATE_DIR": str(Path(td) / "state")}
+            # A real pid: the hook keeps a chain only while ps says the
+            # process started before the chain was written.
+            env = {"CLAUDE_PID": str(os.getpid()), "SCRY_CACHE_STATE_DIR": str(Path(td) / "state")}
             for sid in ("aaaaaaaa-0000-0000-0000-000000000001",
                         "bbbbbbbb-0000-0000-0000-000000000002",
                         "aaaaaaaa-0000-0000-0000-000000000001"):
                 run_hook("cache_handoff_arm.sh", td,
                          {"session_id": sid, "hook_event_name": "SessionStart"}, env=env)
-            chain = (Path(td) / "state" / "pid" / f"{self.LIVE_PID}.sessions").read_text().split()
+            chain = (Path(td) / "state" / "pid" / f"{os.getpid()}.sessions").read_text().split()
             self.assertEqual(chain, ["aaaaaaaa-0000-0000-0000-000000000001",
                                      "bbbbbbbb-0000-0000-0000-000000000002"])
 

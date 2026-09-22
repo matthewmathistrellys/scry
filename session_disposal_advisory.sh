@@ -277,9 +277,10 @@ fi
 # ── Teammates this session (or its process) may be leaving registered ──────
 # In-process teammates outlive the session and die only with the process;
 # nothing on disk records a stop. roster.py names the candidates and says the
-# one thing that resolves it: ListAgents. Once per process per set of names,
-# shared with fleet.sh's SessionStart marker, so what start already said is
-# not said again — what is new here is what this session itself spawned.
+# one thing that resolves it: ListAgents. What SessionStart already said in
+# this process is not said again (shared marker, read only): what is new here
+# is what this session itself spawned, and that is not marked, so the session
+# a /clear starts next — the one that cannot see them — is still told.
 teammate_note="$(SCRY_HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" \
   SCRY_SESSION_CWD="$session_cwd" python3 - <<'PY' 2>/dev/null
 import os, sys
@@ -290,7 +291,7 @@ print(teammate_finding(
     family_project_dirs(projects, os.environ["SCRY_SESSION_CWD"]),
     os.environ.get("SCRY_CACHE_STATE_DIR") or os.path.join(os.environ.get("TMPDIR") or "/tmp", "scry-cache-deadline"),
     os.path.join(os.environ.get("TMPDIR") or "/tmp", "scry-teammates"),
-    os.environ.get("CLAUDE_PID", ""), ps_text=os.environ.get("SCRY_PS_OUTPUT")))
+    os.environ.get("CLAUDE_PID", ""), ps_text=os.environ.get("SCRY_PS_OUTPUT"), mark=False))
 PY
 )"
 [ -n "$teammate_note" ] && teammate_note="Teammates: $teammate_note"
