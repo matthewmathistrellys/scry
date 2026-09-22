@@ -624,8 +624,10 @@ def orphaned_tasks(sid):
         transcript grows while its agent works, so the target's mtime is
         the same liveness signal section 1 already trusts for sessions.
       - A REGULAR FILE is a shell task. It is appended to as output is
-        produced and carries a trailing "[exited with code N]" once the
-        command is done.
+        produced and carries a trailing "[exited with code N]" once a
+        background command is done — and nothing at all once a foreground
+        one is, so the marker's absence is not the test: the file is a
+        running task while a process holds it open (roster.held_open).
 
     An earlier version of this function called a zero-byte file an
     unfinished job. That was wrong, and wrong in the direction that
@@ -647,7 +649,7 @@ def orphaned_tasks(sid):
         entries = [f for f in os.listdir(d) if f.endswith(".output")]
     except OSError:
         return []
-    running = []
+    running, shells = [], []
     for f in sorted(entries):
         fp = os.path.join(d, f)
         try:
@@ -661,9 +663,15 @@ def orphaned_tasks(sid):
                 fh.seek(0, 2)
                 fh.seek(max(0, fh.tell() - 64))
                 if b"[exited with code" not in fh.read():
-                    running.append((f[:-7], "shell"))
+                    shells.append((f[:-7], os.path.realpath(fp)))
         except OSError:
             continue
+    # A shell task is running while its shell holds the file open (roster.py,
+    # 2026-09-22): a foreground call leaves the same file with no marker.
+    sys.path.insert(0, os.environ.get("SCRY_ROOT", ""))
+    from roster import held_open
+    held = held_open([real for _, real in shells])
+    running += [(tid, "shell") for tid, real in shells if real in held]
     return running
 
 if start_source == "clear":

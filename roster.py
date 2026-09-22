@@ -22,18 +22,30 @@ the file system had one all along. Scry reports; the session judges.
 What is listed, and what Scry can read for each:
   subagent            <session>/subagents/agent-*.jsonl — nothing in the
                       metadata says "finished", so listed only while written
-                      within `fresh` seconds (one cache TTL by default).
+                      within `fresh` seconds (one cache TTL by default). In
+                      the last quarter of that window the row says what the
+                      silence means (Matt, 2026-09-22): its own cache goes
+                      cold at the TTL; finished, nothing happens; still
+                      working, its next step re-reads its context once at
+                      the full rate; stuck, stop it before that read.
   workflow            a journal with an agent `started` and no `result` —
                       unfinished by its own record, however quiet.
-  background command  <tasks>/b*.output whose last 64 bytes carry no
-                      "[exited with code" or "[killed]" marker — this is
-                      also what a Monitor task (tail -f) looks like on disk.
-                      Left out: a Scry monitor's own notification stream
-                      (opens with "Scry — ", never records an exit while the
-                      monitor lives) and a finished foreground command whose
-                      result was persisted to tool-results/<id>.txt (the task
-                      file stays behind with no marker). Both were listed as
-                      "still running" when first read live, 2026-09-14.
+  background command  <tasks>/b*.output that a process still holds open.
+                      The shell running a command has the file as its
+                      stdout until it exits; a finished command, foreground
+                      or background, has no holder. Read with one `lsof`
+                      call over the candidates (files with no exit marker
+                      in their last 64 bytes; a marker means finished and
+                      saves the call). Until 2026-09-22 the marker alone was
+                      the test, and it is not one: a foreground Bash call
+                      writes the same file and never gets a marker, so every
+                      large-output command a session ever ran read as
+                      "still running" forever — one session carried fifty
+                      of them, up to four days old, and the keep-alive kept
+                      that session warm every hour for nothing. Left out: a
+                      Scry monitor's own notification stream (opens with
+                      "Scry — ", held open by the monitor while it lives).
+                      Without `lsof` no background command is listed.
   teammate            <session>/subagents/agent-*.meta.json whose taskKind is
                       in_process_teammate — a named agent that lives inside
                       the Claude process and dies only with it (/clear keeps
@@ -93,6 +105,35 @@ def mtime(p):
         return None
 
 
+def cold_note(fresh):
+    """What a subagent's silence means as it nears the cache TTL. Fixed text:
+    the consequence does not depend on the agent."""
+    return (f" — its own cache goes cold at {age(fresh)} of silence: finished, nothing "
+            "happens; still working, its next step re-reads its context once at the "
+            "full rate; stuck, stop it now rather than after that read")
+
+
+_held = {}
+
+
+def held_open(paths):
+    """The subset of `paths` some process holds open, from one `lsof` call
+    (memoised on the path list). A running command's shell has its output
+    file as stdout; nothing holds a finished one. No `lsof`: nothing is held."""
+    key = tuple(sorted(paths))
+    if key not in _held:
+        found = set()
+        if key:
+            try:
+                r = subprocess.run(["lsof", "-Fn", "--", *key], capture_output=True,
+                                   text=True, timeout=10)
+                found = {ln[1:] for ln in r.stdout.splitlines() if ln.startswith("n")}
+            except (OSError, subprocess.SubprocessError):
+                found = set()
+        _held[key] = found
+    return _held[key]
+
+
 def roster_items(sid, projects, task_roots, fresh=3600, launch=None, now=None):
     """Every unfinished worker `sid` started, newest activity first, as
     (mtime, line) pairs. File names, times and metadata labels only — no
@@ -116,7 +157,8 @@ def roster_items(sid, projects, task_roots, fresh=3600, launch=None, now=None):
             except Exception:
                 pass
             named = f' "{desc}"' if desc else ""
-            items.append((m, f"subagent {aid}{named}: last activity {age(now - m)} ago"))
+            items.append((m, f"subagent {aid}{named}: last activity {age(now - m)} ago"
+                             + (cold_note(fresh) if now - m >= fresh * 3 // 4 else "")))
         for wdir in glob.glob(os.path.join(sub, "workflows", "wf_*")):
             started, finished = set(), set()
             journal = os.path.join(wdir, "journal.jsonl")
@@ -150,6 +192,7 @@ def roster_items(sid, projects, task_roots, fresh=3600, launch=None, now=None):
             items.append((m, f"workflow {shown}: {done} of {len(started)} agents done, "
                              f"last activity {age(now - m)} ago"))
     seen = set()
+    candidates = []  # (mtime, task id, path): no exit marker, not Scry's own stream
     for root in (task_roots or "").split(":"):
         if not root:
             continue
@@ -162,6 +205,7 @@ def roster_items(sid, projects, task_roots, fresh=3600, launch=None, now=None):
                 try:
                     m = os.path.getmtime(out)
                     with open(out, "rb") as fh:
+                        head = fh.read(8)
                         fh.seek(0, 2)
                         fh.seek(max(0, fh.tell() - 64))
                         tail = fh.read()
@@ -169,26 +213,13 @@ def roster_items(sid, projects, task_roots, fresh=3600, launch=None, now=None):
                     continue
                 if b"[exited with code" in tail or b"[killed]" in tail:
                     continue
-                tid = os.path.basename(out)[:-len(".output")]
-                # Two files that look unfinished and are not (read live
-                # 2026-09-14 in 62aa5e9f): a plugin monitor's own notification
-                # stream, which never records an exit while the monitor lives
-                # — Scry's is known by its own opening, "Scry — "; and a
-                # finished foreground command whose large result Claude Code
-                # persisted to <session>/tool-results/<task id>.txt, leaving
-                # the task file behind with no marker.
-                try:
-                    with open(out, "rb") as fh:
-                        head = fh.read(8)
-                except OSError:
-                    continue
                 if head.startswith("Scry — ".encode("utf-8")[:8]):
                     continue
-                if any(os.path.exists(os.path.join(sdir, "tool-results", tid + ".txt"))
-                       for sdir in session_dirs):
-                    continue
-                items.append((m, f"background command {tid}: still running, "
-                                 f"last output {age(now - m)} ago"))
+                candidates.append((m, os.path.basename(out)[:-len(".output")], real))
+    for m, tid, real in candidates:
+        if real in held_open([c[2] for c in candidates]):
+            items.append((m, f"background command {tid}: still running, "
+                             f"last output {age(now - m)} ago"))
     items.sort(key=lambda x: -x[0])
     return items
 

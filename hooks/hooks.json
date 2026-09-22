@@ -107,6 +107,15 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/subagent_cold_advisory.sh",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "SubagentStart": [

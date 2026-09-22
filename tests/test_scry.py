@@ -34,6 +34,22 @@ def context(result):
     return json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
 
 
+def hold_open(test, path):
+    """A process with `path` as its stdout, the way the shell running a
+    command holds its task file until it exits (read live 2026-09-22:
+    `zsh ... 1w ... tasks/b*.output`). Killed when the test ends."""
+    with open(path, "ab") as out:
+        proc = subprocess.Popen(["tail", "-f", "/dev/null"], stdout=out,
+                                stderr=subprocess.DEVNULL)
+
+    def stop():
+        proc.kill()
+        proc.wait()
+    test.addCleanup(stop)
+    time.sleep(0.05)
+    return proc
+
+
 class ScryHookTests(unittest.TestCase):
     def test_health_reports_stale_main_without_changing_checkout(self):
         with tempfile.TemporaryDirectory() as td:
@@ -439,7 +455,10 @@ class ScryHookTests(unittest.TestCase):
             tasks = base / "taskroot" / enc / prev_id / "tasks"
             tasks.mkdir(parents=True)
             (tasks / "running.output").write_text("partial output so far\n")
+            hold_open(self, tasks / "running.output")
             (tasks / "zzdone.output").write_text("done\n\n[exited with code 0]\n")
+            # A foreground call's leftover: no marker, no holder, finished.
+            (tasks / "zzfore.output").write_text("diff --git a/x b/x\n")
             (tasks / "agent.output").symlink_to(mine / "builder.jsonl")
             stale = claude_dir / prev_id / "subagents" / "old.jsonl"
             stale.write_text(json.dumps({"cwd": str(repo)}) + "\n")
@@ -468,6 +487,7 @@ class ScryHookTests(unittest.TestCase):
             self.assertIn("2 task(s) it registered that have not recorded an exit: "
                           "agent (agent), running (shell)", report)
             self.assertNotIn("zzdone", report)
+            self.assertNotIn("zzfore", report)
             self.assertNotIn("stale-agent", report)
             self.assertIn("runs twice", report)
             # The stranger is still a stranger, and is counted once, not twice.
@@ -3082,11 +3102,13 @@ class CacheHandoffTests(unittest.TestCase):
         os.utime(j, (t, t))
         return j
 
-    def _shell_task(self, td, text, age=0, sid=None):
+    def _shell_task(self, td, text, age=0, sid=None, held=False):
         d = Path(td) / "tasks" / "-Users-someone-repo" / (sid or self.SID) / "tasks"
         d.mkdir(parents=True, exist_ok=True)
         out = d / "bq7shell1.output"
         out.write_text(text)
+        if held:
+            hold_open(self, out)
         t = time.time() - age
         os.utime(out, (t, t))
         return out
@@ -3400,7 +3422,7 @@ class CacheHandoffTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             self._subagent(td)
             self._workflow(td, name="piece-2")
-            self._shell_task(td, "compiling\n")
+            self._shell_task(td, "compiling\n", held=True)
             self._armed_near_expiry(td)
             self.assertIn("keep-alive", self._monitor(td).stdout)
             state = Path(td) / "state"
@@ -3409,7 +3431,7 @@ class CacheHandoffTests(unittest.TestCase):
                                             f"{self.SID}.state", f"pid/{self.PID}",
                                             f"pid/{self.PID}.sessions", f"pid/{self.PID}.watch"]))
             ka = json.loads((state / f"{self.SID}.keepalive").read_text())
-            self.assertEqual(set(ka), {"armed_at", "cycle", "total", "sent_at", "sent_expires"})
+            self.assertEqual(set(ka), {"armed_at", "cycle", "sent_at", "sent_expires"})
 
     def test_a_subagent_is_listed_only_within_one_ttl_of_its_last_write(self):
         # Nothing in a plain subagent's metadata says it finished, so its
@@ -3417,8 +3439,21 @@ class CacheHandoffTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             self._subagent(td, age=1300)  # quiet for 20+ minutes, inside one TTL
             self._armed_near_expiry(td)
-            self.assertRegex(self._monitor(td).stdout,
-                             r'keep-alive.*subagent a1b2c3 "build:opus": last activity 2\dm ago')
+            said = self._monitor(td).stdout
+            self.assertRegex(said, r'keep-alive.*subagent a1b2c3 "build:opus": last activity 2\dm ago')
+            self.assertNotIn("its own cache goes cold", said)
+        with tempfile.TemporaryDirectory() as td:
+            # The last quarter of the window: what the silence means rides
+            # the keep-alive line (Matt, 2026-09-22) — never a wake of its own.
+            self._subagent(td, age=2800)
+            self._armed_near_expiry(td)
+            said = self._monitor(td).stdout
+            self.assertIn("keep-alive", said)
+            self.assertIn('subagent a1b2c3 "build:opus": last activity 46m ago — its own cache '
+                          "goes cold at 1h00m of silence: finished, nothing happens; still "
+                          "working, its next step re-reads its context once at the full rate; "
+                          "stuck, stop it now rather than after that read", said)
+            self.assertEqual(said.count("\n"), 1)
         with tempfile.TemporaryDirectory() as td:
             self._subagent(td, age=3700)  # outside the window
             self._armed_near_expiry(td)
@@ -3429,13 +3464,21 @@ class CacheHandoffTests(unittest.TestCase):
             self.assertNotIn("has not finished", out)
             self.assertEqual(self._state(td)[0], "requested")
 
-    def test_a_background_command_is_listed_until_it_records_an_exit_however_quiet(self):
+    def test_a_background_command_is_listed_while_a_process_holds_its_file_however_quiet(self):
         with tempfile.TemporaryDirectory() as td:
             self._shell_task(td, "SECRET OUTPUT\n[exited with code 0]\n")
             self._armed_near_expiry(td)
             self.assertNotIn("keep-alive", self._monitor(td).stdout)
         with tempfile.TemporaryDirectory() as td:
-            out = self._shell_task(td, "SECRET OUTPUT still going\n", age=7200)
+            # 2026-09-22: a foreground call's file — no marker, no holder —
+            # is finished work. Fifty of these kept one session warm hourly.
+            self._shell_task(td, "diff --git a/x b/x\nSECRET\n", age=7200)
+            self._armed_near_expiry(td)
+            said = self._monitor(td).stdout
+            self.assertNotIn("keep-alive", said)
+            self.assertNotIn("bq7shell1", said)
+        with tempfile.TemporaryDirectory() as td:
+            out = self._shell_task(td, "SECRET OUTPUT still going\n", age=7200, held=True)
             self._armed_near_expiry(td)
             said = self._monitor(td).stdout
             self.assertIn("keep-alive", said)
@@ -3484,19 +3527,23 @@ class CacheHandoffTests(unittest.TestCase):
             self.assertEqual(self._state(td)[0], "requested")
             self.assertEqual(self._monitor(td, SCRY_KEEPALIVE_MAX="1").stdout, "")
 
-    def test_a_new_user_message_resets_the_message_cap_but_not_the_session_cap(self):
+    def test_a_new_user_message_starts_the_count_again_and_nothing_caps_a_session(self):
+        # Matt, 2026-09-22: a user message is the signal the session is
+        # alive; a per-session ceiling "defeats the purpose". Three messages,
+        # three keep-alives at a cap of one each, and no state that
+        # remembers a session total.
         with tempfile.TemporaryDirectory() as td:
             self._subagent(td)
             cap = {"SCRY_KEEPALIVE_MAX": "1", "SCRY_KEEPALIVE_MAX_PER_SESSION": "2"}
-            for n in (1, 2):
+            for n in (1, 2, 3):
                 self._armed_near_expiry(td)
                 self._subagent(td)
-                self.assertIn("Keep-alive 1 of at most 1", self._monitor(td, **cap).stdout)
+                said = self._monitor(td, **cap).stdout
+                self.assertIn("Keep-alive 1 of at most 1", said)
+                self.assertNotIn("per session", said)
                 time.sleep(1.1)
-            self._armed_near_expiry(td)
-            said = self._monitor(td, **cap).stdout
-            self.assertIn("allowed per session are spent", said)
-            self.assertEqual(self._state(td)[0], "requested")
+            ka = json.loads((Path(td) / "state" / f"{self.SID}.keepalive").read_text())
+            self.assertNotIn("total", ka)
 
     def test_a_keep_alive_that_does_not_move_the_deadline_falls_back_to_the_summary(self):
         with tempfile.TemporaryDirectory() as td:
@@ -3665,11 +3712,13 @@ class RosterTests(unittest.TestCase):
         env.update(extra)
         return env
 
-    def _task(self, td, tid, text, age=0, sid=None):
+    def _task(self, td, tid, text, age=0, sid=None, held=False):
         d = Path(td) / "tasks" / "-Users-someone-repo" / (sid or self.SID) / "tasks"
         d.mkdir(parents=True, exist_ok=True)
         out = d / f"{tid}.output"
         out.write_text(text)
+        if held:
+            hold_open(self, out)
         t = time.time() - age
         os.utime(out, (t, t))
         return out
@@ -3687,7 +3736,7 @@ class RosterTests(unittest.TestCase):
         # 62aa5e9f: four tails stopped, a fifth missed, "nothing running" said
         # twice. Its b*.output had no exit marker all night.
         with tempfile.TemporaryDirectory() as td:
-            self._task(td, "b55udo2rk", "[round 3] SECRET compile exit=1\n", age=7 * 3600 + 30)
+            self._task(td, "b55udo2rk", "[round 3] SECRET compile exit=1\n", age=7 * 3600 + 30, held=True)
             self._task(td, "b2287w1k9", "SECRET\n\n[killed]\n", age=7 * 3600)
             self._task(td, "b4jdo82tu", "SECRET\n[exited with code 0]\n")
             out = self._roster(td).stdout
@@ -3698,24 +3747,23 @@ class RosterTests(unittest.TestCase):
             self.assertNotIn("SECRET", out)
             self.assertIn("Scry stops nothing", out)
 
-    def test_the_monitors_own_stream_and_a_persisted_foreground_result_are_not_work(self):
-        # Read live in 62aa5e9f, 2026-09-14: the cache monitor's notifications
-        # land in a b*.output that never records an exit while it lives, and a
-        # foreground command whose large result Claude Code saved under
-        # tool-results/ leaves its task file behind with no marker. The tip's
-        # keep-alive would have called both "unfinished work" and kept the
-        # cache warm for them instead of asking for the summary.
+    def test_the_monitors_own_stream_and_a_finished_foreground_call_are_not_work(self):
+        # The cache monitor's notifications land in a b*.output it holds open
+        # for as long as it lives (read live 2026-09-14), and a foreground
+        # call — any size — leaves its task file behind with no marker and
+        # no holder (read live 2026-09-22: fifty of them in one session, up
+        # to four days old, each "still running" to the old marker test).
         with tempfile.TemporaryDirectory() as td:
             self._task(td, "bmonitor1", "Scry — cache deadline (this is a Scry monitor "
-                                        "notification, not a user message): SECRET\n", age=3600)
+                                        "notification, not a user message): SECRET\n",
+                       age=3600, held=True)
             self._task(td, "bbigfind1", "/Users/x/a\n/Users/x/b\n", age=1500)
-            tr = Path(td) / "projects" / "-Users-someone-repo" / self.SID / "tool-results"
-            tr.mkdir(parents=True)
-            (tr / "bbigfind1.txt").write_text("SECRET persisted result\n")
-            self._task(td, "bstillon1", "going\n", age=1530)
+            self._task(td, "bcredo001", "Checking 2349 source files\nSECRET\n", age=80 * 3600)
+            self._task(td, "bstillon1", "going\n", age=1530, held=True)
             out = self._roster(td, SCRY_PS_OUTPUT="").stdout
             self.assertNotIn("bmonitor1", out)
             self.assertNotIn("bbigfind1", out)
+            self.assertNotIn("bcredo001", out)
             self.assertIn("background command bstillon1: still running, last output 25m ago", out)
             self.assertNotIn("SECRET", out)
 
@@ -3752,7 +3800,7 @@ class RosterTests(unittest.TestCase):
             sd = Path(td) / "sessions"
             sd.mkdir()
             (sd / f"{self.PID}.json").write_text(json.dumps({"sessionId": new}))
-            self._task(td, "bnew00001", "going\n", sid=new)
+            self._task(td, "bnew00001", "going\n", sid=new, held=True)
             out = self._roster(td, SCRY_PS_OUTPUT="").stdout
             self.assertIn(f"roster for session {new}", out)
             self.assertIn("background command bnew00001: still running", out)
@@ -3767,6 +3815,7 @@ class RosterTests(unittest.TestCase):
             tasks = base / "taskroot" / enc / self.SID / "tasks"
             tasks.mkdir(parents=True)
             (tasks / "bwatch001.output").write_text("SECRET partial\n")
+            hold_open(self, tasks / "bwatch001.output")
             (tasks / "bdone0001.output").write_text("SECRET\n[exited with code 0]\n")
             (base / "plugins").mkdir()
             (base / "plugins" / "installed_plugins.json").write_text(json.dumps(
@@ -3797,6 +3846,52 @@ class RosterTests(unittest.TestCase):
             payload["source"] = "clear"
             report = context(run_hook("fleet.sh", repo, payload, env))
             self.assertNotIn("WORK THIS SESSION STARTED", report)
+
+
+class SubagentColdAdvisoryTests(unittest.TestCase):
+    """subagent_cold_advisory.sh (PostToolUse): the cold-cache note rides a
+    tool result the main agent is about to read anyway — awake, this; idle,
+    the keep-alive line — never a wake of its own (Matt, 2026-09-22)."""
+    SID = "sess-cold-0001"
+
+    def _stage(self, td, age, aid="a1b2c3", description="build:opus"):
+        proj = Path(td) / "projects" / "-Users-someone-repo"
+        sub = proj / self.SID / "subagents"
+        sub.mkdir(parents=True, exist_ok=True)
+        j = sub / f"agent-{aid}.jsonl"
+        j.write_text('{"type":"assistant","message":"SECRET AGENT TEXT"}\n')
+        (sub / f"agent-{aid}.meta.json").write_text(json.dumps({"description": description}))
+        t = time.time() - age
+        os.utime(j, (t, t))
+        return str(proj / f"{self.SID}.jsonl")
+
+    def _run(self, td, tp, agent_id=""):
+        payload = {"session_id": self.SID, "transcript_path": tp, "tool_name": "Bash",
+                   "tool_input": {"command": "SECRET"}, "tool_response": "SECRET"}
+        if agent_id:
+            payload["agent_id"] = agent_id
+        return context(run_hook("subagent_cold_advisory.sh", td, payload,
+                                {"SCRY_SUBAGENT_COLD_STATE_DIR": str(Path(td) / "cold")}))
+
+    def test_it_speaks_once_in_the_last_quarter_of_the_ttl_and_not_inside_a_subagent(self):
+        with tempfile.TemporaryDirectory() as td:
+            tp = self._stage(td, age=1300)
+            self.assertEqual(self._run(td, tp), "")
+            tp = self._stage(td, age=2800)
+            self.assertEqual(self._run(td, tp, agent_id="a1b2c3"), "")
+            said = self._run(td, tp)
+            self.assertIn('Scry — a subagent this session started is going quiet: subagent '
+                          'a1b2c3 "build:opus": silent 46m — its own cache goes cold at 1h00m '
+                          "of silence: finished, nothing happens; still working, its next step "
+                          "re-reads its context once at the full rate; stuck, stop it now "
+                          "rather than after that read", said)
+            self.assertIn("ListAgents", said)
+            self.assertNotIn("SECRET", said)
+            self.assertEqual(self._run(td, tp), "")
+            # Past the TTL it is left alone: cold already, and Scry cannot
+            # tell a finished subagent from a quiet one.
+            tp = self._stage(td, age=3700, aid="d4e5f6")
+            self.assertEqual(self._run(td, tp), "")
 
 
 class TeammateRosterTests(unittest.TestCase):

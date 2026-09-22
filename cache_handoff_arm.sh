@@ -18,8 +18,8 @@
 # status line instead of the summary, so the cache is warm when that work
 # reports back. It
 # does not re-arm anything either; it is counted and capped in the monitor
-# (SCRY_KEEPALIVE_MAX per user message, SCRY_KEEPALIVE_MAX_PER_SESSION in
-# all), and only an arm from this hook starts a new per-message count.
+# (SCRY_KEEPALIVE_MAX per user message), and only an arm from this hook
+# starts a new per-message count.
 #
 # UserPromptSubmit is not only user messages (binary 2.1.270, 2026-09-13):
 # Claude Code runs it for every queued "task-notification" too — a background
