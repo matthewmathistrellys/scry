@@ -123,10 +123,11 @@
 #               Agents and workflows are looked up under the current session,
 #               shell tasks under both the launch and the current session —
 #               that is where Claude Code files each (read 2026-09-13).
-#   bounded     SCRY_KEEPALIVE_MAX (8) per user message, and
-#               SCRY_KEEPALIVE_MAX_PER_SESSION (24) that nothing resets — the
-#               backstop if some other wake ever re-arms. Counted in
-#               <session>.keepalive BEFORE the line is printed.
+#   bounded     SCRY_KEEPALIVE_MAX (8) per user message; a new user message
+#               starts the count again (it is the signal the session is
+#               alive — Matt, 2026-09-22: no per-session ceiling, "that
+#               defeats the purpose"). Counted in <session>.keepalive
+#               BEFORE the line is printed.
 #   verified    one keep-alive per deadline. If the deadline has not moved
 #               half a lead later, the ack did not happen: ask for the summary.
 #
@@ -161,12 +162,10 @@ state_dir="${SCRY_CACHE_STATE_DIR:-${TMPDIR:-/tmp}/scry-cache-deadline}"
 lead="${SCRY_CACHE_HANDOFF_LEAD_SECONDS:-120}"
 poll="${SCRY_CACHE_HANDOFF_POLL_SECONDS:-15}"
 ka_max="${SCRY_KEEPALIVE_MAX:-8}"
-ka_session_max="${SCRY_KEEPALIVE_MAX_PER_SESSION:-24}"
 ka_fresh="${SCRY_KEEPALIVE_FRESH_SECS:-3600}"
 case "$lead" in ''|*[!0-9]*) lead=120 ;; esac
 case "$poll" in ''|*[!0-9]*) poll=15 ;; esac
 case "$ka_max" in ''|*[!0-9]*) ka_max=8 ;; esac
-case "$ka_session_max" in ''|*[!0-9]*) ka_session_max=24 ;; esac
 case "$ka_fresh" in ''|*[!0-9]*) ka_fresh=3600 ;; esac
 
 # Claude Code writes task output under /tmp/claude-<uid> whatever TMPDIR says
@@ -182,7 +181,7 @@ pass() {
   SCRY_SESSIONS_DIR="${SCRY_CLAUDE_SESSIONS_DIR:-$HOME/.claude/sessions}" \
   SCRY_PROJECTS_DIR="${SCRY_CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}" \
   SCRY_TASK_ROOTS="$task_roots" SCRY_KA_MAX="$ka_max" \
-  SCRY_KA_SESSION_MAX="$ka_session_max" SCRY_KA_FRESH="$ka_fresh" \
+  SCRY_KA_FRESH="$ka_fresh" \
   python3 - <<'PY' 2>/dev/null
 import glob, json, os, re, sys, time
 
@@ -308,14 +307,12 @@ try:
         ka = {}
 except Exception:
     ka = {}
-total = int(ka.get("total") or 0)
 if ka.get("armed_at") == since:
     cycle = int(ka.get("cycle") or 0)
     sent_expires = ka.get("sent_expires")
     sent_at = int(ka.get("sent_at") or 0)
 else:
-    # A new user message: the per-message count starts again. The session
-    # count does not.
+    # A new user message: the count starts again.
     cycle, sent_expires, sent_at = 0, None, 0
 
 why_not = ""
@@ -338,21 +335,18 @@ from roster import roster_lines
 roster = roster_lines(sid, projects, os.environ["SCRY_TASK_ROOTS"], fresh=fresh, launch=launch, now=now)
 listed = "; ".join(roster[:8]) + (f"; and {len(roster) - 8} more" if len(roster) > 8 else "")
 ka_max = int(os.environ["SCRY_KA_MAX"])
-ka_session_max = int(os.environ["SCRY_KA_SESSION_MAX"])
 at = time.strftime("%H:%M", time.localtime(expires))
 minutes = max(0, (expires - now) // 60)
 
 if roster and not why_not:
     if cycle >= ka_max:
         why_not = f"the {ka_max} keep-alives allowed per user message are spent"
-    elif total >= ka_session_max:
-        why_not = f"the {ka_session_max} keep-alives allowed per session are spent"
 
 if roster and not why_not:
     # Counted before printing: a restart between the two cannot send twice.
     try:
         atomic_write(ka_path, json.dumps({
-            "armed_at": since, "cycle": cycle + 1, "total": total + 1,
+            "armed_at": since, "cycle": cycle + 1,
             "sent_at": now, "sent_expires": expires,
         }))
     except Exception:
