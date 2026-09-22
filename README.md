@@ -23,6 +23,7 @@ machine is carrying. Independent checks and advisories fill that in.
 | **`session_disposal_advisory.sh`** | What is this session leaving behind? |
 | **`cache_handoff_monitor.sh`** | Is this session about to lose its prompt cache — and what is still unfinished, or what should be summarised first? |
 | **`roster.sh`** | What did *this* session start that has not finished — and is it what I remember? |
+| **teammates** (in `fleet.sh`, `session_disposal_advisory.sh`, `roster.sh`) | Which in-process teammates, from any session a live Claude process has held, were never recorded as stopped — with the one tool that can tell, `ListAgents`, named. Said once per process per set of names. |
 | **Markdown trust** | What goes wrong when repository prose is mistaken for authority? |
 
 - **`architecture.sh`** — a map of the codebase. It is a *dispatcher*, not a

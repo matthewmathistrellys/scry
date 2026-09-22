@@ -771,6 +771,19 @@ try:
             "- WORK THIS SESSION STARTED HAS NOT FINISHED, as far as Scry can tell "
             f"from file metadata: {shown}. Scry stops nothing; check on what is "
             "yours before saying nothing is running.")
+    # Teammates anywhere in the family, from any session, that may still be
+    # registered in a live process (roster.py says what Scry can and cannot
+    # tell). Said once per process per set of names. The session's own are
+    # skipped here: it can see those; the Stop hook covers them on the way out.
+    from roster import teammate_finding
+    mates = teammate_finding(
+        [os.path.join(projects, k) for k in known],
+        os.environ["SCRY_DEADLINE_ROOT"],
+        os.path.join(os.environ.get("TMPDIR") or "/tmp", "scry-teammates"),
+        os.environ.get("SCRY_PID", ""), ps_text=os.environ.get("SCRY_PS_OUTPUT"),
+        skip_sid=self_id or None, now=now)
+    if mates:
+        lines.append("- " + mates)
     monitors = plugin_monitors(
         os.environ.get("SCRY_PID", ""),
         os.environ.get("SCRY_INSTALLED_PLUGINS") or os.path.expanduser("~/.claude/plugins/installed_plugins.json"),
