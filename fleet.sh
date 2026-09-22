@@ -777,7 +777,7 @@ try:
     # skipped here: it can see those; the Stop hook covers them on the way out.
     from roster import teammate_finding
     mates = teammate_finding(
-        [os.path.join(projects, k) for k in known],
+        [os.path.join(projects, k) for k in known] or [os.path.join(projects, encode(cwd))],
         os.environ["SCRY_DEADLINE_ROOT"],
         os.path.join(os.environ.get("TMPDIR") or "/tmp", "scry-teammates"),
         os.environ.get("SCRY_PID", ""), ps_text=os.environ.get("SCRY_PS_OUTPUT"),

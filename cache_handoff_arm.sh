@@ -59,7 +59,7 @@ payload="$(cat 2>/dev/null || true)"
 state_dir="${SCRY_CACHE_STATE_DIR:-${TMPDIR:-/tmp}/scry-cache-deadline}"
 
 SCRY_PAYLOAD="$payload" SCRY_DIR="$state_dir" SCRY_PID="${CLAUDE_PID:-}" python3 - <<'PY' 2>/dev/null
-import json, os, re, sys, time
+import json, os, re, subprocess, sys, time
 try:
     d = json.loads(os.environ.get("SCRY_PAYLOAD") or "{}")
 except Exception:
@@ -85,9 +85,16 @@ if pid.isdigit():
         # a teammate spawned by a session this process has since /cleared
         # can still be tied to the process it lives in (roster.py, 2026-09-21).
         chain = os.path.join(state_dir, "pid", pid + ".sessions")
+        held = []
         try:
-            held = open(chain).read().split()
-        except OSError:
+            # A pid is reused; a chain written before this process started
+            # is a dead process's and starts over.
+            started = subprocess.run(["ps", "-o", "lstart=", "-p", pid], capture_output=True,
+                                     text=True, timeout=5).stdout.strip()
+            started = time.mktime(time.strptime(started, "%a %b %d %H:%M:%S %Y"))
+            if os.path.getmtime(chain) >= started:
+                held = open(chain).read().split()
+        except Exception:
             held = []
         if sid not in held:
             atomic_write(chain, "".join(h + "\n" for h in held + [sid]))

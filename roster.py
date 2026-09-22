@@ -213,34 +213,43 @@ def family_project_dirs(projects, cwd):
     return [os.path.join(projects, encode(os.path.realpath(p))) for p in paths]
 
 
-def live_claude_pids(ps_text=None):
-    """Pids of running `claude` processes."""
+def live_claude_starts(ps_text=None):
+    """{pid: start epoch} of running `claude` processes."""
     if ps_text is None:
         try:
             ps_text = subprocess.run(["ps", "-axo", "pid=,ppid=,lstart=,command="],
                                      capture_output=True, text=True, timeout=10).stdout
         except Exception:
-            return set()
-    pids = set()
+            return {}
+    starts = {}
     for line in ps_text.splitlines():
         parts = line.split(None, 7)
         if len(parts) < 8 or not parts[0].isdigit():
             continue
         cmd = parts[7].split()
-        if cmd and os.path.basename(cmd[0]) == "claude":
-            pids.add(parts[0])
-    return pids
+        if not cmd or os.path.basename(cmd[0]) != "claude":
+            continue
+        try:
+            starts[parts[0]] = time.mktime(time.strptime(" ".join(parts[2:7]), "%a %b %d %H:%M:%S %Y"))
+        except ValueError:
+            continue
+    return starts
 
 
 def sessions_in_live_processes(state_dir, ps_text=None):
     """Every session id a running Claude process has held, from Scry's own
     per-process record (cache_handoff_arm.sh: pid/<pid>.sessions, plus the
     launch and current ids in pid/<pid> and pid/<pid>.watch for processes
-    older than that record)."""
+    older than that record). A pid is reused after a process dies, and
+    nothing sweeps these files, so a file written before the process
+    started belongs to a dead one and is not read (review, 2026-09-21)."""
     held = set()
-    for pid in live_claude_pids(ps_text):
+    for pid, started in live_claude_starts(ps_text).items():
         base = os.path.join(state_dir, "pid", pid)
         for path in (base + ".sessions", base, base + ".watch"):
+            m = mtime(path)
+            if m is None or m < started:
+                continue
             try:
                 with open(path) as f:
                     held.update(w for w in f.read().split() if SID_OK.match(w) and "-" in w)
@@ -252,8 +261,8 @@ def sessions_in_live_processes(state_dir, ps_text=None):
 def teammate_items(family_dirs, state_dir, ps_text=None, now=None, skip_sid=None):
     """In-process teammates spawned in the repo family by a session that a
     running Claude process has held — the only ones that can still be
-    registered: (mtime, name, line) newest first. `skip_sid` is the current
-    session, whose own teammates it can already see."""
+    registered: (mtime, agent id, line) newest first. `skip_sid` is the
+    current session, whose own teammates it can already see."""
     now = int(now or time.time())
     held = sessions_in_live_processes(state_dir, ps_text)
     if skip_sid:
@@ -275,17 +284,23 @@ def teammate_items(family_dirs, state_dir, ps_text=None, now=None, skip_sid=None
                 m = mtime(meta_path[:-len(".meta.json")] + ".jsonl") or mtime(meta_path)
                 if m is None:
                     continue
-                name = label(meta.get("name") or os.path.basename(meta_path)[len("agent-"):-len(".meta.json")])
-                items.append((m, name, f"teammate {name} (session {sid[:8]}): last wrote {age(now - m)} ago"))
+                aid = os.path.basename(meta_path)[len("agent-"):-len(".meta.json")]
+                name = label(meta.get("name") or aid)
+                items.append((m, aid, f"teammate {name} (session {sid[:8]}): last wrote {age(now - m)} ago"))
     items.sort(key=lambda x: -x[0])
     return items
 
 
-def teammate_finding(family_dirs, state_dir, marker_dir, pid, ps_text=None, now=None, skip_sid=None):
-    """One sentence for a hook, or "". Said once per Claude process per set
-    of names: stopping a teammate writes nothing to disk, so without this
-    every later session in the process would be told again (advisory
-    council, 2026-09-21). On-demand callers use teammate_items directly."""
+def teammate_finding(family_dirs, state_dir, marker_dir, pid, ps_text=None, now=None,
+                     skip_sid=None, mark=True):
+    """One sentence for a hook, or "". Said once per Claude process per
+    spawn (the agent id in the file name — names like `reviewer` recur):
+    stopping a teammate writes nothing to disk, so without this every later
+    session in the process would be told again (advisory council,
+    2026-09-21). `mark=False` reads the marker without writing it: the Stop
+    hook reminds a session of its own teammates that way, so the session a
+    /clear starts next is still told (review, 2026-09-21). On-demand
+    callers use teammate_items directly."""
     items = teammate_items(family_dirs, state_dir, ps_text, now, skip_sid)
     if not items:
         return ""
@@ -301,7 +316,7 @@ def teammate_finding(family_dirs, state_dir, marker_dir, pid, ps_text=None, now=
     fresh = [(m, n, line) for m, n, line in items if n not in told]
     if not fresh:
         return ""
-    if marker:
+    if marker and mark:
         try:
             os.makedirs(marker_dir, exist_ok=True)
             with open(marker, "w") as f:
