@@ -56,12 +56,11 @@ for j in sorted(glob.glob(os.path.join(glob.escape(sub), "agent-*.jsonl"))):
     if not (fresh * 3 // 4 <= quiet < fresh):
         continue
     aid = os.path.basename(j)[len("agent-"):-len(".jsonl")]
+    # Exclusive create: two tool calls landing together must not both say it.
     marker = os.path.join(state, f"{sid}-{aid}")
-    if os.path.exists(marker):
-        continue
     try:
         os.makedirs(state, exist_ok=True)
-        open(marker, "w").close()
+        os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
     except OSError:
         continue
     desc = ""
