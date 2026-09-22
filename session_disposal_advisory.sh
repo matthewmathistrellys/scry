@@ -274,7 +274,28 @@ if [ "$md_count" -gt 0 ]; then
   md_note="Scratch Markdown: $md_count untracked .md file(s) in this tree were written after this session started — $md_names. Anything in them that needs to outlive the session belongs where long-lived work is tracked; the files themselves are scratch."
 fi
 
-[ -n "$worktree_note" ] || [ -n "$md_note" ] || exit 0
+# ── Teammates this session (or its process) may be leaving registered ──────
+# In-process teammates outlive the session and die only with the process;
+# nothing on disk records a stop. roster.py names the candidates and says the
+# one thing that resolves it: ListAgents. Once per process per set of names,
+# shared with fleet.sh's SessionStart marker, so what start already said is
+# not said again — what is new here is what this session itself spawned.
+teammate_note="$(SCRY_HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" \
+  SCRY_SESSION_CWD="$session_cwd" python3 - <<'PY' 2>/dev/null
+import os, sys
+sys.path.insert(0, os.environ["SCRY_HOOK_DIR"])
+from roster import teammate_finding, family_project_dirs
+projects = os.environ.get("SCRY_CLAUDE_PROJECTS_DIR") or os.path.expanduser("~/.claude/projects")
+print(teammate_finding(
+    family_project_dirs(projects, os.environ["SCRY_SESSION_CWD"]),
+    os.environ.get("SCRY_CACHE_STATE_DIR") or os.path.join(os.environ.get("TMPDIR") or "/tmp", "scry-cache-deadline"),
+    os.path.join(os.environ.get("TMPDIR") or "/tmp", "scry-teammates"),
+    os.environ.get("CLAUDE_PID", ""), ps_text=os.environ.get("SCRY_PS_OUTPUT")))
+PY
+)"
+[ -n "$teammate_note" ] && teammate_note="Teammates: $teammate_note"
+
+[ -n "$worktree_note" ] || [ -n "$md_note" ] || [ -n "$teammate_note" ] || exit 0
 
 : > "$marker"
 
@@ -285,9 +306,12 @@ $worktree_note"
 [ -n "$md_note" ] && ADVISORY_TEXT="$ADVISORY_TEXT
 
 $md_note"
+[ -n "$teammate_note" ] && ADVISORY_TEXT="$ADVISORY_TEXT
+
+$teammate_note"
 ADVISORY_TEXT="$ADVISORY_TEXT
 
-Nothing here has been or will be deleted by this note — no worktree, no file. Say this to the user in a sentence and stop; do not start cleaning up unless asked."
+Nothing here has been or will be deleted by this note — no worktree, no file, no agent. Say this to the user in a sentence and stop; do not start cleaning up unless asked."
 
 CTX="$ADVISORY_TEXT" python3 - <<'PY'
 import json, os

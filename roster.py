@@ -34,6 +34,19 @@ What is listed, and what Scry can read for each:
                       result was persisted to tool-results/<id>.txt (the task
                       file stays behind with no marker). Both were listed as
                       "still running" when first read live, 2026-09-14.
+  teammate            <session>/subagents/agent-*.meta.json whose taskKind is
+                      in_process_teammate — a named agent that lives inside
+                      the Claude process and dies only with it (/clear keeps
+                      the process). Stopping one writes nothing to disk, so a
+                      finished-and-stopped teammate and a finished-and-still-
+                      registered one look identical here; only the harness
+                      tool ListAgents can tell them apart. Listed for the whole
+                      repo family, however old, when a running `claude`
+                      process has held the session that spawned it (Scry's
+                      own per-process record, pid/<pid>.sessions). Not
+                      part of the keep-alive roster: an idle teammate is not
+                      unfinished work. (2026-09-21: twenty of them, four days
+                      old, found in a trellys-app process only when Matt asked.)
   plugin monitor      a process under this Claude process running a script
                       from ~/.claude/plugins/cache/<market>/<plugin>/<ver>/
                       that the plugin's monitors/monitors.json registers (a
@@ -61,6 +74,8 @@ SID_OK = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 def age(seconds):
     s = max(0, int(seconds))
+    if s >= 86400:
+        return f"{s // 86400}d{(s % 86400) // 3600:02d}h"
     if s >= 3600:
         return f"{s // 3600}h{(s % 3600) // 60:02d}m"
     return f"{s // 60}m" if s >= 60 else f"{s}s"
@@ -176,6 +191,130 @@ def roster_items(sid, projects, task_roots, fresh=3600, launch=None, now=None):
                                  f"last output {age(now - m)} ago"))
     items.sort(key=lambda x: -x[0])
     return items
+
+
+def encode(path):
+    """Claude Code's transcript directory name for a cwd: '/', '.' and '_'
+    all become '-' (same rule fleet.sh uses, verified 2026-07-26)."""
+    return re.sub(r"[/._]", "-", path)
+
+
+def family_project_dirs(projects, cwd):
+    """The encoded transcript dirs of every worktree in cwd's repo family,
+    from git; cwd alone outside a repo."""
+    paths = []
+    try:
+        out = subprocess.run(["git", "-C", cwd, "worktree", "list", "--porcelain"],
+                             capture_output=True, text=True, timeout=10).stdout
+        paths = [ln[len("worktree "):] for ln in out.splitlines() if ln.startswith("worktree ")]
+    except Exception:
+        pass
+    paths = paths or [cwd]
+    return [os.path.join(projects, encode(os.path.realpath(p))) for p in paths]
+
+
+def live_claude_pids(ps_text=None):
+    """Pids of running `claude` processes."""
+    if ps_text is None:
+        try:
+            ps_text = subprocess.run(["ps", "-axo", "pid=,ppid=,lstart=,command="],
+                                     capture_output=True, text=True, timeout=10).stdout
+        except Exception:
+            return set()
+    pids = set()
+    for line in ps_text.splitlines():
+        parts = line.split(None, 7)
+        if len(parts) < 8 or not parts[0].isdigit():
+            continue
+        cmd = parts[7].split()
+        if cmd and os.path.basename(cmd[0]) == "claude":
+            pids.add(parts[0])
+    return pids
+
+
+def sessions_in_live_processes(state_dir, ps_text=None):
+    """Every session id a running Claude process has held, from Scry's own
+    per-process record (cache_handoff_arm.sh: pid/<pid>.sessions, plus the
+    launch and current ids in pid/<pid> and pid/<pid>.watch for processes
+    older than that record)."""
+    held = set()
+    for pid in live_claude_pids(ps_text):
+        base = os.path.join(state_dir, "pid", pid)
+        for path in (base + ".sessions", base, base + ".watch"):
+            try:
+                with open(path) as f:
+                    held.update(w for w in f.read().split() if SID_OK.match(w) and "-" in w)
+            except OSError:
+                continue
+    return held
+
+
+def teammate_items(family_dirs, state_dir, ps_text=None, now=None, skip_sid=None):
+    """In-process teammates spawned in the repo family by a session that a
+    running Claude process has held — the only ones that can still be
+    registered: (mtime, name, line) newest first. `skip_sid` is the current
+    session, whose own teammates it can already see."""
+    now = int(now or time.time())
+    held = sessions_in_live_processes(state_dir, ps_text)
+    if skip_sid:
+        held.discard(skip_sid)
+    if not held:
+        return []
+    items = []
+    for pdir in family_dirs:
+        for sid in held:
+            for meta_path in glob.glob(os.path.join(glob.escape(pdir), glob.escape(sid),
+                                                    "subagents", "agent-*.meta.json")):
+                try:
+                    with open(meta_path) as f:
+                        meta = json.load(f)
+                except Exception:
+                    continue
+                if meta.get("taskKind") != "in_process_teammate":
+                    continue
+                m = mtime(meta_path[:-len(".meta.json")] + ".jsonl") or mtime(meta_path)
+                if m is None:
+                    continue
+                name = label(meta.get("name") or os.path.basename(meta_path)[len("agent-"):-len(".meta.json")])
+                items.append((m, name, f"teammate {name} (session {sid[:8]}): last wrote {age(now - m)} ago"))
+    items.sort(key=lambda x: -x[0])
+    return items
+
+
+def teammate_finding(family_dirs, state_dir, marker_dir, pid, ps_text=None, now=None, skip_sid=None):
+    """One sentence for a hook, or "". Said once per Claude process per set
+    of names: stopping a teammate writes nothing to disk, so without this
+    every later session in the process would be told again (advisory
+    council, 2026-09-21). On-demand callers use teammate_items directly."""
+    items = teammate_items(family_dirs, state_dir, ps_text, now, skip_sid)
+    if not items:
+        return ""
+    told = set()
+    marker = None
+    if marker_dir and str(pid or "").isdigit():
+        marker = os.path.join(marker_dir, str(pid))
+        try:
+            with open(marker) as f:
+                told = set(f.read().split())
+        except OSError:
+            pass
+    fresh = [(m, n, line) for m, n, line in items if n not in told]
+    if not fresh:
+        return ""
+    if marker:
+        try:
+            os.makedirs(marker_dir, exist_ok=True)
+            with open(marker, "w") as f:
+                f.write("\n".join(sorted(told | {n for _, n, _ in items})))
+        except OSError:
+            pass
+    shown = "; ".join(line for _, _, line in fresh[:8])
+    if len(fresh) > 8:
+        shown += f"; and {len(fresh) - 8} more"
+    return (f"{len(fresh)} in-process teammate(s) spawned in this repo family were never "
+            f"recorded as stopped: {shown}. Scry cannot see whether they are still "
+            "registered; ListAgents can. Stop what is idle — an idle teammate holds "
+            "its context until its Claude process exits, and /clear does not exit it.")
 
 
 def roster_lines(*args, **kwargs):
@@ -354,6 +493,13 @@ def main():
     ps_text = env.get("SCRY_PS_OUTPUT")  # tests inject a process table
     lines += plugin_monitors(env.get("CLAUDE_PID", ""), installed, ps_text,
                              plugins_root=env.get("SCRY_PLUGINS_ROOT"))
+    mates = teammate_items(family_project_dirs(projects, os.getcwd()),
+                           env.get("SCRY_CACHE_STATE_DIR") or os.path.join(
+                               env.get("TMPDIR") or "/tmp", "scry-cache-deadline"), ps_text)
+    if mates:
+        lines += [line for _, _, line in mates]
+        lines.append("teammates above: Scry cannot see whether they are still registered; "
+                     "ListAgents can. Stop what is idle.")
     if not lines:
         print(f"Scry — roster for session {sid}: nothing this session started is "
               "still unfinished, as far as file metadata and the process table show.")

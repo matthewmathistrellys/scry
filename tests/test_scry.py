@@ -3407,7 +3407,7 @@ class CacheHandoffTests(unittest.TestCase):
             files = sorted(str(p.relative_to(state)) for p in state.rglob("*") if p.is_file())
             self.assertEqual(files, sorted([f"{self.SID}.deadline", f"{self.SID}.keepalive",
                                             f"{self.SID}.state", f"pid/{self.PID}",
-                                            f"pid/{self.PID}.watch"]))
+                                            f"pid/{self.PID}.sessions", f"pid/{self.PID}.watch"]))
             ka = json.loads((state / f"{self.SID}.keepalive").read_text())
             self.assertEqual(set(ka), {"armed_at", "cycle", "total", "sent_at", "sent_expires"})
 
@@ -3797,3 +3797,115 @@ class RosterTests(unittest.TestCase):
             payload["source"] = "clear"
             report = context(run_hook("fleet.sh", repo, payload, env))
             self.assertNotIn("WORK THIS SESSION STARTED", report)
+
+
+class TeammateRosterTests(unittest.TestCase):
+    """Idle in-process teammates (2026-09-21): twenty of them, four days
+    old, sat registered in a trellys-app process and no report named them.
+    Scry ties a teammate to the process that can still hold it through its
+    own per-process session chain, says so once per process, and never
+    guesses whether one is still registered — ListAgents does that."""
+    LIVE_PID = "424242"
+    DEAD_PID = "313131"
+    PS = "  424242   1000 Sun Sep 13 11:31:48 2026 /Users/x/.local/bin/claude\n"
+
+    def _teammate(self, td, sid, name, age=0, kind="in_process_teammate"):
+        d = Path(td) / "projects" / "-Users-x-repo" / sid / "subagents"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"agent-a{name}-0123.meta.json").write_text(json.dumps(
+            {"name": name, "taskKind": kind, "teamName": f"session-{sid[:8]}"}))
+        j = d / f"agent-a{name}-0123.jsonl"
+        j.write_text('{"cwd":"/Users/x/repo","content":"SECRET"}\n')
+        t = time.time() - age
+        os.utime(j, (t, t))
+
+    def _chain(self, td, pid, *sids):
+        d = Path(td) / "state" / "pid"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{pid}.sessions").write_text("".join(s + "\n" for s in sids))
+
+    def _run(self, td, skip_sid=None):
+        sys.path.insert(0, str(ROOT))
+        import roster
+        fam = [str(Path(td) / "projects" / "-Users-x-repo")]
+        return roster.teammate_finding(fam, str(Path(td) / "state"), str(Path(td) / "told"),
+                                       self.LIVE_PID, ps_text=self.PS, skip_sid=skip_sid)
+
+    def test_a_teammate_of_a_session_a_live_process_held_is_named_with_its_age(self):
+        with tempfile.TemporaryDirectory() as td:
+            old = "73249ef1-48bb-4d27-9cbf-f0111a441857"
+            self._chain(td, self.LIVE_PID, old, "bb0ab591-b4c8-4714-9f97-56bfbc89af54")
+            self._teammate(td, old, "wt-audit-marks", age=4 * 86400 + 3660)
+            self._teammate(td, old, "plain-sub", age=60, kind="subagent")
+            out = self._run(td)
+            self.assertIn("1 in-process teammate(s)", out)
+            self.assertIn("teammate wt-audit-marks (session 73249ef1): last wrote 4d01h ago", out)
+            self.assertNotIn("plain-sub", out)
+            self.assertNotIn("SECRET", out)
+            self.assertIn("ListAgents", out)
+
+    def test_a_teammate_whose_process_is_gone_is_not_a_candidate(self):
+        with tempfile.TemporaryDirectory() as td:
+            gone = "9e30b605-75fd-4ef6-bbe3-487e79f8e6b8"
+            self._chain(td, self.DEAD_PID, gone)
+            self._teammate(td, gone, "orphan-of-dead", age=3600)
+            self.assertEqual(self._run(td), "")
+
+    def test_the_current_sessions_own_teammates_are_skipped_at_start(self):
+        with tempfile.TemporaryDirectory() as td:
+            me = "5665a0d1-bdcf-44db-87ed-083638ae11d5"
+            self._chain(td, self.LIVE_PID, me)
+            self._teammate(td, me, "mine", age=60)
+            self.assertEqual(self._run(td, skip_sid=me), "")
+            self.assertIn("teammate mine", self._run(td))
+
+    def test_said_once_per_process_then_only_for_new_names(self):
+        # Stopping a teammate writes nothing to disk, so without a marker
+        # every later session in the process would be told the same names.
+        with tempfile.TemporaryDirectory() as td:
+            sid = "73249ef1-48bb-4d27-9cbf-f0111a441857"
+            self._chain(td, self.LIVE_PID, sid)
+            self._teammate(td, sid, "first", age=600)
+            self.assertIn("teammate first", self._run(td))
+            self.assertEqual(self._run(td), "")
+            self._teammate(td, sid, "second", age=1)
+            again = self._run(td)
+            self.assertIn("teammate second", again)
+            self.assertNotIn("teammate first", again)
+
+    def test_the_arm_hook_records_every_session_a_process_has_held(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = {"CLAUDE_PID": self.LIVE_PID, "SCRY_CACHE_STATE_DIR": str(Path(td) / "state")}
+            for sid in ("aaaaaaaa-0000-0000-0000-000000000001",
+                        "bbbbbbbb-0000-0000-0000-000000000002",
+                        "aaaaaaaa-0000-0000-0000-000000000001"):
+                run_hook("cache_handoff_arm.sh", td,
+                         {"session_id": sid, "hook_event_name": "SessionStart"}, env=env)
+            chain = (Path(td) / "state" / "pid" / f"{self.LIVE_PID}.sessions").read_text().split()
+            self.assertEqual(chain, ["aaaaaaaa-0000-0000-0000-000000000001",
+                                     "bbbbbbbb-0000-0000-0000-000000000002"])
+
+    def test_the_stop_hook_carries_the_same_line_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            projects = Path(td) / "projects"
+            import roster
+            enc = roster.encode(os.path.realpath(str(repo)))
+            sid = "73249ef1-48bb-4d27-9cbf-f0111a441857"
+            d = projects / enc / sid / "subagents"
+            d.mkdir(parents=True)
+            (d / "agent-ax-1.meta.json").write_text(json.dumps({"name": "x-left", "taskKind": "in_process_teammate"}))
+            (d / "agent-ax-1.jsonl").write_text("{}\n")
+            self._chain(td, self.LIVE_PID, sid)
+            transcript = Path(td) / "t.jsonl"
+            transcript.write_text("{}\n")
+            env = {"CLAUDE_PID": self.LIVE_PID, "SCRY_CACHE_STATE_DIR": str(Path(td) / "state"),
+                   "SCRY_CLAUDE_PROJECTS_DIR": str(projects), "SCRY_PS_OUTPUT": self.PS,
+                   "TMPDIR": td, "SCRY_WORKTREE_REMINDER_MINUTES": "0"}
+            payload = {"session_id": "stop-sess-1", "cwd": str(repo), "transcript_path": str(transcript)}
+            out = run_hook("session_disposal_advisory.sh", str(repo), payload, env=env).stdout
+            self.assertIn("Teammates: 1 in-process teammate(s)", out)
+            self.assertIn("teammate x-left (session 73249ef1)", out)
+            self.assertIn("no agent", out)

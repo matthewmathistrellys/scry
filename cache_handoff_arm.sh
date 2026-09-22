@@ -42,7 +42,8 @@
 # of a prompt, because no metadata field separates a user from a notification.
 #
 # Every run with CLAUDE_PID set also writes pid/<CLAUDE_PID> = "<session_id>
-# <time>" — the session this process is running now. /clear changes the
+# <time>" — the session this process is running now — and appends the id to
+# pid/<CLAUDE_PID>.sessions, every session the process has held. /clear changes the
 # session inside a process whose monitor never restarts; this record, beside
 # Claude Code's own ~/.claude/sessions/<pid>.json, is how the monitor keeps up.
 #
@@ -80,6 +81,16 @@ pid = os.environ.get("SCRY_PID", "")
 if pid.isdigit():
     try:
         atomic_write(os.path.join(state_dir, "pid", pid), f"{sid} {now}\n")
+        # And every session this process has ever held, one id per line, so
+        # a teammate spawned by a session this process has since /cleared
+        # can still be tied to the process it lives in (roster.py, 2026-09-21).
+        chain = os.path.join(state_dir, "pid", pid + ".sessions")
+        try:
+            held = open(chain).read().split()
+        except OSError:
+            held = []
+        if sid not in held:
+            atomic_write(chain, "".join(h + "\n" for h in held + [sid]))
     except Exception:
         pass
 
