@@ -10,10 +10,13 @@ behavior lives in `README.md`; these rules govern changes to the shared hooks.
   Claude and Codex copy of a check.
 - **Quiet by default.** A signal speaks only when it would change a decision.
   A check that reports nothing is reporting that nothing needs attention.
-- **Advisory, never blocking.** Every hook exits zero. Scry reports facts and
-  leaves the response to the reader.
-- **Projects consequences, never actions.** State mechanical, verifiable
-  exposure, not workflow recommendations or predictions.
+- **Advisory, never blocking.** Every hook exits zero. Scry says what it sees
+  and leaves the response to the reader.
+- **Observations and insights, never instructions.** Scry gives information
+  (what it observed, and how it knows) and insights (what that observation
+  means: often a potential consequence, or why a source is untrustworthy for
+  the question at hand). An insight is short and clean; it says what the thing
+  means, not how the thing works, and it never tells the reader what to do.
 - **Never silently wrong.** Report an external dependency as unknown when it
   cannot be checked; do not imply it was checked and found healthy.
 - **One concern per script.** Architecture, repository health, session fleet,

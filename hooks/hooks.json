@@ -65,6 +65,21 @@
             "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/scale_advisory.sh",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/seed_data_advisory.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Grep|Glob|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/seed_data_advisory.sh",
+            "timeout": 10
           }
         ]
       },
