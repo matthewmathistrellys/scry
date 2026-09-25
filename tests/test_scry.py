@@ -4047,3 +4047,98 @@ class TeammateRosterTests(unittest.TestCase):
             self.assertIn("Teammates: 1 in-process teammate(s)", out)
             self.assertIn("teammate x-left (session 73249ef1)", out)
             self.assertIn("no agent", out)
+
+
+class SeedDataAdvisoryTests(unittest.TestCase):
+    """seed_data_advisory.sh: seed and test data read or found by a search, and
+    an empty search in a repo that keeps records in a database. Born
+    2026-09-24 after a session read a kind's absence from the seed file as
+    its absence from the database."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        base = Path(self._td.name)
+        self.repo = base / "repo"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)], check=True)
+        self.env = {"TMPDIR": str(base / "state")}
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def hook(self, tool, tool_input, response=None, session="s1"):
+        payload = {"session_id": session, "cwd": str(self.repo), "tool_name": tool,
+                   "tool_input": tool_input, "tool_response": response}
+        return context(run_hook("seed_data_advisory.sh", self.repo, payload, env=self.env))
+
+    def add_migration(self):
+        m = self.repo / "priv/repo/migrations/20260101_init.exs"
+        m.parent.mkdir(parents=True)
+        m.write_text("defmodule M do end\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+
+    def test_read_of_a_seed_file_gives_the_insight_once(self):
+        seeds = str(self.repo / "priv/repo/seeds.exs")
+        first = self.hook("Read", {"file_path": seeds})
+        self.assertIn("Insight: this is a seed file.", first)
+        self.assertIn("untrustworthy", first)
+        self.assertEqual(self.hook("Read", {"file_path": seeds}), "")
+        self.assertIn("seed file", self.hook("Read", {"file_path": seeds}, session="s2"))
+
+    def test_read_of_test_data_names_it_as_test_data(self):
+        for name in ("test/support/factory.ex", "tests/fixtures/kinds.json", "lib/kinds_fixture.py"):
+            with self.subTest(name=name):
+                self.assertIn("Insight: this is test data.",
+                              self.hook("Read", {"file_path": str(self.repo / name)}))
+
+    def test_read_of_ordinary_code_is_silent(self):
+        for name in ("lib/kinds.ex", "lib/seedling.ex", "README.md",
+                     "priv/repo/migrations/20260904_phase1_seed_from_live.exs"):
+            with self.subTest(name=name):
+                self.assertEqual(self.hook("Read", {"file_path": str(self.repo / name)}), "")
+
+    def test_grep_that_reaches_a_seed_file_names_it(self):
+        report = self.hook("Grep", {"pattern": "certificate"},
+                           {"mode": "files_with_matches", "numFiles": 2,
+                            "filenames": ["lib/kinds.ex", "priv/repo/seeds.exs"]})
+        self.assertIn("priv/repo/seeds.exs", report)
+        self.assertNotIn("lib/kinds.ex", report)
+
+    def test_grep_content_mode_reads_paths_from_lines(self):
+        report = self.hook("Grep", {"pattern": "kind", "output_mode": "content"},
+                           {"mode": "content", "numFiles": 0, "filenames": [],
+                            "content": "priv/repo/seeds/kinds.exs:12:  %{name: \"motion\"}\nlib/a.ex:3:  x"})
+        self.assertIn("priv/repo/seeds/kinds.exs", report)
+
+    def test_grep_content_lines_of_code_are_not_read_as_paths(self):
+        report = self.hook("Grep", {"pattern": "factory", "path": "lib/a.ex", "output_mode": "content"},
+                           {"mode": "content", "filenames": [], "content": "3:  def factory_for(x), do: x"})
+        self.assertEqual(report, "")
+
+    def test_bash_search_output_is_read(self):
+        report = self.hook("Bash", {"command": "rg -l certificate"},
+                           {"stdout": "priv/repo/seeds.exs\nlib/kinds.ex\n", "stderr": ""})
+        self.assertIn("priv/repo/seeds.exs", report)
+        self.assertEqual(self.hook("Bash", {"command": "cat priv/repo/seeds2.exs"},
+                                   {"stdout": "priv/repo/seeds2.exs\n"}), "")
+
+    def test_empty_search_speaks_only_in_a_repo_with_a_database_and_once(self):
+        empty = {"mode": "files_with_matches", "numFiles": 0, "filenames": []}
+        self.assertEqual(self.hook("Grep", {"pattern": "certificate of service"}, empty), "")
+        self.add_migration()
+        report = self.hook("Grep", {"pattern": "certificate of service"}, empty)
+        self.assertIn("Insight: no match in this repo's code.", report)
+        self.assertEqual(self.hook("Grep", {"pattern": "other"}, empty), "")
+
+    def test_empty_bash_search_speaks_but_not_through_a_pipeline(self):
+        self.add_migration()
+        self.assertEqual(self.hook("Bash", {"command": "grep -r x lib | head"}, {"stdout": ""}), "")
+        self.assertEqual(self.hook("Bash", {"command": "grep -r '[' lib"},
+                                   {"stdout": "", "stderr": "grep: brackets not balanced"}), "")
+        self.assertIn("no match", self.hook("Bash", {"command": "grep -r x lib"}, {"stdout": ""}))
+
+    def test_registered_on_read_and_on_searches(self):
+        hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]["PostToolUse"]
+        matchers = {g.get("matcher") for g in hooks
+                    if any("seed_data_advisory.sh" in h["command"] for h in g["hooks"])}
+        self.assertEqual(matchers, {"Read", "Grep|Glob|Bash"})

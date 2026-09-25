@@ -134,6 +134,20 @@ machine is carrying. Independent checks and advisories fill that in.
   conditions, and consumers. Skip those and a correct quotation becomes a false
   conclusion — then a test that enshrines it, or code that acts on the wrong
   records — and the next reviewer makes the same leap from the same line.
+- **Seed and test data** — `seed_data_advisory.sh` gives an insight when a
+  session reads a seed file or test data (fixtures, factories, `test/support`),
+  or when a search reaches one — the Grep and Glob tools, or `grep`/`rg`/`ag`/
+  `find`/`fd`/`git grep` through Bash, with the files named: seed files usually
+  run once against an empty database and are rarely kept current, and test data
+  holds values built for tests, so neither is a trustworthy record of what the
+  live system holds. A search that finds nothing, in a repo that keeps records
+  in a database (tracked migrations, `alembic.ini`, `schema.prisma`,
+  `schema.rb`), gets one more: a value absent from the code may still exist in
+  the database. Once per file per session for the first two, once per repo per
+  session for the empty search; a Bash search piped or chained into anything
+  else is never read as empty. Born 2026-09-24, after a session searched the
+  code, found a document kind missing from the seed file, and told the user it
+  did not exist — it had been in the database all along.
 - **Stale-tree advisory (subagents)** — `main_drift_advisory.sh` fires on
   `SubagentStart` and tells the *child* agent that the worktree it was handed
   is behind `origin/main`, by how many commits and how many days, and how to
