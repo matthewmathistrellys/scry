@@ -5,7 +5,7 @@
 # 2026-09-10: "usage for the week, usage for the session in context, and
 # current cache"):
 #
-#   scry  3 uncommitted  2 unpushed  Fable 5.1  $4.20  👥 3  🗓️ 64% Wed  🌕 42k/200k  🔥 39m
+#   scry  3 uncommitted  2 unpushed  Fable 5.1  $4.20  👥 3  🗓️ 64% Wed  🌕 42k/200k  ♻️ 39m
 #
 #   folder          bold cyan; basename of the session's directory; in a worktree that is
 #                   the branch name, which is why the branch segment stays
@@ -36,7 +36,7 @@
 #   🌕 42k/200k     context: total input tokens over the window size, moon
 #                   phase by percent used (worktrunk's thresholds: 🌕 to 51,
 #                   🌔 to 77, 🌓 to 90, 🌒 to 97, 🌑 after)
-#   🔥 39m          the prompt-cache segment, from cache_deadline_statusline.sh,
+#   ♻️ 39m          the prompt-cache segment, from cache_deadline_statusline.sh,
 #                   which also writes the deadline record the handoff monitor
 #                   reads. Nothing here duplicates that
 #

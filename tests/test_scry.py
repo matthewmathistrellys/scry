@@ -3166,15 +3166,15 @@ class CacheHandoffTests(unittest.TestCase):
             r = self._statusline(td, 3000, inner="python3 -c 'import json,sys; print(\"inner:\"+json.load(sys.stdin)[\"model\"][\"id\"])'")
             # The bar the user already had, then the cache at the end of it
             # (Matt, 2026-09-10: the TTL "at the bottom" is the point).
-            self.assertRegex(r.stdout.strip(), r"^inner:claude-fable-5-1  \U0001f525 (49|50)m$")
+            self.assertRegex(r.stdout.strip(), r"^inner:claude-fable-5-1  \u267b\ufe0f (49|50)m$")
             # An inner that prints nothing leaves the cache segment alone.
             r = self._statusline(td, 3000, inner="true")
-            self.assertRegex(r.stdout.strip(), r"^\U0001f525 (49|50)m$")
+            self.assertRegex(r.stdout.strip(), r"^\u267b\ufe0f (49|50)m$")
 
     def test_the_status_line_is_a_cache_status_when_no_inner_command_is_set(self):
         with tempfile.TemporaryDirectory() as td:
-            self.assertRegex(self._statusline(td, 3000).stdout, r"\U0001f525 (49|50)m")
-            self.assertRegex(self._statusline(td, 3000, warm=False).stdout.strip(), r"^\u2744\ufe0f \x1b\[34mcold\x1b\[0m$")
+            self.assertRegex(self._statusline(td, 3000).stdout, r"\u267b\ufe0f (49|50)m")
+            self.assertRegex(self._statusline(td, 3000, warm=False).stdout.strip(), r"^\U0001f5d1\ufe0f \x1b\[31mcold\x1b\[0m$")
 
     def test_the_status_line_says_what_a_cold_cache_will_cost(self):
         # recache_tokens_if_cold is what the next request re-reads at the
@@ -3192,9 +3192,9 @@ class CacheHandoffTests(unittest.TestCase):
                                      "requests": 3, "recache_tokens_if_cold": 153_400},
                 }
                 return run_hook("cache_deadline_statusline.sh", td, payload, env=env).stdout.strip()
-            self.assertRegex(run(3000, True), r"^\U0001f525 (49|50)m$")
-            self.assertRegex(run(250, True), r"^\U0001f525 \x1b\[33m4m ~153k\x1b\[0m$")
-            self.assertEqual(run(-5, False), "\u2744\ufe0f \x1b[34m~153k\x1b[0m")
+            self.assertRegex(run(3000, True), r"^\u267b\ufe0f (49|50)m$")
+            self.assertRegex(run(250, True), r"^\u267b\ufe0f \x1b\[33m4m ~153k\x1b\[0m$")
+            self.assertEqual(run(-5, False), "\U0001f5d1\ufe0f \x1b[31m~153k\x1b[0m")
             # The record the monitor reads is unchanged by any of this.
             rec = json.loads((Path(td) / "state" / f"{self.SID}.deadline").read_text())
             self.assertEqual(set(rec), {"session_id", "observed_at", "warm",
@@ -3625,7 +3625,7 @@ class StatuslineTests(unittest.TestCase):
             work = self._repo(td)
             day = time.strftime("%a", time.localtime(time.time() + 3 * 86400))
             self.assertRegex(self._run(td, str(work)),
-                r"^ \x1b\[1;36mscry\x1b\[0m  Fable 5\.1  \$4\.20  🗓️ 64% " + day + r"  🌕 42k/200k  🔥 (39|40)m$")
+                r"^ \x1b\[1;36mscry\x1b\[0m  Fable 5\.1  \$4\.20  🗓️ 64% " + day + r"  🌕 42k/200k  ♻️ (39|40)m$")
 
     def test_a_feature_branch_with_work_shows_branch_uncommitted_and_unpushed(self):
         with tempfile.TemporaryDirectory() as td:
@@ -3648,7 +3648,7 @@ class StatuslineTests(unittest.TestCase):
             out = self._run(td, str(wt))
             self.assertTrue(out.startswith(" \x1b[1;36mfeature-x\x1b[0m  \x1b[33m2 unpushed\x1b[0m  Fable 5.1"), out)
 
-    def test_week_turns_yellow_then_red_and_cold_cache_is_blue(self):
+    def test_week_turns_yellow_then_red_and_cold_cache_is_red(self):
         with tempfile.TemporaryDirectory() as td:
             work = self._repo(td)
             now = int(time.time())
@@ -3658,7 +3658,7 @@ class StatuslineTests(unittest.TestCase):
                           rate_limits={"seven_day": {"used_percentage": 93, "resets_at": now + 86400}},
                           prompt_cache={"warm": False, "recache_tokens_if_cold": 42000})
             self.assertIn("🗓️ \x1b[31m93% ", r)
-            self.assertTrue(r.endswith("❄️ \x1b[34m~42k\x1b[0m"), r)
+            self.assertTrue(r.endswith("🗑️ \x1b[31m~42k\x1b[0m"), r)
 
     def test_other_live_sessions_in_this_directory_are_counted_and_self_is_not(self):
         with tempfile.TemporaryDirectory() as td:
@@ -3678,7 +3678,7 @@ class StatuslineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             work = self._repo(td)
             out = self._run(td, str(work), cost={}, rate_limits={}, context_window={})
-            self.assertRegex(out, r"^ \x1b\[1;36mscry\x1b\[0m  Fable 5\.1  🔥 (39|40)m$")
+            self.assertRegex(out, r"^ \x1b\[1;36mscry\x1b\[0m  Fable 5\.1  ♻️ (39|40)m$")
 
     def test_the_bar_still_renders_outside_a_repository(self):
         with tempfile.TemporaryDirectory() as td:
