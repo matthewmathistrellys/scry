@@ -2,14 +2,9 @@
 # md_exemptions.sh — the one answer to "is this Markdown file scratch?"
 #
 # NOT A HOOK. It is sourced, defines two functions, and does nothing on its
-# own. Two hooks ask the same question at opposite ends of a file's life:
-#
-#   md_creation_advisory.sh      at Write, before the file has a history
-#   session_disposal_advisory.sh at Stop, over everything still untracked
-#
-# Two copies of a whitelist is two answers to one question, and the copy that
-# drifts is the one that starts nagging about README.md. There is one list, and
-# it lives here.
+# own. md_creation_advisory.sh asks it at Write, before the file has a history.
+# (Its Stop-time partner, session_disposal_advisory.sh, was removed 2026-09-27.)
+# There is one list, and it lives here.
 #
 # Both exemptions are structural, never a judgement about content:
 #

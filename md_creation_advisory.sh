@@ -5,8 +5,7 @@
 # Companion to md_advisory.sh (which stamps trust doctrine on every Read of a
 # .md file). This hook fires at the other end of a Markdown file's life: the
 # moment one is CREATED, before it has a chance to become the clutter the
-# read-side hook has to keep warning about. Its pair at the far end is
-# session_disposal_advisory.sh, which lists the same files at Stop.
+# read-side hook has to keep warning about.
 #
 # It states two facts and stops. The file is not one this repo's conventions
 # expect, and scratch Markdown written this session may be cleared out when the
@@ -15,9 +14,7 @@
 # 2026-09-09 as moralizing, along with the client detection that existed only
 # to gate its one client-specific line.
 #
-# Exemptions are shared with session_disposal_advisory.sh via
-# md_exemptions.sh — one list, sourced by both, so the two ends of the file's
-# life cannot disagree about which files are standard.
+# Exemptions live in md_exemptions.sh — one list, in one place.
 #
 # "New" means untracked in git, not merely "written this call" — Write also
 # fully overwrites files a session already owns, and that isn't creation.

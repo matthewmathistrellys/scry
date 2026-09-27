@@ -1208,387 +1208,26 @@ class ScryHookTests(unittest.TestCase):
             "stop_hook_active": active,
         }
 
-    def test_disposal_advisory_counts_what_is_reclaimable_and_deletes_nothing(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            repo = self._worktree_repo(base)
-            state = base / "state"
-            state.mkdir()
-            env = {"TMPDIR": str(state),
-                   "SCRY_WORKTREE_REMINDER_MINUTES": "0"}
 
-            report = context(run_hook("session_disposal_advisory.sh", repo,
-                                      self._stop_payload(repo), env))
 
-            self.assertIn("2 linked worktree(s)", report)
-            self.assertIn("already in origin/main", report)
-            # The removal instruction is chosen by what is on PATH (hook line
-            # 228), so assert the branch this machine actually takes. Asserting
-            # prune-worktrees unconditionally asserted the author's own tool,
-            # which made the suite red on every machine but the author's while
-            # the hook was behaving exactly as designed.
-            self.assertIn("prune-worktrees" if shutil.which("prune-worktrees")
-                          else "worktree remove", report)
-            self.assertIn("deleted by this note", report)
-            # Advisory means advisory: both worktrees still on disk and listed.
-            listing = self._git(repo, "worktree", "list")
-            self.assertIn("agent-done", listing)
-            self.assertIn("agent-wip", listing)
-            self.assertTrue((repo / ".claude/worktrees/agent-done").is_dir())
-            self.assertTrue((repo / ".claude/worktrees/agent-wip").is_dir())
 
-    def test_disposal_advisory_names_prune_worktrees_when_it_is_on_path(self):
-        """The PATH-present branch of the removal instruction, tested without
-        depending on the author's machine having the tool. A stub is enough:
-        the hook branches on `command -v`, never on what the tool does."""
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            repo = self._worktree_repo(base)
-            state = base / "state"
-            state.mkdir()
-            stub_dir = base / "stub-bin"
-            stub_dir.mkdir()
-            stub = stub_dir / "prune-worktrees"
-            stub.write_text("#!/bin/sh\nexit 0\n")
-            stub.chmod(0o755)
-            env = {"TMPDIR": str(state),
-                   "SCRY_WORKTREE_REMINDER_MINUTES": "0",
-                   "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}"}
 
-            report = context(run_hook("session_disposal_advisory.sh", repo,
-                                      self._stop_payload(repo), env))
 
-            self.assertIn("prune-worktrees --dry-run", report)
-            self.assertIn("only when GitHub reports", report)
-            # Still advisory: naming a remover is not running one.
-            self.assertIn("deleted by this note", report)
-            self.assertTrue((repo / ".claude/worktrees/agent-done").is_dir())
 
-    def test_disposal_advisory_recognises_a_squash_merged_worktree(self):
-        """Squash merges rewrite SHAs and hide from --is-ancestor. Deciding on
-        ancestry alone files finished workspaces under 'might be precious',
-        which is exactly the bucket nobody ever empties."""
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            repo = self._worktree_repo(base)
-            origin = base / "origin"
-            g = self._git
-            # feat/wip's content lands upstream as one squashed commit.
-            (origin / "wip.txt").write_text("wip\n")
-            g(origin, "add", "wip.txt")
-            g(origin, "commit", "-qm", "squash: wip")
-            g(repo, "fetch", "-q", "origin")
-            state = base / "state"
-            state.mkdir()
 
-            report = context(run_hook(
-                "session_disposal_advisory.sh", repo,
-                self._stop_payload(repo),
-                {"TMPDIR": str(state), "SCRY_WORKTREE_REMINDER_MINUTES": "0"}))
-
-            self.assertIn("2 of them hold branches whose content is already in "
-                          "origin/main", report)
-
-    def test_disposal_advisory_speaks_once_per_session(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            repo = self._worktree_repo(base)
-            state = base / "state"
-            state.mkdir()
-            env = {"TMPDIR": str(state),
-                   "SCRY_WORKTREE_REMINDER_MINUTES": "0"}
-
-            first = run_hook("session_disposal_advisory.sh", repo,
-                             self._stop_payload(repo), env)
-            second = run_hook("session_disposal_advisory.sh", repo,
-                              self._stop_payload(repo), env)
-            other = run_hook("session_disposal_advisory.sh", repo,
-                             self._stop_payload(repo, "stop-2"), env)
-
-            self.assertTrue(first.stdout.strip())
-            self.assertEqual(second.stdout.strip(), "")
-            self.assertTrue(other.stdout.strip())
-
-    def test_disposal_advisory_honours_the_stop_loop_guard(self):
-        """Its own additionalContext makes the model continue, so the Stop that
-        follows arrives with stop_hook_active true. Answering it again loops."""
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            repo = self._worktree_repo(base)
-            state = base / "state"
-            state.mkdir()
-            env = {"TMPDIR": str(state),
-                   "SCRY_WORKTREE_REMINDER_MINUTES": "0"}
-
-            result = run_hook("session_disposal_advisory.sh", repo,
-                              self._stop_payload(repo, active=True), env)
-
-            self.assertEqual(result.stdout.strip(), "")
-
-    def test_disposal_advisory_waits_until_the_work_has_happened(self):
-        """A reminder about finished workspaces has nothing to say on turn one."""
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            repo = self._worktree_repo(base)
-            state = base / "state"
-            state.mkdir()
-            transcript = base / "transcript.jsonl"
-            transcript.write_text("")
-            payload = self._stop_payload(repo)
-            payload["transcript_path"] = str(transcript)
-
-            young = run_hook("session_disposal_advisory.sh", repo, payload,
-                             {"TMPDIR": str(state),
-                              "SCRY_WORKTREE_REMINDER_MINUTES": "45"})
-            self.assertEqual(young.stdout.strip(), "")
-
-            aged = run_hook("session_disposal_advisory.sh", repo, payload,
-                            {"TMPDIR": str(state),
-                             "SCRY_WORKTREE_REMINDER_MINUTES": "0"})
-            self.assertTrue(aged.stdout.strip())
-
-    def test_disposal_advisory_is_silent_with_nothing_reclaimable(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            repo = self._worktree_repo(base)
-            self._git(repo, "worktree", "remove", "--force",
-                      str(repo / ".claude/worktrees/agent-done"))
-            state = base / "state"
-            state.mkdir()
-
-            quiet = run_hook("session_disposal_advisory.sh", repo,
-                             self._stop_payload(repo),
-                             {"TMPDIR": str(state),
-                              "SCRY_WORKTREE_REMINDER_MINUTES": "0",
-                              "SCRY_WORKTREE_DISK_MB_WARN": "99999"})
-            self.assertEqual(quiet.stdout.strip(), "")
-
-            # A repo with no linked worktrees at all says nothing either.
-            plain = base / "plain"
-            self._git(base, "clone", "-q", str(base / "origin"), str(plain))
-            self.assertEqual(
-                run_hook("session_disposal_advisory.sh", plain,
-                         self._stop_payload(plain, "stop-plain"),
-                         {"TMPDIR": str(state),
-                          "SCRY_WORKTREE_REMINDER_MINUTES": "0"}).stdout.strip(),
-                "")
-
-    def test_disposal_advisory_stays_silent_when_it_cannot_identify_the_session(self):
-        """No session id means no throttle key, and no throttle key on a Stop
-        hook means an unbounded re-fire. Silence is the only safe answer."""
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            repo = self._worktree_repo(base)
-            state = base / "state"
-            state.mkdir()
-            env = {**os.environ, "TMPDIR": str(state),
-                   "SCRY_WORKTREE_REMINDER_MINUTES": "0"}
-            for raw in ("", "not json", json.dumps({"cwd": str(repo)})):
-                with self.subTest(payload=raw):
-                    result = subprocess.run(
-                        ["bash", str(ROOT / "session_disposal_advisory.sh")],
-                        cwd=str(repo), input=raw, text=True,
-                        capture_output=True, check=True, env=env)
-                    self.assertEqual(result.stdout.strip(), "")
 
     # ── Session disposal: scratch Markdown (Stop) ──────────────────────────
 
-    def _scratch_repo(self, base):
-        """A clone with no linked worktrees, so only the Markdown half speaks.
 
-        `.resolve()` because a macOS temp dir is a symlink and git reports the
-        physical path; without it the hook's repo-relative paths are absolute
-        and every exemption misses for a reason that has nothing to do with
-        what is being tested.
-        """
-        g = self._git
-        origin = base / "origin"
-        repo = base / "repo"
-        origin.mkdir(parents=True)
-        g(origin, "init", "-q", "-b", "main")
-        g(origin, "config", "user.name", "Scry Test")
-        g(origin, "config", "user.email", "scry@example.test")
-        (origin / "README.md").write_text("readme\n")
-        g(origin, "add", ".")
-        g(origin, "commit", "-qm", "init")
-        g(base, "clone", "-q", str(origin), str(repo))
-        return repo
 
-    def _dated_session(self, base, repo, session_id="stop-md"):
-        """A Stop payload whose transcript is a real file, so its birth time is
-        a readable session start. Everything written after this call is, by
-        construction, 'created during this session'."""
-        transcript = base / f"{session_id}.jsonl"
-        transcript.write_text("")
-        payload = self._stop_payload(repo, session_id)
-        payload["transcript_path"] = str(transcript)
-        return payload
 
-    @staticmethod
-    def _md_env(state):
-        return {"TMPDIR": str(state), "SCRY_WORKTREE_REMINDER_MINUTES": "0"}
 
-    def test_disposal_advisory_lists_scratch_markdown_and_deletes_nothing(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td).resolve()
-            repo = self._scratch_repo(base)
-            state = base / "state"
-            state.mkdir()
-            payload = self._dated_session(base, repo)
-            (repo / "notes").mkdir()
-            (repo / "notes/plan.md").write_text("draft\n")
-            before = sorted(str(p.relative_to(repo)) for p in repo.rglob("*.md"))
 
-            report = context(run_hook("session_disposal_advisory.sh", repo,
-                                      payload, self._md_env(state)))
 
-            self.assertIn("1 untracked .md file(s)", report)
-            self.assertIn("notes/plan.md", report)
-            self.assertIn("where long-lived work is tracked", report)
-            self.assertIn("Nothing here has been or will be deleted", report)
-            # Advisory means advisory: the tree is byte-for-byte as it was.
-            after = sorted(str(p.relative_to(repo)) for p in repo.rglob("*.md"))
-            self.assertEqual(after, before)
-            self.assertEqual((repo / "notes/plan.md").read_text(), "draft\n")
 
-    def test_disposal_advisory_ignores_markdown_older_than_the_session(self):
-        """A file that predates the session is not this session's leftover, and
-        claiming it is turns the note into noise on the second day of a repo."""
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td).resolve()
-            repo = self._scratch_repo(base)
-            state = base / "state"
-            state.mkdir()
-            (repo / "old.md").write_text("from last week\n")
-            os.utime(repo / "old.md", (1, 1))
-            payload = self._dated_session(base, repo)
 
-            result = run_hook("session_disposal_advisory.sh", repo, payload,
-                              self._md_env(state))
 
-            self.assertEqual(result.stdout.strip(), "")
-            self.assertTrue((repo / "old.md").is_file())
 
-    def test_disposal_advisory_is_silent_with_no_scratch_markdown(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td).resolve()
-            repo = self._scratch_repo(base)
-            state = base / "state"
-            state.mkdir()
-            payload = self._dated_session(base, repo)
-
-            self.assertEqual(
-                run_hook("session_disposal_advisory.sh", repo, payload,
-                         self._md_env(state)).stdout.strip(), "")
-
-    def test_disposal_advisory_applies_the_shared_markdown_exemptions(self):
-        """Same list as md_creation_advisory.sh, from md_exemptions.sh. A file
-        exempt when it was written is exempt when the session ends."""
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td).resolve()
-            repo = self._scratch_repo(base)
-            state = base / "state"
-            state.mkdir()
-            payload = self._dated_session(base, repo)
-            for rel in ("CLAUDE.md", "AGENTS.md", "CHANGELOG.md", "LICENSE.md",
-                        "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md",
-                        "SUPPORT.md", ".github/PULL_REQUEST_TEMPLATE.md",
-                        ".github/copilot-instructions.md",
-                        ".github/ISSUE_TEMPLATE/bug.md", ".claude/scratch.md"):
-                target = repo / rel
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text("x\n")
-
-            self.assertEqual(
-                run_hook("session_disposal_advisory.sh", repo, payload,
-                         self._md_env(state)).stdout.strip(), "")
-
-    def test_disposal_advisory_is_silent_in_a_markdown_product_repo(self):
-        for marker in ("astro.config.mjs", "docusaurus.config.js"):
-            with self.subTest(marker=marker):
-                with tempfile.TemporaryDirectory() as td:
-                    base = Path(td).resolve()
-                    repo = self._scratch_repo(base)
-                    state = base / "state"
-                    state.mkdir()
-                    payload = self._dated_session(base, repo)
-                    (repo / marker).write_text("export default {}\n")
-                    (repo / "src").mkdir()
-                    (repo / "src/post.md").write_text("a post\n")
-
-                    self.assertEqual(
-                        run_hook("session_disposal_advisory.sh", repo, payload,
-                                 self._md_env(state)).stdout.strip(), "")
-
-    def test_disposal_advisory_will_not_guess_when_the_session_start_is_unknown(self):
-        """Birth time is the only honest cutoff. Where it cannot be read there
-        is no fallback: the transcript's mtime is its LAST write, and using it
-        would misdate every file in the tree. Report nothing instead."""
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td).resolve()
-            repo = self._scratch_repo(base)
-            state = base / "state"
-            state.mkdir()
-            (repo / "plan.md").write_text("draft\n")
-
-            for transcript in ("/dev/null", str(base / "missing.jsonl"), ""):
-                with self.subTest(transcript=transcript):
-                    payload = self._stop_payload(repo, f"stop-{len(transcript)}")
-                    payload["transcript_path"] = transcript
-                    self.assertEqual(
-                        run_hook("session_disposal_advisory.sh", repo, payload,
-                                 self._md_env(state)).stdout.strip(), "")
-
-    def test_disposal_advisory_says_both_leftovers_in_one_note(self):
-        """It fires in a live session at the end of a turn. Two findings are
-        one note, not two walls of text."""
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td).resolve()
-            repo = self._worktree_repo(base)
-            state = base / "state"
-            state.mkdir()
-            payload = self._dated_session(base, repo, "stop-both")
-            (repo / "plan.md").write_text("draft\n")
-
-            report = context(run_hook("session_disposal_advisory.sh", repo,
-                                      payload, self._md_env(state)))
-
-            self.assertIn("Worktrees:", report)
-            self.assertIn("Scratch Markdown:", report)
-            self.assertIn("plan.md", report)
-            self.assertEqual(report.count("Nothing here has been or will be "
-                                          "deleted"), 1)
-
-    def test_disposal_advisory_markdown_half_honours_the_session_gates(self):
-        """The loop guard and the once-per-session marker bound the Markdown
-        half exactly as they bound the worktree half — it is one note."""
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td).resolve()
-            repo = self._scratch_repo(base)
-            state = base / "state"
-            state.mkdir()
-            env = self._md_env(state)
-            payload = self._dated_session(base, repo, "stop-gates")
-            (repo / "plan.md").write_text("draft\n")
-
-            looping = dict(payload, stop_hook_active=True)
-            self.assertEqual(
-                run_hook("session_disposal_advisory.sh", repo, looping,
-                         env).stdout.strip(), "")
-
-            first = run_hook("session_disposal_advisory.sh", repo, payload, env)
-            second = run_hook("session_disposal_advisory.sh", repo, payload, env)
-            self.assertIn("plan.md", context(first))
-            self.assertEqual(second.stdout.strip(), "")
-
-            # A session that has not run long enough has nothing to say yet.
-            young = self._dated_session(base, repo, "stop-young")
-            (repo / "second.md").write_text("draft\n")
-            self.assertEqual(
-                run_hook("session_disposal_advisory.sh", repo, young,
-                         {"TMPDIR": str(state),
-                          "SCRY_WORKTREE_REMINDER_MINUTES": "45"}
-                         ).stdout.strip(), "")
 
     # ── Markdown creation advisory (PostToolUse: Write) ────────────────────
 
@@ -1736,7 +1375,7 @@ class ScryHookTests(unittest.TestCase):
         copy that drifts is the one that starts nagging about README.md."""
         lib = ROOT / "md_exemptions.sh"
         self.assertTrue(lib.is_file())
-        for hook in ("md_creation_advisory.sh", "session_disposal_advisory.sh"):
+        for hook in ("md_creation_advisory.sh",):
             source = (ROOT / hook).read_text()
             self.assertIn("md_exemptions.sh", source, hook)
             self.assertIn("scry_md_product_repo", source, hook)
@@ -1761,16 +1400,16 @@ class ScryHookTests(unittest.TestCase):
         hooks = json.loads((ROOT / "hooks/hooks.json").read_text())
         sub = [h["command"] for group in hooks["hooks"]["SubagentStart"]
                for h in group["hooks"]]
-        stop = [h["command"] for group in hooks["hooks"]["Stop"]
-                for h in group["hooks"]]
         self.assertTrue(any("main_drift_advisory.sh" in c for c in sub), sub)
-        self.assertTrue(
-            any("session_disposal_advisory.sh" in c for c in stop), stop)
+        # Nothing speaks at Stop (2026-09-27): the only end-shaped event that
+        # delivers fires at the end of every turn, so an end-of-session note
+        # landed mid-conversation and cost the model an extra turn to relay.
+        self.assertNotIn("Stop", hooks["hooks"])
         end = [h["command"] for group in hooks["hooks"].get("SessionEnd", [])
                for h in group["hooks"]]
         self.assertEqual([c.rsplit("/", 1)[-1] for c in end],
                          ["clear_record.sh", "tab_colour.sh none || true"])
-        for command in sub + stop + end:
+        for command in sub + end:
             self.assertIn("PLUGIN_ROOT", command)
             self.assertIn("CLAUDE_PLUGIN_ROOT", command)
 
@@ -4041,30 +3680,6 @@ class TeammateRosterTests(unittest.TestCase):
             self.assertEqual(chain, ["aaaaaaaa-0000-0000-0000-000000000001",
                                      "bbbbbbbb-0000-0000-0000-000000000002"])
 
-    def test_the_stop_hook_carries_the_same_line_once(self):
-        with tempfile.TemporaryDirectory() as td:
-            repo = Path(td) / "repo"
-            repo.mkdir()
-            subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            projects = Path(td) / "projects"
-            import roster
-            enc = roster.encode(os.path.realpath(str(repo)))
-            sid = "73249ef1-48bb-4d27-9cbf-f0111a441857"
-            d = projects / enc / sid / "subagents"
-            d.mkdir(parents=True)
-            (d / "agent-ax-1.meta.json").write_text(json.dumps({"name": "x-left", "taskKind": "in_process_teammate"}))
-            (d / "agent-ax-1.jsonl").write_text("{}\n")
-            self._chain(td, self.LIVE_PID, sid)
-            transcript = Path(td) / "t.jsonl"
-            transcript.write_text("{}\n")
-            env = {"CLAUDE_PID": self.LIVE_PID, "SCRY_CACHE_STATE_DIR": str(Path(td) / "state"),
-                   "SCRY_CLAUDE_PROJECTS_DIR": str(projects), "SCRY_PS_OUTPUT": self.PS,
-                   "TMPDIR": td, "SCRY_WORKTREE_REMINDER_MINUTES": "0"}
-            payload = {"session_id": "stop-sess-1", "cwd": str(repo), "transcript_path": str(transcript)}
-            out = run_hook("session_disposal_advisory.sh", str(repo), payload, env=env).stdout
-            self.assertIn("Teammates: 1 in-process teammate(s)", out)
-            self.assertIn("teammate x-left (session 73249ef1)", out)
-            self.assertIn("no agent", out)
 
 
 class SeedDataAdvisoryTests(unittest.TestCase):
