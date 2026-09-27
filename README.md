@@ -20,10 +20,9 @@ machine is carrying. Independent checks and advisories fill that in.
 | **`fleet.sh`** | What else is happening *right now*? |
 | **`pressure.sh`** | What shape is this machine in? |
 | **`main_drift_advisory.sh`** | Is the tree this subagent was handed the current one? |
-| **`session_disposal_advisory.sh`** | What is this session leaving behind? |
 | **`cache_handoff_monitor.sh`** | Is this session about to lose its prompt cache — and what is still unfinished, or what should be summarised first? |
 | **`roster.sh`** | What did *this* session start that has not finished — and is it what I remember? |
-| **teammates** (in `fleet.sh`, `session_disposal_advisory.sh`, `roster.sh`) | Which in-process teammates, from any session a live Claude process has held, were never recorded as stopped — with the one tool that can tell, `ListAgents`, named. Said once per process per set of names. |
+| **teammates** (in `fleet.sh`, `roster.sh`) | Which in-process teammates, from any session a live Claude process has held, were never recorded as stopped — with the one tool that can tell, `ListAgents`, named. Said once per process per set of names. |
 | **Markdown trust** | What goes wrong when repository prose is mistaken for authority? |
 
 - **`architecture.sh`** — a map of the codebase. It is a *dispatcher*, not a
@@ -114,10 +113,8 @@ machine is carrying. Independent checks and advisories fill that in.
   `CLAUDE.md`/`AGENTS.md`, GitHub's community-health files, anything under
   `.claude/`) and on any repo whose actual product *is* Markdown content — an
   Astro/Docusaurus-style content site, detected by its config, not by
-  filename. Those exemptions live in `md_exemptions.sh`, sourced by both this
-  hook and `session_disposal_advisory.sh`, because two copies of one whitelist
-  is two answers to one question and the copy that drifts is the one that
-  starts nagging about `README.md`. Fires at most once per file per session.
+  filename. Those exemptions live in `md_exemptions.sh`, kept apart from
+  this hook so the list has one home. Fires at most once per file per session.
 - **Code-prose trust (atomicity)** — `code_prose_advisory.sh` extends the
   Markdown doctrine to prose embedded in source files (`.ex`, `.exs`, `.py`):
   moduledocs, docstrings, doc comments, CRISP blocks. The doctrine is
@@ -177,54 +174,12 @@ machine is carrying. Independent checks and advisories fill that in.
   is unreliable — that is the distance at which whole features land. There is
   no `agent_type` exemption: the built-in Explore agent, whose entire output is
   what is and isn't in a tree, is the type *most* exposed to this, not least.
-- **Session disposal** — `session_disposal_advisory.sh` reports, at most once
-  per session, what the session is leaving behind. Two kinds of leftover, one
-  compact note, and it deletes nothing, ever.
-
-  *Worktrees*: how many linked worktrees the repo has, roughly what they
-  occupy, how many hold branches already merged into `origin/main` (ancestry
-  *and* patch-id, so a squash merge still counts), and the command to clean
-  them — `prune-worktrees` where it is on `PATH`, `git worktree remove`
-  otherwise. Agent sessions create isolated worktrees and never tear the
-  finished ones down; on 2026-09-09 that took a machine to 0 bytes free.
-
-  *Scratch Markdown*: the untracked `.md` files in the session's own working
-  tree whose mtime is at or after the session started — the far end of the
-  sentence `md_creation_advisory.sh` began when each one appeared. It lists
-  them (up to `SCRY_SCRATCH_MD_LIST_MAX`, then a count), says plainly that
-  nothing has been deleted, and says that anything worth keeping belongs where
-  long-lived work is tracked. It applies the same `md_exemptions.sh` list the
-  creation hook uses, so a file exempt at birth is exempt here. "Untracked"
-  means what `git status` means by it, `.gitignore` included: a file the repo
-  has already decided not to keep is not news, and scanning ignored trees would
-  put `node_modules/` under `du`-shaped pressure at the end of every turn.
-
-  **"Created this session" is a fact here, not a guess.** The cutoff is the
-  transcript file's birth time — the same metadata the age gate already reads,
-  never the transcript's contents. Where a filesystem does not record birth
-  time there is no second mechanism: the Markdown half stays silent rather than
-  substituting the transcript's *m*time, which records its last write and would
-  silently misdate every file in the tree.
-
-  Named `worktree_disposal_advisory.sh` until 2026-09-09, when the Markdown
-  half made the old name an undersell.
-
-  **It runs on `Stop`, not `SessionEnd`, and the reason is measured.**
-  `SessionEnd` output goes nowhere: Claude Code's own event contract gives it
-  "exit code 0 — command completes successfully", with no stdout-to-model and
-  no `additionalContext` path, unlike `SessionStart` or `SubagentStart`. A
-  probe confirmed it — a `SessionEnd` hook that printed a unique token *and*
-  returned it as `additionalContext` demonstrably ran and its token appeared
-  zero times in the CLI output and zero times in the transcript, while the same
-  probe on `Stop` appeared three times and the model quoted it back. A
-  `SessionEnd` version of this hook would be inert. `Stop` costs firing every
-  turn, which three gates absorb: `stop_hook_active` (the loop guard — this
-  hook's own output makes the model continue, so the next `Stop` must be
-  silent), once per session id, and a minimum session age from the transcript
-  file's birth time (`SCRY_WORKTREE_REMINDER_MINUTES`, default 45) so a
-  reminder about finished work does not arrive on turn one. It then speaks only
-  when something is actually reclaimable, or the pile exceeds
-  `SCRY_WORKTREE_DISK_MB_WARN` (default 2048).
+- **Session disposal** — removed 2026-09-27. It reported, once per session
+  at `Stop`, the merged worktrees, idle teammates and scratch Markdown a
+  session was leaving behind. `Stop` fires at the end of every turn, so the
+  note landed mid-conversation and cost the model an extra turn to relay it.
+  Merged worktrees and idle teammates are reported at the next session start
+  (`health.sh`, `fleet.sh`) instead.
 
 - **Cache deadline** — `cache_handoff_monitor.sh` (Claude only) speaks
   shortly before this session's prompt cache goes cold. Claude Code's prompt
@@ -801,9 +756,8 @@ The Codex package uses `.codex-plugin/plugin.json`; Claude uses
 `.claude-plugin/plugin.json`. Both discover the same `hooks/hooks.json`, skill,
 scripts, and scanners, so there is no copied implementation to drift.
 
-Three of the hooks ride events Claude Code defines — `SubagentStart`
-(`main_drift_advisory.sh`), `Stop` (`session_disposal_advisory.sh`), and
-`UserPromptSubmit` (`cache_handoff_arm.sh`). The cache-deadline monitor itself
+Two of the hooks ride events Claude Code defines — `SubagentStart`
+(`main_drift_advisory.sh`) and `UserPromptSubmit` (`cache_handoff_arm.sh`). The cache-deadline monitor itself
 (`monitors/monitors.json`) is a Claude Code plugin component with no Codex
 equivalent as of 2026-09-10, and its status-line adapter reads a payload only
 Claude Code produces; on Codex those two files are inert.
@@ -999,8 +953,10 @@ per turn and buys the belief that the warning was given. Before wiring an
 event, check what its exit-0 contract does with output — Claude Code documents
 this per event, and a probe hook returning a unique token settles it in one
 run. `SessionEnd` reads like the natural home for an end-of-session reminder
-and discards everything it is handed; `Stop` delivers to the model and is why
-`session_disposal_advisory.sh` lives there instead. The same question is why
+and discards everything it is handed; `Stop` delivers to the model but fires
+at the end of every turn, so an end-of-session note there lands
+mid-conversation (removed 2026-09-27). Leftovers are said at the next session
+start instead. The same question is why
 `main_drift_advisory.sh` is on `SubagentStart`: `SessionStart` context never
 reaches a child agent, and Agent-tool `additionalContext` lands in the parent.
 
