@@ -255,8 +255,8 @@ machine is carrying. Independent checks and advisories fill that in.
   the user points `statusLine.command` at once (see [Install](#install)).
   It keeps `observed_at`, `warm`, `ttl`, `expires_at`, `requests` and passes
   the payload through to any status line named in `SCRY_STATUSLINE_INNER`,
-  appending one segment to the end of the bar (icon, space, value): `🔥 43m` in green while warm, `🔥 4m ~150k` in yellow with the
-  re-read size inside the last ten minutes, and `❄️ ~150k` in red once it has
+  appending one segment to the end of the bar (icon, space, value): `♻️ 43m` while warm (reusing what was read), `♻️ 4m ~150k` in yellow with the
+  re-read size inside the last ten minutes, and `🗑️ ~150k` in red once it has
   expired. In iTerm2 it colours the session's tab the same way
   (`tab_colour.sh`): nothing while warm, yellow in the last ten minutes, red
   once cold, cleared when the session ends — so a glance at the tab bar shows
@@ -758,7 +758,7 @@ working, and prints nothing when Scry is not installed. The bar, left to right,
 slow-moving to fast-moving:
 
 ```
-scry  3 uncommitted  2 unpushed  Fable 5.1  $4.20  👥 3  🗓️ 64% Wed  🌕 42k/200k  🔥 39m
+scry  3 uncommitted  2 unpushed  Fable 5.1  $4.20  👥 3  🗓️ 64% Wed  🌕 42k/200k  ♻️ 39m
 ```
 
 folder · branch (only when off the default branch) · `N uncommitted` and
@@ -775,7 +775,7 @@ To keep another status line and add only the cache segment, point
 other command in `SCRY_STATUSLINE_INNER`.
 
 Claude Code re-runs the status line on events (a new assistant message, a
-compaction, and the moment a warm cache reaches `expires_at`), so the ❄️
+compaction, and the moment a warm cache reaches `expires_at`), so the 🗑️
 flip is on time by itself. The minute count only ticks between events; add
 `"refreshInterval": 60` next to `command` to keep it live while you are away
 from the keyboard.
