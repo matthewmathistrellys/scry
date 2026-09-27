@@ -205,6 +205,11 @@
             "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/clear_record.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/tab_colour.sh none || true",
+            "timeout": 5
           }
         ]
       }

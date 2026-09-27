@@ -257,7 +257,10 @@ machine is carrying. Independent checks and advisories fill that in.
   the payload through to any status line named in `SCRY_STATUSLINE_INNER`,
   appending one segment to the end of the bar (icon, space, value): `🔥 43m` in green while warm, `🔥 4m ~150k` in yellow with the
   re-read size inside the last ten minutes, and `❄️ ~150k` in red once it has
-  expired. The size is Claude
+  expired. In iTerm2 it colours the session's tab the same way
+  (`tab_colour.sh`): nothing while warm, yellow in the last ten minutes, red
+  once cold, cleared when the session ends — so a glance at the tab bar shows
+  which sessions are going cold. The size is Claude
   Code's own `recache_tokens_if_cold` — what the next request re-reads at the
   full rate if nobody speaks first. Nothing avoids that re-read once the cache
   is cold: a `/compact` sends the same history to write its summary, and

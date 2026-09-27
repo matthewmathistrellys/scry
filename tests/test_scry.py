@@ -11,6 +11,9 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# These tests run inside real iTerm2 sessions; tab_colour.sh would paint the
+# tab of whoever runs them.
+os.environ.pop("LC_TERMINAL", None)
 
 
 def run_hook(name, cwd, payload, env=None):
@@ -1765,7 +1768,8 @@ class ScryHookTests(unittest.TestCase):
             any("session_disposal_advisory.sh" in c for c in stop), stop)
         end = [h["command"] for group in hooks["hooks"].get("SessionEnd", [])
                for h in group["hooks"]]
-        self.assertEqual([c.rsplit("/", 1)[-1] for c in end], ["clear_record.sh"])
+        self.assertEqual([c.rsplit("/", 1)[-1] for c in end],
+                         ["clear_record.sh", "tab_colour.sh none || true"])
         for command in sub + stop + end:
             self.assertIn("PLUGIN_ROOT", command)
             self.assertIn("CLAUDE_PLUGIN_ROOT", command)
@@ -3139,9 +3143,23 @@ class CacheHandoffTests(unittest.TestCase):
             self._statusline(td, 3000)
             rec = json.loads((Path(td) / "state" / f"{self.SID}.deadline").read_text())
             self.assertEqual(set(rec), {"session_id", "observed_at", "warm",
-                                        "ttl", "expires_at", "requests"})
+                                        "ttl", "expires_at", "requests", "tab"})
             self.assertTrue(rec["warm"])
+            self.assertEqual(rec["tab"], "none")
             self.assertNotIn("model", json.dumps(rec))
+
+    def test_the_tab_is_uncoloured_while_warm_yellow_near_expiry_and_red_once_cold(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state" / f"{self.SID}.deadline"
+            for expires_in, warm, colour in ((3000, True, "none"), (300, True, "yellow"),
+                                             (-60, False, "red"), (3000, True, "none")):
+                self._statusline(td, expires_in, warm=warm)
+                self.assertEqual(json.loads(path.read_text())["tab"], colour)
+
+    def test_the_tab_colour_script_is_silent_outside_iterm(self):
+        with tempfile.TemporaryDirectory() as td:
+            r = run_hook("tab_colour.sh", td, {}, env={"LC_TERMINAL": ""})
+            self.assertEqual((r.returncode, r.stdout), (0, ""))
 
     def test_the_status_line_passes_the_payload_to_the_inner_command_and_appends_the_cache(self):
         with tempfile.TemporaryDirectory() as td:

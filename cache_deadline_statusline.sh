@@ -15,7 +15,8 @@
 # the deadline metadata and passes everything else straight through.
 #
 # What it stores, per session, in a file keyed on session_id:
-#   observed_at, warm, ttl, expires_at, requests — numbers and one boolean.
+#   observed_at, warm, ttl, expires_at, requests — numbers and one boolean —
+#   and tab, the colour last sent to the tab (none, yellow, red).
 # Nothing else from the payload is read or kept (AGENTS.md: metadata, not
 # conversation content). `cache_handoff_monitor.sh` reads that file; this
 # script never decides anything.
@@ -46,7 +47,8 @@ set -uo pipefail
 payload="$(cat 2>/dev/null || true)"
 state_dir="${SCRY_CACHE_STATE_DIR:-${TMPDIR:-/tmp}/scry-cache-deadline}"
 
-summary="$(SCRY_PAYLOAD="$payload" SCRY_DIR="$state_dir" python3 - <<'PY' 2>/dev/null
+here="$(cd "$(dirname "$0")" && pwd)"
+summary="$(SCRY_PAYLOAD="$payload" SCRY_DIR="$state_dir" SCRY_TAB="$here/tab_colour.sh" python3 - <<'PY' 2>/dev/null
 import json, os, sys, time
 try:
     d = json.loads(os.environ.get("SCRY_PAYLOAD") or "{}")
@@ -65,9 +67,32 @@ rec = {
     "expires_at": int(expires) if isinstance(expires, (int, float)) else None,
     "requests": pc.get("requests"),
 }
+path = os.path.join(os.environ["SCRY_DIR"], sid + ".deadline")
+# The tab colour (tab_colour.sh): nothing while warm, yellow in the last ten
+# minutes, red once a session that has spoken is cold. Sent on change, not
+# every refresh; a colour not delivered is tried again next refresh.
+tab = "none"
+if rec["warm"] and rec["expires_at"]:
+    if rec["expires_at"] - rec["observed_at"] <= 600:
+        tab = "yellow"
+elif rec["requests"]:
+    tab = "red"
+rec["tab"] = tab
+try:
+    with open(path) as f:
+        sent = json.load(f).get("tab")
+except Exception:
+    sent = None
+if sent != tab:
+    import subprocess
+    try:
+        ok = subprocess.run(["bash", os.environ["SCRY_TAB"], tab], timeout=5).returncode == 0
+    except Exception:
+        ok = False
+    if not ok:
+        rec["tab"] = sent
 try:
     os.makedirs(os.environ["SCRY_DIR"], exist_ok=True)
-    path = os.path.join(os.environ["SCRY_DIR"], sid + ".deadline")
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(rec, f)
