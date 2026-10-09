@@ -24,6 +24,7 @@ machine is carrying. Independent checks and advisories fill that in.
 | **`cache_handoff_monitor.sh`** | Is this session about to lose its prompt cache — and what is still unfinished, or what should be summarised first? |
 | **`roster.sh`** | What did *this* session start that has not finished — and is it what I remember? |
 | **teammates** (in `fleet.sh`, `roster.sh`) | Which in-process teammates, from any session a live Claude process has held, were never recorded as stopped — with the one tool that can tell, `ListAgents`, named. Said once per process per set of names. |
+| **`statusline_setup.sh`** | Is Scry's status bar set up — and if not, why is there no bar? |
 | **Markdown trust** | What goes wrong when repository prose is mistaken for authority? |
 
 - **`architecture.sh`** — a map of the codebase. It is a *dispatcher*, not a
@@ -586,6 +587,33 @@ machine is carrying. Independent checks and advisories fill that in.
   report that said it had ended.
 - **`pressure.sh`** — load per core, swap in use, disk headroom, and which dev
   servers are already listening.
+- **`statusline_setup.sh`** (Claude only) — says when Scry's status bar is not
+  set up, and sets it up when asked. A plugin cannot set `statusLine`; it is a
+  user setting. So a fresh install has hooks, a monitor and no bar, and until
+  2026-10-09 nothing said why: Matt installed Scry on a new Mac, got no status
+  bar, and had to find the snippet in [Install](#install). The bar is also
+  where the prompt-cache expiry is recorded, so without it the cache-deadline
+  monitor has nothing to read and never speaks.
+
+  As a `SessionStart` hook it reads `~/.claude/settings.json` (and the
+  project's `.claude/settings.json` and `settings.local.json`, since a status
+  line set there is the one in effect) and writes no settings file. With no
+  `statusLine` it says so, in one line, every session until it is set up or
+  silenced. With a *different* status line it says so once per status line and
+  then stays quiet: that one is there because someone chose it. A `statusLine`
+  that reaches Scry's `statusline.sh` or `cache_deadline_statusline.sh` is
+  silence. An unparseable settings file is silence too.
+
+  The setup is one step, and only ever because a person asked: the
+  `/scry-statusline` skill, or `bash statusline_setup.sh --install`. It adds
+  the setting documented under [Install](#install), keeps every other key and
+  their order, and replaces the file in one rename. When a different
+  `statusLine` is already there it changes nothing, prints the one it found,
+  and exits 2; `--replace` is the explicit way past that and leaves the file
+  as it was beside it as `settings.json.scry-bak`. A settings file that is not
+  valid JSON is never rewritten. `--silence` records
+  `SCRY_STATUSLINE_CHECK=0` in the file's `env`; `--status` prints what is
+  configured and writes nothing.
 
 Nothing boots a build tool, and nothing touches the network except the optional
 deploy-drift check, the PR/CI lookup (via `gh`, when installed), and the
@@ -635,6 +663,7 @@ industrialise that problem.
 | Pin in Elixir config (`tailwind`, `esbuild`) | at, or a patch behind, the latest release | ≥1 minor behind, or any major |
 | Declared package behind latest | within the same minor | ≥1 minor behind, or any major — furthest named, the rest counted |
 | Pin data | checked within 7 days, or never checked | data older than that is labelled; lookups failing that long with nothing flagged says NOT CHECKED |
+| Scry status bar (Claude only) | `statusLine` reaches Scry's status line | no `statusLine`: every session until set up or silenced. A different one: once per status line |
 | Stack | no config found | always — see below |
 
 Silence is the default and the feature. A check that reports nothing is
@@ -778,8 +807,10 @@ That is the whole install. The hooks register themselves and run from the
 plugin's own directory, so updating is `/plugin update scry` — there are no
 copies on your machine to keep in sync.
 
-One thing a plugin cannot do for you: `statusLine` is a user setting. Point it
-at Scry's status line once:
+One thing a plugin cannot do for you: `statusLine` is a user setting. Until it
+is set, Scry says so at session start. Run `/scry-statusline` (or
+`bash statusline_setup.sh --install` from the plugin directory) to have it
+added, or point it at Scry's status line by hand:
 
 ```json
 "statusLine": {
@@ -1001,6 +1032,7 @@ starts changing a decision.
 | `SCRY_PINS_REFRESH_BUDGET` | `45` | seconds of wall-clock the background refresh may spend; no session waits on it |
 | `SCRY_PINS_CACHE_DIR` | `${XDG_CACHE_HOME:-~/.cache}/scry` | where the pin cache lives |
 | `SCRY_PINS_OSV_URL`, `_HEX_URL`, `_NPM_URL`, `_PYPI_URL`, `_GITHUB_URL` | the public services | base URL of each source, for a mirror |
+| `SCRY_STATUSLINE_CHECK` | `1` | `0` (in the environment or in settings.json `env`) stops the session-start note that Scry's status bar is not set up |
 
 Raising a threshold buys silence. Lowering one buys warning. Neither changes
 what is measured.

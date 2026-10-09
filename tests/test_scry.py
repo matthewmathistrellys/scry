@@ -174,7 +174,7 @@ class ScryHookTests(unittest.TestCase):
             for group in hooks["hooks"]["SessionStart"]
             for item in group["hooks"]
         ]
-        self.assertEqual(len(commands), 8)
+        self.assertEqual(len(commands), 9)
         self.assertTrue(all("PLUGIN_ROOT" in command for command in commands))
         self.assertTrue(all("CLAUDE_PLUGIN_ROOT" in command for command in commands))
         entry = marketplace["plugins"][0]
@@ -4063,3 +4063,150 @@ class PinsTests(unittest.TestCase):
         hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]["SessionStart"]
         commands = [h["command"] for g in hooks for h in g["hooks"]]
         self.assertTrue(any(c.endswith("/pins.sh") for c in commands), commands)
+
+
+class StatuslineSetupTests(unittest.TestCase):
+    """statusline_setup.sh: a plugin cannot set `statusLine`, so a fresh
+    install has no bar and nothing said why (2026-10-09, a new Mac). The hook
+    says so; --install does it when asked. Every test uses a temporary HOME:
+    the real settings.json is never read or written."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.home, True)
+        self.settings = self.home / ".claude" / "settings.json"
+        self.settings.parent.mkdir()
+        self.project = self.home / "project"
+        (self.project / ".claude").mkdir(parents=True)
+        (self.project / ".git").mkdir()
+
+    def env(self, **extra):
+        env = os.environ.copy()
+        env.pop("SCRY_STATUSLINE_CHECK", None)
+        env.update({"HOME": str(self.home), "CLAUDE_CONFIG_DIR": "",
+                    "XDG_CACHE_HOME": str(self.home / ".cache"),
+                    "CLAUDE_PLUGIN_ROOT": str(ROOT)})
+        env.update(extra)
+        return env
+
+    def hook(self, **extra):
+        result = subprocess.run(
+            ["bash", str(ROOT / "statusline_setup.sh")], cwd=self.project,
+            input=json.dumps({"cwd": str(self.project)}), text=True,
+            capture_output=True, check=True, env=self.env(**extra))
+        return context(result)
+
+    def setup(self, *args):
+        return subprocess.run(
+            ["bash", str(ROOT / "statusline_setup.sh"), *args],
+            text=True, capture_output=True, env=self.env())
+
+    def write(self, data, path=None):
+        (path or self.settings).write_text(json.dumps(data))
+
+    def read(self):
+        return json.loads(self.settings.read_text())
+
+    def test_says_the_bar_is_not_set_up_until_it_is(self):
+        self.write({"model": "opus"})
+        report = self.hook()
+        self.assertIn("not set up", report)
+        self.assertIn("a plugin cannot set one", report)
+        self.assertIn("statusline_setup.sh --install", report)
+        self.assertIn("/scry-statusline", report)
+        self.assertEqual(len(report.splitlines()), 1)
+        self.assertIn("not set up", self.hook())     # every session, until set up
+        self.assertEqual(self.read(), {"model": "opus"})   # the hook wrote nothing
+        self.assertEqual(self.setup("--install").returncode, 0)
+        self.assertEqual(self.hook(), "")
+
+    def test_no_settings_file_at_all_is_the_new_machine_case(self):
+        self.assertIn("not set up", self.hook())
+        done = self.setup("--install")
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertIn("statusline.sh", self.read()["statusLine"]["command"])
+        self.assertEqual(self.hook(), "")
+
+    def test_install_adds_the_documented_setting_and_keeps_every_other_key(self):
+        before = {"model": "opus", "permissions": {"allow": ["Bash(ls:*)"]},
+                  "env": {"A": "1"}, "hooks": {"Stop": []}, "ünï": "çödé"}
+        self.write(before)
+        done = self.setup("--install")
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("every other key is unchanged", done.stdout)
+        after = self.read()
+        line = after.pop("statusLine")
+        self.assertEqual(after, before)
+        self.assertEqual(list(after), list(before))     # order kept too
+        # The setting is the one the README documents, character for character.
+        readme = (ROOT / "README.md").read_text()
+        documented = json.loads("{" + re.search(
+            r'("statusLine": \{.*?\n\})', readme, re.S).group(1) + "}")["statusLine"]
+        self.assertEqual(line, documented)
+        again = self.setup("--install")
+        self.assertIn("Already set", again.stdout)
+
+    def test_a_different_status_line_is_never_overwritten_unasked(self):
+        self.write({"statusLine": {"type": "command", "command": "~/bin/mybar.sh"},
+                    "model": "opus"})
+        refused = self.setup("--install")
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("~/bin/mybar.sh", refused.stdout)
+        self.assertIn("will not overwrite it unasked", refused.stdout)
+        self.assertEqual(self.read()["statusLine"]["command"], "~/bin/mybar.sh")
+        replaced = self.setup("--replace")
+        self.assertEqual(replaced.returncode, 0)
+        self.assertIn("The previous statusLine was:\n  ~/bin/mybar.sh", replaced.stdout)
+        self.assertIn("statusline.sh", self.read()["statusLine"]["command"])
+        self.assertEqual(self.read()["model"], "opus")
+        backup = json.loads(Path(str(self.settings) + ".scry-bak").read_text())
+        self.assertEqual(backup["statusLine"]["command"], "~/bin/mybar.sh")
+
+    def test_a_chosen_status_line_is_mentioned_once_and_can_be_silenced(self):
+        self.write({"statusLine": {"type": "command", "command": "~/bin/mybar.sh"}})
+        first = self.hook()
+        self.assertIn("sets a different statusLine", first)
+        self.assertIn("Said once", first)
+        self.assertEqual(self.hook(), "")
+        # A different one is a different choice, and is said once as well.
+        self.write({"statusLine": {"type": "command", "command": "~/bin/other.sh"}})
+        self.assertIn("different statusLine", self.hook())
+        self.assertEqual(self.hook(), "")
+        self.write({})
+        self.assertEqual(self.hook(SCRY_STATUSLINE_CHECK="0"), "")
+        self.assertEqual(self.setup("--silence").returncode, 0)
+        self.assertEqual(self.read(), {"env": {"SCRY_STATUSLINE_CHECK": "0"}})
+        self.assertEqual(self.hook(), "")
+
+    def test_scry_reached_another_way_counts_as_set_up(self):
+        for command in ("bash ~/Developer/scry/statusline.sh",
+                        "SCRY_STATUSLINE_INNER='~/bin/mybar.sh' bash "
+                        "/opt/plugins/cache_deadline_statusline.sh"):
+            self.write({"statusLine": {"type": "command", "command": command}})
+            self.assertEqual(self.hook(), "", command)
+        # The project's settings decide which status line is in effect.
+        self.write({})
+        self.write({"statusLine": {"type": "command",
+                                   "command": "bash ~/x/scry/statusline.sh"}},
+                   self.project / ".claude" / "settings.local.json")
+        self.assertEqual(self.hook(), "")
+
+    def test_unreadable_settings_are_left_alone(self):
+        self.settings.write_text('{"model": "opus",}  // not JSON\n')
+        self.assertEqual(self.hook(), "")
+        refused = self.setup("--install")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("could not be read", refused.stdout)
+        self.assertEqual(self.settings.read_text(), '{"model": "opus",}  // not JSON\n')
+
+    def test_silent_on_codex_and_registered_as_a_read_only_hook(self):
+        self.write({})
+        self.assertEqual(self.hook(CLAUDE_PLUGIN_ROOT=""), "")
+        hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]["SessionStart"]
+        commands = [h["command"] for g in hooks for h in g["hooks"]]
+        ours = [c for c in commands if "statusline_setup.sh" in c]
+        # No argument: the only mode that can write is never what a hook runs.
+        self.assertEqual(len(ours), 1)
+        self.assertTrue(ours[0].endswith("/statusline_setup.sh"), ours)
+        skill = (ROOT / "skills/scry-statusline/SKILL.md").read_text()
+        self.assertIn("statusline_setup.sh\" --install", skill)

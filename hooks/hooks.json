@@ -47,6 +47,11 @@
           },
           {
             "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/statusline_setup.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/cache_handoff_arm.sh",
             "timeout": 5
           }
