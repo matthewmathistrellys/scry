@@ -17,6 +17,12 @@
           },
           {
             "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/pins.sh",
+            "statusMessage": "Reading pinned versions...",
+            "timeout": 10
+          },
+          {
+            "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/health.sh",
             "statusMessage": "Checking repo health...",
             "timeout": 60

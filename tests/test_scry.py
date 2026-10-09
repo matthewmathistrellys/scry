@@ -174,7 +174,7 @@ class ScryHookTests(unittest.TestCase):
             for group in hooks["hooks"]["SessionStart"]
             for item in group["hooks"]
         ]
-        self.assertEqual(len(commands), 7)
+        self.assertEqual(len(commands), 8)
         self.assertTrue(all("PLUGIN_ROOT" in command for command in commands))
         self.assertTrue(all("CLAUDE_PLUGIN_ROOT" in command for command in commands))
         entry = marketplace["plugins"][0]
@@ -3775,3 +3775,291 @@ class SeedDataAdvisoryTests(unittest.TestCase):
         matchers = {g.get("matcher") for g in hooks
                     if any("seed_data_advisory.sh" in h["command"] for h in g["hooks"])}
         self.assertEqual(matchers, {"Read", "Grep|Glob|Bash"})
+
+
+class PinsTests(unittest.TestCase):
+    """pins.sh: a pinned version with a published advisory, or far behind the
+    latest release. Born 2026-10-09: `config :tailwind, version: "4.1.12"`
+    could not run on the current macOS and no tool read it, and a mix.lock's
+    advisories surfaced only in a hand-run audit.
+
+    The registries are a local server here. Nothing in these tests reaches
+    the network, and the first test is that the hook does not either."""
+
+    LOCK = (
+        '%{\n'
+        '  "plug": {:hex, :plug, "1.18.1", "aa11", [:mix], [{:mime, "~> 2.0", [hex: :mime, repo: "hexpm", optional: false]}], "hexpm", "bb22"},\n'
+        '  "mime": {:hex, :mime, "2.0.0", "aa11", [:mix], [], "hexpm", "bb22"},\n'
+        '  "jason": {:hex, :jason, "1.4.4", "aa11", [:mix], [], "hexpm", "bb22"},\n'
+        '  "oban_pro": {:hex, :oban_pro, "1.5.0", "aa11", [:mix], [], "oban", "bb22"},\n'
+        '  "local_fork": {:git, "https://example.test/fork.git", "abc123", []},\n'
+        '}\n')
+    MIX = ('defp deps do\n  [{:plug, "~> 1.18"}, {:jason, "~> 1.4"},\n'
+           '   {:oban_pro, "~> 1.5", repo: "oban"}]\nend\n')
+    CONFIG = ('import Config\n\n# config :tailwind, version: "0.0.1"\n'
+              'config :esbuild,\n  version: "0.28.2",\n  app: [args: ~w(js/app.js)]\n\n'
+              'config :tailwind,\n  version: "4.1.12",\n  app: [args: ~w(--input=x)]\n\n'
+              'config :app, version: "9.9.9"\n')
+    LATEST = {"/api/packages/plug": {"latest_stable_version": "1.20.3"},
+              "/api/packages/jason": {"latest_stable_version": "1.4.9"},
+              "/esbuild/latest": {"version": "0.28.2"},
+              "/repos/tailwindlabs/tailwindcss/releases/latest": {"tag_name": "v4.3.3"}}
+    ADVISORIES = {("Hex", "plug", "1.18.1"): ["EEF-CVE-2026-1", "GHSA-aaaa-bbbb-cccc"],
+                  ("Hex", "mime", "2.0.0"): ["GHSA-dddd-eeee-ffff"]}
+    VULNS = {
+        "EEF-CVE-2026-1": {"aliases": ["CVE-2026-1", "GHSA-aaaa-bbbb-cccc"], "affected": [
+            {"package": {"ecosystem": "Hex", "name": "plug"}, "ranges": [
+                {"type": "SEMVER", "events": [{"introduced": "1.18.0"}, {"fixed": "1.18.5"}]},
+                {"type": "SEMVER", "events": [{"introduced": "1.19.0"}, {"fixed": "1.19.2"}]}]}]},
+        "GHSA-aaaa-bbbb-cccc": {"aliases": ["CVE-2026-1"],
+                                "database_specific": {"severity": "HIGH"}, "affected": []},
+        "GHSA-dddd-eeee-ffff": {"database_specific": {"severity": "LOW"}, "affected": []},
+    }
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.repo = self.tmp / "repo"
+        self.cache = self.tmp / "cache"
+        app = self.repo / "apps" / "engine"
+        (app / "config").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)], check=True)
+        (app / "mix.exs").write_text(self.MIX)
+        (app / "mix.lock").write_text(self.LOCK)
+        (app / "config" / "config.exs").write_text(self.CONFIG)
+        # A vendored lock must never be read: deps/ is pruned during the walk.
+        (app / "deps" / "x").mkdir(parents=True)
+        (app / "deps" / "x" / "mix.lock").write_text(
+            '%{\n  "vendored": {:hex, :vendored, "0.0.1", "a", [:mix], [], "hexpm", "b"},\n}\n')
+        self.requests = []
+        self.delay = 0
+        self.down = False
+        self.latest = dict(self.LATEST)
+        self.url = self.serve()
+
+    def serve(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+        test = self
+
+        class Registry(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def answer(self, body):
+                time.sleep(test.delay)
+                found = body is not None and not test.down
+                data = json.dumps(body if found else {}).encode()
+                self.send_response(200 if found else 404)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                test.requests.append(("GET", self.path, ""))
+                if self.path.startswith("/v1/vulns/"):
+                    return self.answer(test.VULNS.get(self.path.rsplit("/", 1)[1]))
+                self.answer(test.latest.get(self.path))
+
+            def do_POST(self):
+                raw = self.rfile.read(int(self.headers["Content-Length"])).decode()
+                test.requests.append(("POST", self.path, raw))
+                results = []
+                for q in json.loads(raw)["queries"]:
+                    key = (q["package"]["ecosystem"], q["package"]["name"], q["version"])
+                    ids = test.ADVISORIES.get(key, [])
+                    results.append({"vulns": [{"id": i, "modified": "m1"} for i in ids]}
+                                   if ids else {})
+                self.answer({"results": results})
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Registry)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return "http://127.0.0.1:%d" % server.server_address[1]
+
+    def env(self, url=None, **extra):
+        url = url or self.url
+        env = {"SCRY_PINS_CACHE_DIR": str(self.cache)}
+        env.update({"SCRY_PINS_%s_URL" % k: url
+                    for k in ("OSV", "HEX", "NPM", "PYPI", "GITHUB")})
+        env.update(extra)
+        return env
+
+    def refresh(self, **extra):
+        env = os.environ.copy()
+        env.update(self.env(**extra))
+        subprocess.run([sys.executable, str(ROOT / "scanners/pins.py"),
+                        "--root", str(self.repo), "--refresh"], check=True, env=env)
+
+    def report(self, **extra):
+        return context(run_hook("pins.sh", self.repo, {}, self.env(**extra)))
+
+    def wait_for_cache(self, seconds=15):
+        deadline = time.time() + seconds
+        path = self.cache / "pins.json"
+        while time.time() < deadline:
+            if path.exists():
+                return json.loads(path.read_text())
+            time.sleep(0.05)
+        self.fail("the background refresh never wrote a cache")
+
+    def test_session_start_does_not_wait_on_an_unreachable_network(self):
+        """No cache and nothing listening: the hook is silent and returns at
+        once; the lookup fails by itself in a detached process."""
+        started = time.time()
+        result = run_hook("pins.sh", self.repo, {}, self.env(url="http://127.0.0.1:1"))
+        self.assertLess(time.time() - started, 3)
+        self.assertEqual(result.stdout.strip(), "")
+        cache = self.wait_for_cache()
+        self.assertIn("fail_since", cache["meta"])
+        self.assertEqual(cache["adv"], {})
+        self.assertEqual(self.requests, [])
+
+    def test_hook_returns_before_a_slow_registry_answers(self):
+        self.delay = 1.0
+        started = time.time()
+        result = run_hook("pins.sh", self.repo, {}, self.env())
+        self.assertLess(time.time() - started, 1.0)
+        self.assertEqual(result.stdout.strip(), "")
+        self.assertTrue(self.wait_for_cache()["adv"])
+        # The attempt is on record, so the next session start does not spawn
+        # a second refresh on top of it.
+        seen = len(self.requests)
+        self.delay = 0
+        self.report()
+        time.sleep(0.5)
+        self.assertEqual(len(self.requests), seen)
+
+    def test_reports_advisories_config_pins_and_packages_behind(self):
+        self.refresh()
+        report = self.report()
+        # One flaw published under three ids is one advisory, rated by the
+        # record that carries a label, with the fix for THIS version's line.
+        self.assertIn("2 pinned version(s) have a published security advisory "
+                      "(1 high, 1 low)", report)
+        self.assertIn("plug 1.18.1 (apps/engine/mix.lock): high CVE-2026-1, "
+                      "fixed in 1.18.5", report)
+        self.assertIn("tailwind 4.1.12 in apps/engine/config/config.exs, "
+                      "latest release 4.3.3 (2 minor behind)", report)
+        self.assertIn("no outdated or audit command reads it", report)
+        self.assertNotIn("esbuild", report)       # pinned at the latest
+        self.assertNotIn("9.9.9", report)         # some other app's version key
+        self.assertIn("1 of 2 directly declared package(s) are behind", report)
+        self.assertIn("plug 1.18.1 → 1.20.3", report)
+        self.assertNotIn("jason", report)         # a patch behind is not far
+        self.assertLessEqual(len(report.splitlines()), 5)
+
+    def test_sends_only_public_package_names_and_versions(self):
+        (self.repo / "requirements.txt").write_text(
+            "--index-url https://user:s3cret@pypi.internal.test/simple\n"
+            "fastapi==0.141.1  # pinned\nuvicorn[standard]>=0.50\n"
+            "private @ git+https://tok3n@example.test/private.git\n")
+        self.latest["/pypi/fastapi/json"] = {"info": {"version": "0.141.1"}}
+        self.refresh()
+        sent = json.dumps(self.requests)
+        for absent in ("oban_pro", "local_fork", "vendored", "s3cret", "tok3n",
+                       "uvicorn", "private", str(self.repo)):
+            self.assertNotIn(absent, sent)
+        paths = [path for _, path, _ in self.requests]
+        self.assertIn("/pypi/fastapi/json", paths)
+        # Advisories for every locked version; a latest-release lookup only
+        # for what the project declares itself.
+        self.assertIn('"name": "mime"', self.requests[0][2])
+        self.assertNotIn("/api/packages/mime", paths)
+
+    def test_silent_when_nothing_crosses_a_threshold(self):
+        self.ADVISORIES = {}
+        self.latest.update({"/api/packages/plug": {"latest_stable_version": "1.18.9"},
+                            "/repos/tailwindlabs/tailwindcss/releases/latest":
+                                {"tag_name": "v4.1.14"}})
+        self.refresh()
+        self.assertEqual(self.report(), "")
+
+    def test_threshold_and_switches(self):
+        self.ADVISORIES = {}
+        self.refresh()
+        self.assertIn("tailwind 4.1.12", self.report())
+        self.assertEqual(self.report(SCRY_PINS_BEHIND_MINORS="3"), "")
+        self.assertEqual(self.report(SCRY_PINS_BEHIND="0"), "")
+        self.assertEqual(self.report(SCRY_PINS="0"), "")
+        self.assertIn("jason 1.4.4 → 1.4.9", self.report(SCRY_PINS_BEHIND_MINORS="0"))
+        self.latest["/api/packages/plug"] = {"latest_stable_version": "2.0.0"}
+        (self.cache / "pins.json").unlink()
+        self.refresh()
+        self.assertIn("1 of them a major version",
+                      self.report(SCRY_PINS_BEHIND_MINORS="99"))
+
+    def test_a_bumped_pin_stops_being_reported_without_a_lookup(self):
+        self.ADVISORIES = {}
+        self.latest["/api/packages/plug"] = {"latest_stable_version": "1.18.1"}
+        self.refresh()
+        self.assertIn("tailwind 4.1.12", self.report())
+        config = self.repo / "apps/engine/config/config.exs"
+        config.write_text(config.read_text().replace("4.1.12", "4.3.3"))
+        self.down = True
+        self.assertEqual(self.report(), "")
+
+    def test_github_refusing_falls_back_to_the_npm_release(self):
+        del self.latest["/repos/tailwindlabs/tailwindcss/releases/latest"]
+        self.latest["/tailwindcss/latest"] = {"version": "4.3.3"}
+        self.refresh()
+        self.assertIn("latest release 4.3.3", self.report())
+
+    def test_old_data_is_labelled_and_a_dark_check_is_not_silent(self):
+        self.refresh()
+        path = self.cache / "pins.json"
+        cache = json.loads(path.read_text())
+        old = time.time() - 9 * 86400
+        for section in ("adv", "latest", "vuln"):
+            for entry in cache[section].values():
+                entry["at"] = old
+        cache["meta"] = {"fail_since": old}
+        path.write_text(json.dumps(cache))
+        dead = "http://127.0.0.1:1"
+        self.assertIn("LAST CHECKED 9 DAYS AGO", self.report(url=dead))
+        # Nothing flagged, and the lookups have failed for over a week:
+        # silence here would claim a check that did not happen.
+        for entry in cache["adv"].values():
+            entry["ids"] = []
+        for entry in cache["latest"].values():
+            entry["v"] = None
+        path.write_text(json.dumps(cache))
+        report = self.report(url=dead)
+        self.assertIn("NOT CHECKED", report)
+        self.assertIn("not a finding that they are clean", report)
+        self.assertEqual(self.report(url=dead, SCRY_PINS_STALE_DAYS="30"), "")
+
+    def test_npm_lock_and_non_repositories(self):
+        (self.repo / "package-lock.json").write_text(json.dumps({
+            "lockfileVersion": 3, "packages": {
+                "": {"devDependencies": {"vitest": "^4.0.0"}},
+                "node_modules/vitest": {
+                    "version": "4.1.0",
+                    "resolved": "https://registry.npmjs.org/vitest/-/vitest-4.1.0.tgz"},
+                "node_modules/braces": {
+                    "version": "3.0.3",
+                    "resolved": "https://registry.npmjs.org/braces/-/braces-3.0.3.tgz"},
+                "node_modules/inhouse": {
+                    "version": "1.0.0",
+                    "resolved": "https://npm.internal.test/inhouse-1.0.0.tgz"},
+                "node_modules/linked": {"resolved": "packages/linked", "link": True}}}))
+        self.latest["/vitest/latest"] = {"version": "5.0.3"}
+        self.ADVISORIES = {("npm", "braces", "3.0.3"): ["GHSA-dddd-eeee-ffff"]}
+        self.refresh()
+        report = self.report()
+        self.assertIn("braces 3.0.3 (package-lock.json): low GHSA-dddd-eeee-ffff", report)
+        self.assertIn("vitest 4.1.0 → 5.0.3", report)
+        sent = json.dumps(self.requests)
+        self.assertNotIn("inhouse", sent)
+        self.assertNotIn("/braces/latest", sent)
+        outside = self.tmp / "not-a-repo"
+        outside.mkdir()
+        shutil.copy(self.repo / "apps/engine/mix.lock", outside / "mix.lock")
+        result = run_hook("pins.sh", outside, {}, self.env())
+        self.assertEqual(result.stdout.strip(), "")
+
+    def test_registered_at_session_start(self):
+        hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]["SessionStart"]
+        commands = [h["command"] for g in hooks for h in g["hooks"]]
+        self.assertTrue(any(c.endswith("/pins.sh") for c in commands), commands)
