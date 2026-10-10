@@ -3783,6 +3783,11 @@ class PinsTests(unittest.TestCase):
     could not run on the current macOS and no tool read it, and a mix.lock's
     advisories surfaced only in a hand-run audit.
 
+    Reworked the same day, before it shipped: the first cut put ~1,300
+    characters into the session at every start, resume, clear and compact.
+    Startup is now silent but for one line said once; the count is in the
+    status line, the detail in --full and in a note on the edited manifest.
+
     The registries are a local server here. Nothing in these tests reaches
     the network, and the first test is that the hook does not either."""
 
@@ -3800,10 +3805,8 @@ class PinsTests(unittest.TestCase):
               'config :esbuild,\n  version: "0.28.2",\n  app: [args: ~w(js/app.js)]\n\n'
               'config :tailwind,\n  version: "4.1.12",\n  app: [args: ~w(--input=x)]\n\n'
               'config :app, version: "9.9.9"\n')
-    LATEST = {"/api/packages/plug": {"latest_stable_version": "1.20.3"},
-              "/api/packages/jason": {"latest_stable_version": "1.4.9"},
-              "/esbuild/latest": {"version": "0.28.2"},
-              "/repos/tailwindlabs/tailwindcss/releases/latest": {"tag_name": "v4.3.3"}}
+    OLD = "2026-01-01T00:00:00.000000Z"
+    GITHUB = "/repos/tailwindlabs/tailwindcss/releases?per_page=20"
     ADVISORIES = {("Hex", "plug", "1.18.1"): ["EEF-CVE-2026-1", "GHSA-aaaa-bbbb-cccc"],
                   ("Hex", "mime", "2.0.0"): ["GHSA-dddd-eeee-ffff"]}
     VULNS = {
@@ -3814,13 +3817,39 @@ class PinsTests(unittest.TestCase):
         "GHSA-aaaa-bbbb-cccc": {"aliases": ["CVE-2026-1"],
                                 "database_specific": {"severity": "HIGH"}, "affected": []},
         "GHSA-dddd-eeee-ffff": {"database_specific": {"severity": "LOW"}, "affected": []},
+        "GHSA-high-high-high": {"database_specific": {"severity": "HIGH"}, "affected": []},
+        "GHSA-crit-crit-crit": {"database_specific": {"severity": "CRITICAL"}, "affected": []},
     }
 
+    # The registries' answers, in the shapes each one really sends.
+    @classmethod
+    def hex_doc(cls, *releases):
+        """releases: (version, published) newest first; a bare string is OLD."""
+        pairs = [(r, cls.OLD) if isinstance(r, str) else r for r in releases]
+        return {"latest_stable_version": pairs[0][0],
+                "releases": [{"version": v, "inserted_at": at} for v, at in pairs]}
+
+    @classmethod
+    def npm_doc(cls, version, at=None):
+        at = at or cls.OLD
+        return {"dist-tags": {"latest": version},
+                "time": {"created": cls.OLD, "modified": at, version: at}}
+
+    @classmethod
+    def github_doc(cls, version, at=None):
+        return [{"tag_name": "v" + version, "published_at": at or cls.OLD,
+                 "draft": False, "prerelease": False}]
+
+    @staticmethod
+    def days_ago(days):
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - days * 86400))
+
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.repo = self.tmp / "repo"
         self.cache = self.tmp / "cache"
+        (self.tmp / "tmp").mkdir()
         app = self.repo / "apps" / "engine"
         (app / "config").mkdir(parents=True)
         subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)], check=True)
@@ -3834,7 +3863,10 @@ class PinsTests(unittest.TestCase):
         self.requests = []
         self.delay = 0
         self.down = False
-        self.latest = dict(self.LATEST)
+        self.latest = {"/api/packages/plug": self.hex_doc("1.20.3"),
+                       "/api/packages/jason": self.hex_doc("1.4.9"),
+                       "/esbuild": self.npm_doc("0.28.2"),
+                       self.GITHUB: self.github_doc("4.3.3")}
         self.url = self.serve()
 
     def serve(self):
@@ -3880,20 +3912,55 @@ class PinsTests(unittest.TestCase):
 
     def env(self, url=None, **extra):
         url = url or self.url
-        env = {"SCRY_PINS_CACHE_DIR": str(self.cache)}
+        # TMPDIR holds the once-per-session markers of the edit note.
+        env = {"SCRY_PINS_CACHE_DIR": str(self.cache), "TMPDIR": str(self.tmp / "tmp")}
         env.update({"SCRY_PINS_%s_URL" % k: url
                     for k in ("OSV", "HEX", "NPM", "PYPI", "GITHUB")})
         env.update(extra)
         return env
 
-    def refresh(self, **extra):
+    def refresh(self, again=False, **extra):
+        if again:  # an answer under a day old is not asked for again
+            (self.cache / "pins.json").unlink()
         env = os.environ.copy()
         env.update(self.env(**extra))
         subprocess.run([sys.executable, str(ROOT / "scanners/pins.py"),
                         "--root", str(self.repo), "--refresh"], check=True, env=env)
 
-    def report(self, **extra):
-        return context(run_hook("pins.sh", self.repo, {}, self.env(**extra)))
+    def startup(self, source="startup", **extra):
+        """What a session start puts in the session's context."""
+        payload = {"hook_event_name": "SessionStart", "source": source} if source else {}
+        result = run_hook("pins.sh", self.repo, payload, self.env(**extra))
+        self.assertEqual(result.stderr, "")
+        return context(result)
+
+    def full(self, **extra):
+        env = os.environ.copy()
+        env.update(self.env(**extra))
+        return subprocess.run(["bash", str(ROOT / "pins.sh"), "--full"], cwd=self.repo,
+                              text=True, capture_output=True, check=True, env=env).stdout
+
+    def edit(self, path, session="sess-1", tool="Edit", **extra):
+        payload = {"hook_event_name": "PostToolUse", "tool_name": tool,
+                   "session_id": session, "cwd": str(self.repo),
+                   "tool_input": {"file_path": str(self.repo / path)}}
+        return context(run_hook("pins_edit_advisory.sh", self.repo, payload,
+                                self.env(**extra)))
+
+    def bar(self, **extra):
+        env = self.env(SCRY_CACHE_STATE_DIR=str(self.tmp / "state"),
+                       SCRY_CLAUDE_PROJECTS=str(self.tmp / "projects"), **extra)
+        payload = {"session_id": "sess-1", "cwd": str(self.repo),
+                   "workspace": {"current_dir": str(self.repo)},
+                   "model": {"display_name": "Fable 5.1"}}
+        out = run_hook("statusline.sh", self.repo, payload, env).stdout
+        return re.sub(r"\x1b\[[0-9;]*m", "", out)
+
+    def git(self, *args):
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        subprocess.run(["git", "-C", str(self.repo), *args], check=True,
+                       capture_output=True, env=env)
 
     def wait_for_cache(self, seconds=15):
         deadline = time.time() + seconds
@@ -3903,6 +3970,8 @@ class PinsTests(unittest.TestCase):
                 return json.loads(path.read_text())
             time.sleep(0.05)
         self.fail("the background refresh never wrote a cache")
+
+    # ── the hook never waits, and never reaches the network itself ────────
 
     def test_session_start_does_not_wait_on_an_unreachable_network(self):
         """No cache and nothing listening: the hook is silent and returns at
@@ -3927,35 +3996,400 @@ class PinsTests(unittest.TestCase):
         # a second refresh on top of it.
         seen = len(self.requests)
         self.delay = 0
-        self.report()
+        self.startup()
         time.sleep(0.5)
         self.assertEqual(len(self.requests), seen)
 
-    def test_reports_advisories_config_pins_and_packages_behind(self):
+    # ── startup: silent, or one line said once ────────────────────────────
+
+    def test_startup_is_silent_when_no_runtime_advisory_is_high(self):
+        """A low advisory, a config pin two minors behind and a package two
+        minors behind are all still true -- and none of them is said."""
+        self.ADVISORIES = {("Hex", "mime", "2.0.0"): ["GHSA-dddd-eeee-ffff"]}
         self.refresh()
-        report = self.report()
+        result = run_hook("pins.sh", self.repo, {"source": "startup"}, self.env())
+        self.assertEqual(result.stdout, "")
+        self.assertIn("tailwind 4.1.12", self.full())   # not lost, just not pushed
+
+    def test_startup_says_one_line_once_per_advisory_set(self):
+        self.refresh()
+        line = self.startup()
+        self.assertEqual(len(line.splitlines()), 1)
+        self.assertLessEqual(len(line), 200)
+        self.assertIn("1 runtime dependency has a high or critical advisory (plug)", line)
+        self.assertIn("pins.sh --full", line)
+        for absent in ("mime", "tailwind", "jason", "behind"):
+            self.assertNotIn(absent, line)       # low, or merely out of date
+        # Said. Every later session start in this repository is silent...
+        self.assertEqual(self.startup(), "")
+        self.assertEqual(self.startup(), "")
+        # ...in every worktree of it: the record is the repository's.
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "init")
+        other = self.tmp / "other-worktree"
+        self.git("worktree", "add", "-q", str(other), "-b", "side")
+        self.assertEqual(context(run_hook("pins.sh", other, {}, self.env())), "")
+        # ...until an advisory appears that was not in what was said...
+        self.ADVISORIES = dict(self.ADVISORIES)
+        self.ADVISORIES[("Hex", "jason", "1.4.4")] = ["GHSA-crit-crit-crit"]
+        self.refresh(again=True)
+        line = self.startup()
+        self.assertIn("2 runtime dependencies have a high or critical advisory", line)
+        self.assertIn("jason", line)
+        self.assertEqual(self.startup(), "")
+        # ...or a week passes. One going away is not news.
+        del self.ADVISORIES[("Hex", "jason", "1.4.4")]
+        self.refresh(again=True)
+        self.assertEqual(self.startup(), "")
+        said = next(self.cache.glob("said-*.json"))
+        record = json.loads(said.read_text())
+        self.assertEqual(record["ids"], ["CVE-2026-1", "GHSA-crit-crit-crit"])
+        record["at"] = time.time() - 8 * 86400
+        said.write_text(json.dumps(record))
+        self.assertIn("1 runtime dependency has", self.startup())
+        self.assertEqual(self.startup(), "")
+        self.assertIn("plug", self.startup(SCRY_PINS_REMIND_DAYS="0"))
+
+    def test_the_line_stays_short_however_many_there_are(self):
+        names = ["a_rather_long_package_name_%02d" % i for i in range(12)]
+        lock = "%{\n" + "".join(
+            '  "%s": {:hex, :%s, "1.0.0", "aa", [:mix], [], "hexpm", "bb"},\n' % (n, n)
+            for n in names) + "}\n"
+        (self.repo / "apps/engine/mix.lock").write_text(lock)
+        (self.repo / "apps/engine/mix.exs").write_text(
+            "defp deps do\n  [%s]\nend\n" % ", ".join('{:%s, "~> 1.0"}' % n for n in names))
+        self.ADVISORIES = {("Hex", n, "1.0.0"): ["GHSA-high-high-high"] for n in names}
+        self.refresh()
+        line = self.startup()
+        self.assertIn("12 runtime dependencies have", line)
+        self.assertEqual(len(line.splitlines()), 1)
+        self.assertLessEqual(len(line), 200)
+        self.assertLessEqual(line.count("a_rather_long_package_name"), 3)
+        self.assertIn("more)", line)
+
+    def test_only_a_startup_speaks(self):
+        self.refresh()
+        for source in ("resume", "clear", "compact"):
+            self.assertEqual(self.startup(source=source), "", source)
+        # None of those used up the one time it is said.
+        self.assertIn("plug", self.startup(source="startup"))
+        groups = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]["SessionStart"]
+        ours = [g for g in groups if any(h["command"].endswith("/pins.sh") for h in g["hooks"])]
+        self.assertEqual([g.get("matcher") for g in ours], ["startup"])
+        # Alone in that group, so the matcher narrows nothing else.
+        self.assertEqual(len(ours[0]["hooks"]), 1)
+
+    def test_nothing_at_commit_stop_or_session_end(self):
+        hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]
+        where = {event for event, groups in hooks.items() for g in groups
+                 for h in g["hooks"] if "pins" in h["command"]}
+        self.assertEqual(where, {"SessionStart", "PostToolUse"})
+
+    # ── runtime or dev ────────────────────────────────────────────────────
+
+    def test_a_dev_only_dependency_never_triggers_the_startup_line(self):
+        app = self.repo / "apps/engine"
+        (app / "mix.exs").write_text(
+            'defp deps do\n  [{:plug, "~> 1.18"},\n'
+            '   # {:credo, "~> 1.7"},\n'
+            '   {:credo, "~> 1.7", only: [:dev, :test], runtime: false},\n'
+            '   {:bypass, "~> 2.1", only: :test},\n'
+            '   {:tidewave, "~> 0.4", only: [:dev]}]\nend\n')
+        hexdep = '{:%s, "~> 1.0", [hex: :%s, repo: "hexpm", optional: false]}'
+        line = '  "%s": {:hex, :%s, "1.0.0", "aa", [:mix], [%s], "hexpm", "bb"},\n'
+        (app / "mix.lock").write_text(
+            "%{\n"
+            + line % ("plug", "plug", hexdep % ("mime", "mime"))
+            + line % ("mime", "mime", "")
+            + line % ("credo", "credo", hexdep % ("bunt", "bunt"))
+            + line % ("bunt", "bunt", "")              # reached only from credo
+            + line % ("bypass", "bypass", hexdep % ("mime", "mime"))  # mime: both
+            + line % ("tidewave", "tidewave", "")
+            + line % ("orphan", "orphan", "")          # nothing declares it
+            + "}\n")
+        (self.repo / "package-lock.json").write_text(json.dumps({
+            "lockfileVersion": 3, "packages": {
+                "": {"dependencies": {"left": "^1"}, "devDependencies": {"vitest": "^4"}},
+                "node_modules/vitest": {
+                    "version": "4.1.0", "dev": True,
+                    "resolved": "https://registry.npmjs.org/vitest/-/vitest-4.1.0.tgz"},
+                "node_modules/vite": {     # pulled in by vitest alone
+                    "version": "7.0.0", "dev": True,
+                    "resolved": "https://registry.npmjs.org/vite/-/vite-7.0.0.tgz"}}}))
+        (self.repo / "requirements-dev.txt").write_text("pytest==9.0.0\n")
+        high = ["GHSA-high-high-high"]
+        self.ADVISORIES = {("Hex", n, "1.0.0"): high
+                           for n in ("credo", "bunt", "bypass", "tidewave")}
+        self.ADVISORIES.update({("npm", "vitest", "4.1.0"): high,
+                                ("npm", "vite", "7.0.0"): high,
+                                ("PyPI", "pytest", "9.0.0"): high})
+        self.refresh()
+        self.assertEqual(self.startup(), "")
+        self.assertNotIn("pins", self.bar())
+        full = self.full()
+        self.assertIn("Dev/test-only dependencies with a published security advisory: "
+                      "7 (7 high)", full)
+        self.assertNotIn("Runtime dependencies with", full)
+        self.assertIn("- bunt 1.0.0 (apps/engine/mix.lock) [dev]: high", full)
+        self.assertIn("- pytest 9.0.0 (requirements-dev.txt) [dev]: high", full)
+
+        # The same flaw in what ships is said. mime is reached from plug as
+        # well as from a test dependency; an undeclared lock line cannot be
+        # told, so it counts; a plain requirements.txt is runtime.
+        self.ADVISORIES.update({("Hex", "mime", "1.0.0"): high,
+                                ("Hex", "orphan", "1.0.0"): high,
+                                ("PyPI", "fastapi", "0.141.1"): high})
+        (self.repo / "requirements.txt").write_text("fastapi==0.141.1\n")
+        self.refresh(again=True)
+        line = self.startup()
+        self.assertIn("3 runtime dependencies have", line)
+        for name in ("mime", "orphan", "fastapi"):
+            self.assertIn(name, line)
+        for name in ("credo", "bunt", "bypass", "tidewave", "vitest", "vite", "pytest"):
+            self.assertNotIn(name, line)
+        self.assertIn("pins 3!", self.bar())
+
+    def test_an_npm_runtime_dependency_is_said_and_its_dev_twin_is_not(self):
+        def lock(dev):
+            entry = {"version": "3.0.3",
+                     "resolved": "https://registry.npmjs.org/braces/-/braces-3.0.3.tgz"}
+            if dev:
+                entry["dev"] = True
+            return json.dumps({"lockfileVersion": 3, "packages": {
+                "": {"dependencies": {}}, "node_modules/braces": entry}})
+        self.ADVISORIES = {("npm", "braces", "3.0.3"): ["GHSA-crit-crit-crit"]}
+        (self.repo / "package-lock.json").write_text(lock(dev=True))
+        self.refresh()
+        self.assertEqual(self.startup(), "")
+        (self.repo / "package-lock.json").write_text(lock(dev=False))
+        self.assertIn("(braces)", self.startup())
+
+    def test_a_pin_this_branch_changes_is_not_said_to_it(self):
+        lock = self.repo / "apps/engine/mix.lock"
+        self.ADVISORIES = dict(self.ADVISORIES)
+        self.ADVISORIES[("Hex", "plug", "1.18.2")] = ["GHSA-high-high-high"]
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "init")
+        self.git("checkout", "-q", "-b", "bump-plug")
+        every = {"SCRY_PINS_REMIND_DAYS": "0"}   # take say-once out of the way
+        # Uncommitted, the bump is already this branch's change.
+        lock.write_text(lock.read_text().replace('"1.18.1"', '"1.18.2"'))
+        self.refresh()
+        self.assertIn("plug 1.18.2", self.full())           # still a finding
+        self.assertEqual(self.startup(**every), "")
+        self.git("commit", "-q", "-am", "bump plug")
+        self.assertEqual(self.startup(**every), "")
+        # A branch that touches something else hears about plug.
+        self.git("checkout", "-q", "-b", "other-work", "main")
+        (self.repo / "notes.txt").write_text("x")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "other")
+        self.refresh()                     # plug 1.18.1 is back, and unasked
+        self.assertIn("(plug)", self.startup(**every))
+        self.git("checkout", "-q", "main")
+        self.assertIn("(plug)", self.startup(**every))
+
+    # ── cooldown ──────────────────────────────────────────────────────────
+
+    def test_a_release_counts_only_once_it_has_been_out_for_the_cooldown(self):
+        fresh = self.days_ago(2)
+        self.latest["/api/packages/plug"] = self.hex_doc(
+            ("1.20.3", fresh), ("1.20.2", self.days_ago(4)), "1.19.0", "1.18.1")
+        # jason's only newer release is two days old: it is not behind yet.
+        self.latest["/api/packages/jason"] = self.hex_doc(("1.6.0", fresh), "1.4.4")
+        self.latest[self.GITHUB] = (self.github_doc("4.3.3", fresh)
+                                    + self.github_doc("4.2.0"))
+        self.refresh()
+        full = self.full()
+        self.assertIn("- plug 1.18.1 → 1.19.0 (apps/engine/mix.lock)", full)
+        self.assertNotIn("→ 1.20", full)
+        self.assertNotIn("jason 1.4.4 →", full)
+        self.assertIn("latest release 4.2.0 (1 minor behind)", full)
+        self.assertIn("A release counts once it has been published 5 day(s)", full)
+        self.assertIn("Newer releases not counted yet", full)
+        for held in ("jason 1.6.0 (2 days ago)", "plug 1.20.3 (2 days ago)",
+                     "tailwind 4.3.3 (2 days ago)"):
+            self.assertIn(held, full)
+        # An advisory is exempt: the fix is named however new it is.
+        self.assertIn("plug 1.18.1 (apps/engine/mix.lock): high CVE-2026-1, "
+                      "fixed in 1.18.5", full)
+        # The dates are in the cache, so the setting takes effect with no lookup.
+        self.down = True
+        self.assertIn("plug 1.18.1 → 1.20.2", self.full(SCRY_PINS_COOLDOWN_DAYS="3"))
+        now = self.full(SCRY_PINS_COOLDOWN_DAYS="0")
+        self.assertIn("plug 1.18.1 → 1.20.3", now)
+        self.assertIn("jason 1.4.4 → 1.6.0", now)
+        self.assertNotIn("not counted yet", now)
+
+    # ── the note on an edited manifest ────────────────────────────────────
+
+    def test_editing_a_manifest_says_that_files_findings_once_per_session(self):
+        (self.repo / "requirements.txt").write_text("fastapi==0.141.1\n")
+        (self.repo / ".tool-versions").write_text("elixir 1.19.0\n")
+        (self.repo / "apps/engine/lib").mkdir()
+        (self.repo / "apps/engine/lib/app.ex").write_text("defmodule App do\nend\n")
+        self.latest["/pypi/fastapi/json"] = {
+            "info": {"version": "0.141.1"},
+            "releases": {"0.141.1": [{"upload_time_iso_8601": self.OLD}]}}
+        self.refresh()
+        seen = len(self.requests)
+        self.down = True
+
+        note = self.edit("apps/engine/mix.lock")
+        self.assertEqual(len(note.splitlines()), 1)
+        self.assertIn("Pinned versions in apps/engine/mix.lock, from Scry's local cache", note)
+        self.assertIn("2 with a published security advisory (1 high, 1 low): "
+                      "plug 1.18.1: high CVE-2026-1, fixed in 1.18.5; "
+                      "mime 2.0.0: low GHSA-dddd-eeee-ffff.", note)
+        self.assertIn("1 behind the latest release: plug 1.18.1 → 1.20.3.", note)
+        self.assertIn("pins.sh --full", note)
+        self.assertNotIn("tailwind", note)             # another file's finding
+        # Once per session per file; Write counts as the same edit.
+        self.assertEqual(self.edit("apps/engine/mix.lock"), "")
+        self.assertEqual(self.edit("apps/engine/mix.lock", tool="Write"), "")
+        self.assertIn("plug 1.18.1", self.edit("apps/engine/mix.lock", session="sess-2"))
+
+        # mix.exs answers for what IT declares, through the lock beside it.
+        note = self.edit("apps/engine/mix.exs")
+        self.assertIn("apps/engine/mix.exs (as locked in apps/engine/mix.lock)", note)
+        self.assertIn("1 with a published security advisory (1 high): plug 1.18.1", note)
+        self.assertNotIn("mime", note)                 # nothing mix.exs declares
+        note = self.edit("apps/engine/config/config.exs")
+        self.assertIn("1 behind the latest release: tailwind 4.1.12 → 4.3.3.", note)
+        self.assertNotIn("plug", note)
+
+        # Silent: a manifest with nothing found, a file Scry reads no pins
+        # from, a source file, and a tool that is not an edit.
+        self.assertEqual(self.edit("requirements.txt"), "")
+        self.assertEqual(self.edit(".tool-versions"), "")
+        self.assertEqual(self.edit("apps/engine/lib/app.ex"), "")
+        self.assertEqual(self.edit("apps/engine/mix.lock", session="s3", tool="Read"), "")
+        self.assertEqual(self.edit("apps/engine/mix.lock", session="s4", SCRY_PINS="0"), "")
+        # No lookup, and none started: the registry heard nothing at all.
+        time.sleep(0.5)
+        self.assertEqual(len(self.requests), seen)
+
+        groups = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]["PostToolUse"]
+        matchers = [g.get("matcher") for g in groups
+                    if any("pins_edit_advisory.sh" in h["command"] for h in g["hooks"])]
+        self.assertEqual(matchers, ["Edit|Write"])
+
+    def test_the_edit_note_reads_the_file_as_it_now_is(self):
+        self.refresh()
+        lock = self.repo / "apps/engine/mix.lock"
+        lock.write_text(lock.read_text().replace('"1.18.1"', '"1.20.3"')
+                        .replace('"2.0.0"', '"2.0.9"'))
+        self.assertIn("pins 1!", self.bar())           # the bar before the edit
+        # The bumped versions have no answer in the cache: nothing is claimed.
+        self.assertEqual(self.edit("apps/engine/mix.lock"), "")
+        self.assertNotIn("pins", self.bar())           # ...and the bar follows
+
+    def test_package_json_answers_through_its_lockfile(self):
+        (self.repo / "web").mkdir()
+        (self.repo / "web/package.json").write_text(json.dumps(
+            {"dependencies": {"braces": "^3"}, "devDependencies": {"vitest": "^4"}}))
+        (self.repo / "web/package-lock.json").write_text(json.dumps({
+            "lockfileVersion": 3, "packages": {
+                "": {"dependencies": {"braces": "^3"}, "devDependencies": {"vitest": "^4"}},
+                "node_modules/braces": {
+                    "version": "3.0.3",
+                    "resolved": "https://registry.npmjs.org/braces/-/braces-3.0.3.tgz"},
+                "node_modules/deep": {
+                    "version": "1.0.0",
+                    "resolved": "https://registry.npmjs.org/deep/-/deep-1.0.0.tgz"},
+                "node_modules/vitest": {
+                    "version": "4.1.0", "dev": True,
+                    "resolved": "https://registry.npmjs.org/vitest/-/vitest-4.1.0.tgz"}}}))
+        self.latest.update({"/vitest": self.npm_doc("5.0.3"), "/braces": self.npm_doc("3.0.3")})
+        self.ADVISORIES = {("npm", "braces", "3.0.3"): ["GHSA-high-high-high"],
+                           ("npm", "deep", "1.0.0"): ["GHSA-high-high-high"]}
+        self.refresh()
+        note = self.edit("web/package.json")
+        self.assertIn("web/package.json (as locked in web/package-lock.json)", note)
+        self.assertIn("1 with a published security advisory (1 high): braces 3.0.3", note)
+        self.assertIn("1 behind the latest release: vitest 4.1.0 → 5.0.3.", note)
+        self.assertNotIn("deep", note)
+        self.assertIn("deep 1.0.0", self.edit("web/package-lock.json"))
+
+    # ── the status line ───────────────────────────────────────────────────
+
+    def test_status_line_shows_the_count_from_the_cache_alone(self):
+        # No cache directory at all: no segment, and the bar is whole.
+        bar = self.bar()
+        self.assertNotIn("pins", bar)
+        self.assertIn("Fable 5.1", bar)
+        self.assertFalse(self.cache.exists())          # the bar created nothing
+        self.refresh()
+        seen = len(self.requests)
+        self.down = True
+        bar = self.bar()
+        self.assertIn("pins 1!", bar)                  # plug; mime is low
+        self.assertLess(bar.index("pins 1!"), bar.index("Fable 5.1"))
+        self.assertEqual(len(self.requests), seen)     # and asked nobody
+        self.assertNotIn("pins", self.bar(SCRY_PINS="0"))
+        # Another repository has its own summary, or none.
+        elsewhere = self.tmp / "elsewhere"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(elsewhere)], check=True)
+        out = run_hook("statusline.sh", elsewhere,
+                       {"cwd": str(elsewhere), "model": {"display_name": "Fable 5.1"}},
+                       self.env(SCRY_CACHE_STATE_DIR=str(self.tmp / "state"),
+                                SCRY_CLAUDE_PROJECTS=str(self.tmp / "projects"))).stdout
+        self.assertNotIn("pins", out)
+        # A summary nobody can read costs the bar nothing.
+        next(self.cache.glob("summary-*.json")).write_text("{not json")
+        self.assertIn("Fable 5.1", self.bar())
+        self.assertNotIn("pins", self.bar())
+
+    def test_status_line_is_clean_when_nothing_is_high(self):
+        self.ADVISORIES = {("Hex", "mime", "2.0.0"): ["GHSA-dddd-eeee-ffff"]}
+        self.refresh()
+        self.assertNotIn("pins", self.bar())
+
+    # ── the full list ─────────────────────────────────────────────────────
+
+    def test_full_lists_advisories_config_pins_and_packages_behind(self):
+        self.refresh()
+        report = self.full()
         # One flaw published under three ids is one advisory, rated by the
         # record that carries a label, with the fix for THIS version's line.
-        self.assertIn("2 pinned version(s) have a published security advisory "
-                      "(1 high, 1 low)", report)
-        self.assertIn("plug 1.18.1 (apps/engine/mix.lock): high CVE-2026-1, "
+        self.assertIn("Runtime dependencies with a published security advisory: "
+                      "2 (1 high, 1 low)", report)
+        self.assertIn("- plug 1.18.1 (apps/engine/mix.lock): high CVE-2026-1, "
                       "fixed in 1.18.5", report)
-        self.assertIn("tailwind 4.1.12 in apps/engine/config/config.exs, "
+        self.assertIn("- mime 2.0.0 (apps/engine/mix.lock): low GHSA-dddd-eeee-ffff", report)
+        self.assertIn("- tailwind 4.1.12 in apps/engine/config/config.exs, "
                       "latest release 4.3.3 (2 minor behind)", report)
         self.assertIn("no outdated or audit command reads it", report)
         self.assertNotIn("esbuild", report)       # pinned at the latest
         self.assertNotIn("9.9.9", report)         # some other app's version key
-        self.assertIn("1 of 2 directly declared package(s) are behind", report)
-        self.assertIn("plug 1.18.1 → 1.20.3", report)
+        self.assertIn("Behind the latest release: 1 of 2 directly declared package(s)", report)
+        self.assertIn("- plug 1.18.1 → 1.20.3", report)
         self.assertNotIn("jason", report)         # a patch behind is not far
-        self.assertLessEqual(len(report.splitlines()), 5)
+        self.assertNotIn("Dev/test-only", report)
+        self.assertNotIn("hookSpecificOutput", report)   # plain text, for a person
+
+    def test_full_is_never_empty_and_says_what_it_does_not_know(self):
+        report = self.full()                      # before anything was looked up
+        self.assertIn("holds no answer for this repo yet", report)
+        self.assertIn("lookup(s) for this repo have no answer", report)
+        self.assertIn("pins.sh --refresh", report)
+        self.assertEqual(self.requests, [])       # asking for the list asks nobody
+        self.ADVISORIES = {}
+        self.latest.update({"/api/packages/plug": self.hex_doc("1.18.9"),
+                            self.GITHUB: self.github_doc("4.1.14")})
+        self.refresh()
+        self.assertIn("No published advisory, and nothing behind the threshold",
+                      self.full())
+        self.assertEqual(self.startup(), "")
 
     def test_sends_only_public_package_names_and_versions(self):
         (self.repo / "requirements.txt").write_text(
             "--index-url https://user:s3cret@pypi.internal.test/simple\n"
             "fastapi==0.141.1  # pinned\nuvicorn[standard]>=0.50\n"
             "private @ git+https://tok3n@example.test/private.git\n")
-        self.latest["/pypi/fastapi/json"] = {"info": {"version": "0.141.1"}}
+        self.latest["/pypi/fastapi/json"] = {
+            "info": {"version": "0.141.1"},
+            "releases": {"0.141.1": [{"upload_time_iso_8601": self.OLD}]}}
         self.refresh()
         sent = json.dumps(self.requests)
         for absent in ("oban_pro", "local_fork", "vendored", "s3cret", "tok3n",
@@ -3968,43 +4402,43 @@ class PinsTests(unittest.TestCase):
         self.assertIn('"name": "mime"', self.requests[0][2])
         self.assertNotIn("/api/packages/mime", paths)
 
-    def test_silent_when_nothing_crosses_a_threshold(self):
-        self.ADVISORIES = {}
-        self.latest.update({"/api/packages/plug": {"latest_stable_version": "1.18.9"},
-                            "/repos/tailwindlabs/tailwindcss/releases/latest":
-                                {"tag_name": "v4.1.14"}})
-        self.refresh()
-        self.assertEqual(self.report(), "")
-
     def test_threshold_and_switches(self):
         self.ADVISORIES = {}
         self.refresh()
-        self.assertIn("tailwind 4.1.12", self.report())
-        self.assertEqual(self.report(SCRY_PINS_BEHIND_MINORS="3"), "")
-        self.assertEqual(self.report(SCRY_PINS_BEHIND="0"), "")
-        self.assertEqual(self.report(SCRY_PINS="0"), "")
-        self.assertIn("jason 1.4.4 → 1.4.9", self.report(SCRY_PINS_BEHIND_MINORS="0"))
-        self.latest["/api/packages/plug"] = {"latest_stable_version": "2.0.0"}
-        (self.cache / "pins.json").unlink()
-        self.refresh()
+        self.assertIn("tailwind 4.1.12", self.full())
+        self.assertNotIn("tailwind", self.full(SCRY_PINS_BEHIND_MINORS="3"))
+        self.assertNotIn("tailwind", self.full(SCRY_PINS_BEHIND="0"))
+        self.assertEqual(self.full(SCRY_PINS="0"), "")
+        self.assertIn("jason 1.4.4 → 1.4.9", self.full(SCRY_PINS_BEHIND_MINORS="0"))
+        self.latest["/api/packages/plug"] = self.hex_doc("2.0.0")
+        self.refresh(again=True)
         self.assertIn("1 of them a major version",
-                      self.report(SCRY_PINS_BEHIND_MINORS="99"))
+                      self.full(SCRY_PINS_BEHIND_MINORS="99"))
 
     def test_a_bumped_pin_stops_being_reported_without_a_lookup(self):
         self.ADVISORIES = {}
-        self.latest["/api/packages/plug"] = {"latest_stable_version": "1.18.1"}
+        self.latest["/api/packages/plug"] = self.hex_doc("1.18.1")
         self.refresh()
-        self.assertIn("tailwind 4.1.12", self.report())
+        self.assertIn("tailwind 4.1.12", self.full())
         config = self.repo / "apps/engine/config/config.exs"
         config.write_text(config.read_text().replace("4.1.12", "4.3.3"))
         self.down = True
-        self.assertEqual(self.report(), "")
+        self.assertNotIn("tailwind", self.full())
 
     def test_github_refusing_falls_back_to_the_npm_release(self):
-        del self.latest["/repos/tailwindlabs/tailwindcss/releases/latest"]
+        del self.latest[self.GITHUB]
+        self.latest["/tailwindcss"] = self.npm_doc("4.3.3")
+        self.refresh()
+        self.assertIn("latest release 4.3.3", self.full())
+
+    def test_an_npm_packument_that_will_not_come_still_names_the_latest(self):
+        """The packument has the dates and is sometimes megabytes; `latest`
+        is small. Without a date the release cannot be held back."""
+        del self.latest[self.GITHUB]
+        self.latest["/tailwindcss"] = "cut short"
         self.latest["/tailwindcss/latest"] = {"version": "4.3.3"}
         self.refresh()
-        self.assertIn("latest release 4.3.3", self.report())
+        self.assertIn("latest release 4.3.3", self.full())
 
     def test_old_data_is_labelled_and_a_dark_check_is_not_silent(self):
         self.refresh()
@@ -4017,25 +4451,29 @@ class PinsTests(unittest.TestCase):
         cache["meta"] = {"fail_since": old}
         path.write_text(json.dumps(cache))
         dead = "http://127.0.0.1:1"
-        self.assertIn("LAST CHECKED 9 DAYS AGO", self.report(url=dead))
+        self.assertIn("LAST CHECKED 9 DAYS AGO", self.full(url=dead))
         # Nothing flagged, and the lookups have failed for over a week:
-        # silence here would claim a check that did not happen.
+        # silence everywhere would claim a check that did not happen. The
+        # session is still not told at startup; the bar and the list say so.
         for entry in cache["adv"].values():
             entry["ids"] = []
         for entry in cache["latest"].values():
-            entry["v"] = None
+            entry["v"], entry["rel"] = None, []
         path.write_text(json.dumps(cache))
-        report = self.report(url=dead)
+        report = self.full(url=dead)
         self.assertIn("NOT CHECKED", report)
-        self.assertIn("not a finding that they are clean", report)
-        self.assertEqual(self.report(url=dead, SCRY_PINS_STALE_DAYS="30"), "")
+        self.assertIn("not a finding that the rest are clean", report)
+        self.assertIn("pins ?", self.bar(url=dead))
+        self.assertEqual(self.startup(url=dead), "")
+        self.assertNotIn("NOT CHECKED", self.full(url=dead, SCRY_PINS_STALE_DAYS="30"))
+        self.assertNotIn("pins", self.bar(url=dead, SCRY_PINS_STALE_DAYS="30"))
 
     def test_npm_lock_and_non_repositories(self):
         (self.repo / "package-lock.json").write_text(json.dumps({
             "lockfileVersion": 3, "packages": {
                 "": {"devDependencies": {"vitest": "^4.0.0"}},
                 "node_modules/vitest": {
-                    "version": "4.1.0",
+                    "version": "4.1.0", "dev": True,
                     "resolved": "https://registry.npmjs.org/vitest/-/vitest-4.1.0.tgz"},
                 "node_modules/braces": {
                     "version": "3.0.3",
@@ -4044,25 +4482,20 @@ class PinsTests(unittest.TestCase):
                     "version": "1.0.0",
                     "resolved": "https://npm.internal.test/inhouse-1.0.0.tgz"},
                 "node_modules/linked": {"resolved": "packages/linked", "link": True}}}))
-        self.latest["/vitest/latest"] = {"version": "5.0.3"}
+        self.latest["/vitest"] = self.npm_doc("5.0.3")
         self.ADVISORIES = {("npm", "braces", "3.0.3"): ["GHSA-dddd-eeee-ffff"]}
         self.refresh()
-        report = self.report()
+        report = self.full()
         self.assertIn("braces 3.0.3 (package-lock.json): low GHSA-dddd-eeee-ffff", report)
-        self.assertIn("vitest 4.1.0 → 5.0.3", report)
+        self.assertIn("vitest 4.1.0 → 5.0.3 (package-lock.json) [dev]", report)
         sent = json.dumps(self.requests)
         self.assertNotIn("inhouse", sent)
-        self.assertNotIn("/braces/latest", sent)
+        self.assertNotIn("/braces", sent)
         outside = self.tmp / "not-a-repo"
         outside.mkdir()
         shutil.copy(self.repo / "apps/engine/mix.lock", outside / "mix.lock")
         result = run_hook("pins.sh", outside, {}, self.env())
         self.assertEqual(result.stdout.strip(), "")
-
-    def test_registered_at_session_start(self):
-        hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]["SessionStart"]
-        commands = [h["command"] for g in hooks for h in g["hooks"]]
-        self.assertTrue(any(c.endswith("/pins.sh") for c in commands), commands)
 
 
 class StatuslineSetupTests(unittest.TestCase):

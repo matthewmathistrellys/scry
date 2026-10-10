@@ -17,12 +17,6 @@
           },
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/pins.sh",
-            "statusMessage": "Reading pinned versions...",
-            "timeout": 10
-          },
-          {
-            "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/health.sh",
             "statusMessage": "Checking repo health...",
             "timeout": 60
@@ -54,6 +48,16 @@
             "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/cache_handoff_arm.sh",
             "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/pins.sh",
+            "timeout": 10
           }
         ]
       }
@@ -111,6 +115,11 @@
             "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/doc_currency_advisory.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/pins_edit_advisory.sh",
+            "timeout": 10
           }
         ]
       },

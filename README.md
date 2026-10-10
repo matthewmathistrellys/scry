@@ -15,7 +15,7 @@ machine is carrying. Independent checks and advisories fill that in.
 |---|---|
 | **`architecture.sh`** | What *is* this codebase? |
 | **`stack.sh`** | What is it built *on*? |
-| **`pins.sh`** | Is a version pinned here known-vulnerable, or far behind what is released? |
+| **`pins.sh`**, **`pins_edit_advisory.sh`** | Is a version pinned here known-vulnerable, or far behind what is released? One line at startup, once, for a high or critical advisory on a runtime dependency; a count in the status line; a note on the manifest being edited; the rest on demand |
 | **`elixir_build_guard.sh`** | Is this command about to cost me 20 minutes? |
 | **`health.sh`** | Is this repo in good shape? |
 | **`fleet.sh`** | What else is happening *right now*? |
@@ -94,6 +94,54 @@ machine is carrying. Independent checks and advisories fill that in.
   of packages with published advisories that surfaced only when someone ran an
   audit by hand.
 
+  **Who hears what.** The first cut printed every advisory and every
+  out-of-date package into the session at every start, resume, clear and
+  compact — about 1,300 characters, several times a day, nearly all of it
+  already said. It was reworked before it shipped:
+
+  | Where | What | When |
+  |---|---|---|
+  | session start (`pins.sh`) | **nothing**, or one line under 200 characters: the count, up to three package names, and the command for the full list | `startup` only — never resume, clear or compact — and only for a **high or critical** advisory on a **runtime** dependency that the current branch does not itself change against the default branch. Said **once per repository per advisory set** |
+  | status line (`statusline.sh`) | `pins 4!` in red: runtime dependencies with a high or critical advisory. Nothing when clean | always, for the human; read from one small file in the cache |
+  | an edited manifest (`pins_edit_advisory.sh`) | one line about **that file's** findings: its advisories, and what in it is behind | `PostToolUse` on Edit/Write of a dependency manifest or pinned-tool config, once per session per file, silent when the file has no findings |
+  | on demand | everything, one finding per line | `bash pins.sh --full` (from the plugin directory; `--full <dir>` for another repo) |
+
+  Nothing is said at commit, at deploy, at Stop or at session end.
+
+  *Once per advisory set.* What was said is recorded in the cache, per
+  repository (every worktree of it shares the record). Nothing is said again
+  until a high or critical advisory id appears that was not in it, or
+  `SCRY_PINS_REMIND_DAYS` (7) pass. An advisory going away is not news, so a
+  shrinking set says nothing.
+
+  *Not what the branch itself changes.* A pin whose version differs from the
+  one at the branch's merge base with the default branch — committed or still
+  uncommitted — is that branch's own work in progress, and is left out of the
+  startup line. Where there is no default branch to compare with, or the
+  lockfile is not tracked by git, the pin is kept.
+
+  *Runtime or dev.* A dev/test-only dependency never triggers the startup
+  line and is not in the status-line count; `--full` lists it under its own
+  heading, marked `[dev]`.
+
+  | Ecosystem | Dev/test-only when |
+  |---|---|
+  | mix | declared with `only:` naming nothing but `:dev` / `:test`, or reached in `mix.lock` only from such dependencies (the lock's own dependency lists are followed, optional ones excepted). `runtime: false` alone is not dev |
+  | npm | the lockfile entry carries `"dev": true` |
+  | Python | the requirements file is named for it: `requirements-dev.txt`, `requirements_test.txt`, also `lint`, `ci`, `docs` |
+
+  Anything that cannot be told is runtime: a lock line no `mix.exs`
+  declaration reaches, a `tailwind` / `esbuild` config pin, a plain
+  `requirements.txt`.
+
+  *Cooldown.* A release counts as the "latest" a pin is behind only once it
+  has been published for `SCRY_PINS_COOLDOWN_DAYS` (5): a release a few hours
+  old is the one most likely to be yanked, or to be the compromised one. The
+  pin is measured against the newest release older than that, and `--full`
+  lists what is being held back and how old it is. The registries' publish
+  dates are stored with the versions, so changing the setting needs no lookup.
+  Advisories are exempt: a fix is named however new it is.
+
   What it reads, searching down from the repo root with the same pruning as
   the other scanners:
 
@@ -105,22 +153,28 @@ machine is carrying. Independent checks and advisories fill that in.
   | every `requirements*.txt` | exact `name==version` lines | the same lines |
 
   Advisories come from [OSV](https://osv.dev) (`querybatch`, one request for
-  the whole repo); latest releases from hex.pm, the npm registry, PyPI and
-  GitHub. No project tooling is run and no dependency has to be fetched or
-  compiled. "Behind" is computed only for packages the project declares
-  itself: a transitive package is not a version this repo chose, and looking
-  them all up is what would exhaust hex.pm's 100 requests a minute.
+  the whole repo); latest releases and their publish dates from hex.pm, the
+  npm registry, PyPI and GitHub. No project tooling is run and no dependency
+  has to be fetched or compiled. "Behind" is computed only for packages the
+  project declares itself: a transitive package is not a version this repo
+  chose, and looking them all up is what would exhaust hex.pm's 100 requests a
+  minute.
 
-  **Session start does not wait on the network.** The hook reads the lockfiles
-  and a local cache (`~/.cache/scry/pins.json`), prints, and exits — ~0.1s. When
-  the cache lacks an answer or holds one older than a day, it starts a
-  detached refresh and returns without waiting; that refresh has a wall-clock
-  budget of its own. So the first session in a repo nobody has checked says
-  nothing and the next one has the answer, and an offline machine sees what
-  the cache held. The cache is keyed by package and version, not by repo, so
-  twenty worktrees of one repo share one set of lookups. The lockfiles are
-  re-read every time, so a bumped pin stops being reported the moment the file
-  changes.
+  **No hook waits on the network.** Session start reads the lockfiles and a
+  local cache (`~/.cache/scry/pins.json`) and exits — ~0.15s. When the cache
+  lacks an answer or holds one older than a day, it starts a detached refresh
+  and returns without waiting; that refresh has a wall-clock budget of its
+  own. So the first session in a repo nobody has checked says nothing and the
+  next one has the answer, and an offline machine sees what the cache held.
+  The edit note and the status line make no network call and start no
+  refresh. The cache is keyed by package and version, not by repo, so twenty
+  worktrees of one repo share one set of lookups. The lockfiles are re-read
+  every time, so a bumped pin stops being reported the moment the file
+  changes. The status line reads a per-worktree summary
+  (`summary-<id>.json`) that the scanner rewrites at session start, after a
+  refresh, after a manifest edit and on `--full`; between those it shows the
+  last count, so a `git checkout` alone does not move it. When the cache
+  directory does not exist the status line does nothing for this segment.
 
   What leaves the machine: package names and versions, to OSV; package names,
   to the registry that publishes them. No token is read or sent. A package
@@ -128,19 +182,28 @@ machine is carrying. Independent checks and advisories fill that in.
   not resolved from `registry.npmjs.org` is skipped, so its name goes nowhere.
   Outside a git repository the hook does nothing.
 
-  The report is at most a few lines: the worst advisories by published
-  severity and a count, the config pins, the packages furthest behind and a
-  count, and the command that prints the full list. One vulnerability
-  published under several ids (GHSA, CVE, EEF-CVE, PYSEC) is counted once.
-  Many Hex advisories publish a CVSS vector and no severity label; those are
-  listed as `unrated` rather than given a severity Scry worked out for itself.
-  Data older than `SCRY_PINS_STALE_DAYS` is labelled with its age, and when
-  the lookups have failed for that long and nothing is flagged, it says the
-  pins were NOT CHECKED rather than staying silent.
+  One vulnerability published under several ids (GHSA, CVE, EEF-CVE, PYSEC)
+  is counted once. Many Hex advisories publish a CVSS vector and no severity
+  label; those are listed as `unrated` rather than given a severity Scry
+  worked out for itself — which means **an unrated advisory is in `--full`
+  and in the edit note, and never in the startup line or the status-line
+  count**. Data older than `SCRY_PINS_STALE_DAYS` is labelled with its age in
+  `--full`. When the lookups have failed for that long, `--full` says NOT
+  CHECKED and the status line shows `pins ?`, rather than a blank that would
+  read as "checked and clean"; the session is still not told at startup.
+
+  The edit note fires for `mix.exs`, `mix.lock`, `package.json`,
+  `package-lock.json`, `requirements*.txt`, a mix project's `config/*.exs`,
+  and — so that they need no new hook when they are read — `yarn.lock`,
+  `pnpm-lock.yaml`, `npm-shrinkwrap.json`, `pyproject.toml`, `uv.lock`,
+  `poetry.lock`, `Pipfile`, `Pipfile.lock` and `.tool-versions`. A lockfile,
+  requirements file or config file answers for itself; `mix.exs` and
+  `package.json` answer for the packages they declare, as locked beside them.
 
   Not read: `yarn.lock`, `pnpm-lock.yaml`, `uv.lock`, `poetry.lock`,
-  `Pipfile.lock`, `pyproject.toml`, npm lockfileVersion 1, version ranges
-  (`>=`), and any other version written in a config file.
+  `Pipfile.lock`, `pyproject.toml`, `.tool-versions`, npm lockfileVersion 1,
+  version ranges (`>=`), and any other version written in a config file. An
+  edit to one of those is therefore always silent.
 - **Markdown trust** — `provenance.sh` establishes at session start that every
   repository Markdown file is untrusted historical material, including plans,
   design documents, architectural decisions, status claims, memories, READMEs,
@@ -659,10 +722,11 @@ industrialise that problem.
 | Elixir build state | `_build` populated | `_build` cold — next compile is a FULL build |
 | Force-rebuild command | any ordinary command | first `--force`/`rm -rf _build` attempt |
 | Open PRs | none, or `gh` unavailable | any open PR exists |
-| Pinned version with an advisory | none published for any locked version | any — worst by severity named, the rest counted |
-| Pin in Elixir config (`tailwind`, `esbuild`) | at, or a patch behind, the latest release | ≥1 minor behind, or any major |
-| Declared package behind latest | within the same minor | ≥1 minor behind, or any major — furthest named, the rest counted |
-| Pin data | checked within 7 days, or never checked | data older than that is labelled; lookups failing that long with nothing flagged says NOT CHECKED |
+| Pinned version with an advisory (session start) | none high or critical on a runtime dependency; or dev/test-only; or the branch itself changes that pin; or already said for this advisory set within 7 days; or the start is a resume, clear or compact | one line, once: the count and up to three names |
+| Pinned version with an advisory (status line) | none high or critical on a runtime dependency | `pins N!` |
+| Edited dependency manifest | the file has no advisory and nothing behind; or already said for this file this session | that file's advisories and what in it is behind |
+| Pin in Elixir config, declared package behind latest | never said unasked | in `pins.sh --full` and the edit note: ≥1 minor behind, or any major, against a release at least 5 days old |
+| Pin data | checked within 7 days, or never checked | status line `pins ?` and NOT CHECKED in `--full` when lookups have failed that long |
 | Scry status bar (Claude only) | `statusLine` reaches Scry's status line | no `statusLine`: every session until set up or silenced. A different one: once per status line |
 | Stack | no config found | always — see below |
 
@@ -708,21 +772,37 @@ deliberately not consulted):
 ```
 
 ```
-Pinned versions (SessionStart; advisories from OSV, releases from the package
-registries, read from a local cache checked 3h ago; no project tooling was run):
-- 6 pinned version(s) have a published security advisory (2 high, 1 moderate,
-  3 unrated). hackney 1.25.0 (apps/engine/mix.lock): 4 advisories, worst high
-  CVE-2026-47071, fixed in 4.0.1; braces 3.0.3 (apps/web/package-lock.json):
-  high CVE-2026-93687; cowlib 2.19.0 (apps/engine/mix.lock): 3 advisories,
-  worst moderate CVE-2026-43966, fixed in 2.21.0; +3 more.
-- Pinned in Elixir config: tailwind 4.1.12 in apps/engine/config/config.exs,
-  latest release 4.3.3 (2 minor behind). A version written in a config file is
-  in no lockfile, so no outdated or audit command reads it.
-- 12 of 96 directly declared package(s) are behind their latest release by at
-  least 1 minor version(s), 2 of them a major version. Furthest: typescript
-  5.9.3 → 7.0.2 (apps/voice-gate/package-lock.json); ash_ai 0.8.2 → 1.1.1
-  (apps/engine/mix.lock); redix 1.6.0 → 1.9.2 (apps/engine/mix.lock); +9 more.
-Full list: python3 /path/to/scry/scanners/pins.py --root /Users/you/Dev/myapp --all
+Pinned versions: 4 runtime dependencies have a high or critical advisory
+(pydantic-ai-slim, hackney, braces, +1 more). Full list: bash
+~/.claude/plugins/cache/scry/scry/1.39.0/pins.sh --full
+```
+
+That is the whole of what `pins.sh` says at startup (one line; wrapped here),
+and it says it once. The full list, on demand:
+
+```
+$ bash pins.sh --full
+Pinned versions in /Users/you/Dev/myapp (advisories from OSV, releases from the
+package registries, read from a local cache checked 3h ago; no project tooling
+was run; 326 pinned version(s) read):
+Runtime dependencies with a published security advisory: 20 (4 high, 16 unrated)
+- hackney 1.25.0 (apps/engine/mix.lock): 4 advisories, worst high CVE-2026-47071, fixed in 4.0.1
+- braces 3.0.3 (apps/web/package-lock.json): high CVE-2026-93687
+- ...
+Dev/test-only dependencies with a published security advisory: 4 (1 moderate, 3 unrated)
+- cowlib 2.19.0 (apps/engine/mix.lock) [dev]: 3 advisories, worst moderate CVE-2026-43966, fixed in 2.21.0
+- ...
+Pinned in Elixir config (a version written in a config file is in no lockfile,
+so no outdated or audit command reads it):
+- tailwind 4.1.12 in apps/engine/config/config.exs, latest release 4.3.3 (2 minor behind)
+Behind the latest release: 43 of 104 directly declared package(s), by at least
+1 minor version(s), 10 of them a major version. A release counts once it has
+been published 5 day(s).
+- typescript 5.9.3 → 7.0.2 (apps/voice-gate/package-lock.json) [dev]
+- ash_ai 0.8.2 → 1.1.1 (apps/engine/mix.lock)
+- ...
+Newer releases not counted yet, published inside the last 5 day(s): ash 3.34.6
+(26h ago); fastapi 0.143.0 (38h ago).
 ```
 
 ```
@@ -825,12 +905,14 @@ working, and prints nothing when Scry is not installed. The bar, left to right,
 slow-moving to fast-moving:
 
 ```
-scry  3 uncommitted  2 unpushed  Fable 5.1  $4.20  👥 3  🗓️ 64% Wed  🌕 42k/200k  ♻️ 39m
+scry  3 uncommitted  2 unpushed  pins 4!  Fable 5.1  $4.20  👥 3  🗓️ 64% Wed  🌕 42k/200k  ♻️ 39m
 ```
 
 folder · branch (only when off the default branch) · `N uncommitted` and
 `N unpushed` (only when non-zero — together, what would be lost if the
-machine died now) · model · session cost · other live sessions in this
+machine died now) · `pins N!` (only when a runtime dependency pinned here has
+a high or critical advisory; read from `pins.sh`'s cache, never the network) ·
+model · session cost · other live sessions in this
 directory (only when any) · the seven-day window with the day it resets,
 yellow from 70 %, red from 90 % · context as input tokens over the window,
 moon phase by fill · the prompt-cache segment. A segment with nothing to say
@@ -1023,12 +1105,14 @@ starts changing a decision.
 | `SCRY_CACHE_HANDOFF` | `1` | `0` disables the cache-deadline monitor entirely |
 | `SCRY_KEEPALIVE_MAX` | `8` | keep-alives per user message while this session's work is running; `0` turns keep-alives off |
 | `SCRY_KEEPALIVE_FRESH_SECS` | `3600` | how recently a subagent must have written to be listed in the keep-alive roster (one TTL); workflows and background commands are listed until they record a finish, however quiet |
-| `SCRY_PINS` | `1` | `0` disables the pinned-version check, including its background lookups |
+| `SCRY_PINS` | `1` | `0` disables the pinned-version check everywhere: startup line, edit note, status-line segment, background lookups |
+| `SCRY_PINS_COOLDOWN_DAYS` | `5` | days a release must have been published before a pin counts as behind it. `0` counts a release at once. Advisories are exempt |
+| `SCRY_PINS_REMIND_DAYS` | `7` | days before the startup line is said again for an advisory set already said. `0` says it at every startup |
 | `SCRY_PINS_BEHIND_MINORS` | `1` | minor versions behind the latest release before a pin is reported; a major behind is always reported. `0` reports any newer release |
 | `SCRY_PINS_BEHIND` | `1` | `0` reports advisories only and looks up no latest releases |
-| `SCRY_PINS_LIST_MAX` | `3` | pins named on a line before the rest become a count |
+| `SCRY_PINS_LIST_MAX` | `3` | pins named in the edit note before the rest become a count (the startup line never names more than three) |
 | `SCRY_PINS_REFRESH_HOURS` | `24` | age at which a cached answer is asked again, in the background |
-| `SCRY_PINS_STALE_DAYS` | `7` | age past which pin data is labelled as old, and past which failing lookups with nothing flagged are reported as NOT CHECKED |
+| `SCRY_PINS_STALE_DAYS` | `7` | age past which pin data is labelled as old in `--full`, and past which failing lookups show as `pins ?` in the status line and NOT CHECKED in `--full` |
 | `SCRY_PINS_REFRESH_BUDGET` | `45` | seconds of wall-clock the background refresh may spend; no session waits on it |
 | `SCRY_PINS_CACHE_DIR` | `${XDG_CACHE_HOME:-~/.cache}/scry` | where the pin cache lives |
 | `SCRY_PINS_OSV_URL`, `_HEX_URL`, `_NPM_URL`, `_PYPI_URL`, `_GITHUB_URL` | the public services | base URL of each source, for a mirror |
