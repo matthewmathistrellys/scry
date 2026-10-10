@@ -400,17 +400,41 @@ machine is carrying. Independent checks and advisories fill that in.
   | Worker | Listed while | Reported as |
   |---|---|---|
   | workflow | its journal has an agent `started` with no `result`, however long it has been quiet | `workflow <name> (<id>): <finished> of <started> agents done, last activity <age> ago` — the name from `workflows/scripts/<name>-<id>.js`, else the id alone |
-  | background command | a process still holds its `b*.output` open (one `lsof` call over the files with no exit marker; the shell running a command has the file as stdout until it exits, and nothing holds a finished one) — except a Scry monitor's own notification stream (opens with "Scry — "). Until 1.35.0 the missing marker alone was the test, and a foreground Bash call writes the same file with no marker, so every large-output command a session ever ran read as running forever (2026-09-22: fifty in one session, four days old, kept warm hourly for nothing). Without `lsof`, none is listed | `background command <task id>: still running, last output <age> ago` |
+  | background command | a process still holds its `b*.output` open (one `lsof` call over the files with no exit marker; the shell running a command has the file as stdout until it exits, and nothing holds a finished one) — except a Scry monitor's own notification stream (opens with "Scry — "). Until 1.35.0 the missing marker alone was the test, and a foreground Bash call writes the same file with no marker, so every large-output command a session ever ran read as running forever (2026-09-22: fifty in one session, four days old, kept warm hourly for nothing). Without `lsof`, none is listed | `background command <task id>: a process still holds its output open, last output <age> ago` — what Scry sees, not a claim that it is progressing |
   | subagent | its `agent-*.jsonl` was written within `SCRY_KEEPALIVE_FRESH_SECS` (default 3600, one TTL) | `subagent <id> "<description>": last activity <age> ago` — and in the last quarter of the window, what the silence means: its own cache goes cold at the TTL; finished, nothing happens; still working, its next step re-reads its context once at the full rate; stuck, stop it before that read. The same note rides a tool result while the session is awake (`subagent_cold_advisory.sh`, PostToolUse, once per subagent), so it is never a wake of its own (Matt, 2026-09-22) |
 
   A plain subagent's metadata has nothing that says it finished, so Scry
   cannot tell a finished one from a quiet one; the one-TTL window is its only
   bound, and one silent longer than that is left out rather than reported as
-  running. The keep-alive asks the session to post ONE short plain-language
-  status line for the user from that list, and to compare it with its previous
-  status in the conversation: if a worker shows no movement, check on it and
-  handle it as the orchestrator; otherwise take no other action. That reply is
-  a cached request, which moves the deadline an hour. One keep-alive per
+  running. While something listed has written within one TTL, the keep-alive
+  says a one-line status for the user is enough of a reply, that a worker
+  whose age reads the same as in the previous status has not moved and is the
+  session's own to look at, and how many of the listed workers have been
+  silent for a whole TTL. Any reply is a cached request, which moves the
+  deadline an hour.
+
+  *Silent work.* When nothing listed has written for a whole TTL
+  (`SCRY_KEEPALIVE_FRESH_SECS`, the hour the previous reply bought), the line
+  changes: the silent work is the only thing keeping the session warm; how
+  long it has been silent; Scry cannot see whether it is working quietly or
+  will never finish; work that never finishes never sends the notification
+  the session is kept warm for, so waiting does not resolve it; a reply that
+  only says "still waiting" pays for another hour and learns nothing; and
+  these are the session's own tasks, which nobody else is watching. It asks
+  for no status and says nothing about what a command is doing or what to do
+  with it. From the second one in a row it says so ("keep-alive 2 in a row to
+  find exactly that: nothing changed in between"), and after
+  `SCRY_KEEPALIVE_SILENT_MAX` (default 3) of them the summary is requested
+  instead, naming the work and saying that whether it is still worth running
+  is something the user would act on now. A write by any listed worker ends
+  the run and the count starts again. The count is a number in
+  `<session>.keepalive`; each pass compares write times with the clock, never
+  with an earlier pass. (2026-10-09: three background commands hung on stdin;
+  the old line said "still running … when that work finishes, its
+  notification wakes this session" and asked for a status, so a session
+  answered "still waiting" hourly for eight hours and never looked.)
+
+  One keep-alive per
   deadline; if the deadline has not moved half a lead later, the summary is
   requested instead. `SCRY_KEEPALIVE_MAX` per user message, counted in
   `<session>.keepalive` (counts and times only) before the line is printed;
@@ -1110,7 +1134,8 @@ starts changing a decision.
 | `SCRY_CACHE_HANDOFF_POLL_SECONDS` | `15` | how often the monitor re-reads the deadline (no model calls) |
 | `SCRY_CACHE_HANDOFF` | `1` | `0` disables the cache-deadline monitor entirely |
 | `SCRY_KEEPALIVE_MAX` | `8` | keep-alives per user message while this session's work is running; `0` turns keep-alives off |
-| `SCRY_KEEPALIVE_FRESH_SECS` | `3600` | how recently a subagent must have written to be listed in the keep-alive roster (one TTL); workflows and background commands are listed until they record a finish, however quiet |
+| `SCRY_KEEPALIVE_FRESH_SECS` | `3600` | how recently a subagent must have written to be listed in the keep-alive roster (one TTL); workflows and background commands are listed until they record a finish, however quiet. Also how long everything listed must have been silent for the keep-alive to say the work has gone silent |
+| `SCRY_KEEPALIVE_SILENT_MAX` | `3` | keep-alives in a row for work where nothing listed has written for a whole TTL; the next one is the summary request instead. `0` never keeps a session warm for work that silent |
 | `SCRY_PINS` | `1` | `0` disables the pinned-version check everywhere: startup line, edit note, status-line segment, background lookups |
 | `SCRY_PINS_COOLDOWN_DAYS` | `5` | days a release must have been published before a pin counts as behind it. `0` counts a release at once. Advisories are exempt |
 | `SCRY_PINS_REMIND_DAYS` | `7` | days before the startup line is said again for an advisory set already said. `0` says it at every startup |

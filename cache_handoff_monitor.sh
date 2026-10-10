@@ -100,9 +100,8 @@
 # cache tokens instead of reading them. A notification turn on a warm cache is
 # a cache read (62aa5e9f: read 125,092, wrote 749). So at the lead window,
 # while THIS session has unfinished work, the line printed is a keep-alive:
-# the roster, one short status line for the user, and the session compares
-# that status with its previous one and checks on any worker that has not
-# moved. That reply is the request that pushes the deadline out another hour.
+# the roster and what its silence means. Any reply is the request that pushes
+# the deadline out another hour.
 #
 #   roster      every unfinished worker this session started, with what Scry
 #               can read deterministically from metadata:
@@ -111,9 +110,10 @@
 #                   activity <age> ago". Listed however long it has been
 #                   quiet: the journal itself says it is unfinished.
 #                 background command — a b*.output with no exit or killed
-#                   marker in its last 64 bytes: "still running, last output
-#                   <age> ago". Listed however long it has been quiet, for
-#                   the same reason.
+#                   marker in its last 64 bytes, held open by a process:
+#                   "a process still holds its output open, last output <age>
+#                   ago". Listed however long it has been quiet, for the same
+#                   reason.
 #                 subagent — an agent-*.jsonl: "last activity <age> ago".
 #                   Nothing in a plain subagent's metadata says it finished,
 #                   so Scry cannot tell a finished one from a quiet one. It is
@@ -130,6 +130,27 @@
 #               BEFORE the line is printed.
 #   verified    one keep-alive per deadline. If the deadline has not moved
 #               half a lead later, the ack did not happen: ask for the summary.
+#   silent      (2026-10-10) when NOTHING listed has written for a whole
+#               cache TTL (SCRY_KEEPALIVE_FRESH_SECS — the one bound Scry
+#               already has, and the hour the previous keep-alive bought),
+#               the keep-alive says so instead of listing it as work to wait
+#               for: how long the silence is, that it is the only reason the
+#               session is still woken, that hung work never sends the
+#               notification the session is kept warm for, and that these are
+#               the session's own to look at. It says how many keep-alives in
+#               a row found the same, and after SCRY_KEEPALIVE_SILENT_MAX (3)
+#               of them the summary is requested instead. The count lives in
+#               <session>.keepalive (`silent`) and is a number, not a
+#               fingerprint: each pass compares write times with the clock,
+#               never with an earlier pass. Scry does not say what a command
+#               is doing or what to do about it (Matt: "It's not scrys job to
+#               tell you exactly what's going on with them. It should give
+#               you insights along with its namesake and you can then run
+#               with it."). Why: on 2026-10-09 a session's three background
+#               commands hung on stdin; the old line said "still running …
+#               when that work finishes, its notification wakes this session"
+#               and asked for a status, so for eight hourly keep-alives the
+#               session answered "still waiting" and never looked.
 #
 # When nothing is unfinished, a cap is reached, or a keep-alive did not take,
 # the summary is requested: written as the session's reply in the
@@ -163,10 +184,12 @@ lead="${SCRY_CACHE_HANDOFF_LEAD_SECONDS:-120}"
 poll="${SCRY_CACHE_HANDOFF_POLL_SECONDS:-15}"
 ka_max="${SCRY_KEEPALIVE_MAX:-8}"
 ka_fresh="${SCRY_KEEPALIVE_FRESH_SECS:-3600}"
+ka_silent="${SCRY_KEEPALIVE_SILENT_MAX:-3}"
 case "$lead" in ''|*[!0-9]*) lead=120 ;; esac
 case "$poll" in ''|*[!0-9]*) poll=15 ;; esac
 case "$ka_max" in ''|*[!0-9]*) ka_max=8 ;; esac
 case "$ka_fresh" in ''|*[!0-9]*) ka_fresh=3600 ;; esac
+case "$ka_silent" in ''|*[!0-9]*) ka_silent=3 ;; esac
 
 # Claude Code writes task output under /tmp/claude-<uid> whatever TMPDIR says
 # (this machine, 2026-09-13: TMPDIR is under /var/folders, tasks are not), so
@@ -181,7 +204,7 @@ pass() {
   SCRY_SESSIONS_DIR="${SCRY_CLAUDE_SESSIONS_DIR:-$HOME/.claude/sessions}" \
   SCRY_PROJECTS_DIR="${SCRY_CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}" \
   SCRY_TASK_ROOTS="$task_roots" SCRY_KA_MAX="$ka_max" \
-  SCRY_KA_FRESH="$ka_fresh" \
+  SCRY_KA_FRESH="$ka_fresh" SCRY_KA_SILENT="$ka_silent" \
   python3 - <<'PY' 2>/dev/null
 import glob, json, os, re, sys, time
 
@@ -311,9 +334,10 @@ if ka.get("armed_at") == since:
     cycle = int(ka.get("cycle") or 0)
     sent_expires = ka.get("sent_expires")
     sent_at = int(ka.get("sent_at") or 0)
+    silent = int(ka.get("silent") or 0)
 else:
-    # A new user message: the count starts again.
-    cycle, sent_expires, sent_at = 0, None, 0
+    # A new user message: the counts start again.
+    cycle, sent_expires, sent_at, silent = 0, None, 0, 0
 
 why_not = ""
 if isinstance(sent_expires, int) and expires <= sent_expires:
@@ -330,9 +354,17 @@ projects = os.environ["SCRY_PROJECTS_DIR"]
 # The roster is shared with fleet.sh and roster.sh (roster.py, 2026-09-14):
 # one reader of "what did this session start that has not finished".
 sys.path.insert(0, os.environ["SCRY_ROOT"])
-from roster import roster_lines
+from roster import age, roster_items
 
-roster = roster_lines(sid, projects, os.environ["SCRY_TASK_ROOTS"], fresh=fresh, launch=launch, now=now)
+items = roster_items(sid, projects, os.environ["SCRY_TASK_ROOTS"], fresh=fresh, launch=launch, now=now)
+roster = [text for _, text in items]
+# Newest write first: how long since ANYTHING listed wrote. Past one TTL, the
+# whole cache lifetime now ending went by without a byte from any of it.
+quiet = now - int(items[0][0]) if items else 0
+all_silent = bool(items) and quiet >= fresh
+stale = sum(1 for m, _ in items if now - m >= fresh)
+silent = silent + 1 if all_silent else 0
+silent_max = int(os.environ["SCRY_KA_SILENT"])
 listed = "; ".join(roster[:8]) + (f"; and {len(roster) - 8} more" if len(roster) > 8 else "")
 ka_max = int(os.environ["SCRY_KA_MAX"])
 at = time.strftime("%H:%M", time.localtime(expires))
@@ -341,29 +373,63 @@ minutes = max(0, (expires - now) // 60)
 if roster and not why_not:
     if cycle >= ka_max:
         why_not = f"the {ka_max} keep-alives allowed per user message are spent"
+    elif silent > silent_max:
+        why_not = (f"none of it has written for {age(quiet)}, through "
+                   f"{silent_max} keep-alives in a row")
 
 if roster and not why_not:
     # Counted before printing: a restart between the two cannot send twice.
     try:
         atomic_write(ka_path, json.dumps({
             "armed_at": since, "cycle": cycle + 1,
-            "sent_at": now, "sent_expires": expires,
+            "sent_at": now, "sent_expires": expires, "silent": silent,
         }))
     except Exception:
         sys.exit(0)
+    head = ("Scry — cache keep-alive (this is a Scry monitor notification, not a "
+            f"user message): this session's prompt cache goes cold at {at}, in "
+            f"about {minutes} min")
+    count = f"Keep-alive {cycle + 1} of at most {ka_max} for this user message."
+    if all_silent:
+        again = ""
+        if silent > 1:
+            again = (f" This is keep-alive {silent} in a row to find exactly that: "
+                     "nothing changed in between.")
+        last = ("the next one like this is the summary request instead"
+                if silent >= silent_max else
+                f"this is {silent} of at most {silent_max} for work this silent")
+        print(
+            f"{head}, and the only thing keeping it warm is work this session "
+            f"started that has gone silent. As far as Scry can tell from file "
+            f"metadata: {listed}. Nothing listed has written anything for "
+            f"{age(quiet)} — longer than a whole cache lifetime ({age(fresh)}), so "
+            f"the lifetime now ending passed without a byte from any of it."
+            f"{again} Scry sees that each is unfinished and when it last wrote; it "
+            "cannot see whether one is working quietly or will never finish. That "
+            "difference is the whole cost: this session is kept warm for the "
+            "notification that work sends when it finishes, and work that never "
+            "finishes never sends it, so waiting does not resolve this. Any reply "
+            "refreshes the cache for another hour, including one that only says "
+            "it is still waiting — that reply pays for the hour and learns "
+            "nothing. These are this session's own tasks: nobody else is watching "
+            "them, and looking at them needs nothing from the user. "
+            f"{count[:-1]}; {last}."
+        )
+        sys.exit(0)
+    behind = ""
+    if stale:
+        behind = (f" {stale} of these wrote nothing for over {age(fresh)}, a whole "
+                  "cache lifetime — the others are what is keeping this warm, and "
+                  "nothing here says the silent ones will finish.")
     print(
-        "Scry — cache keep-alive (this is a Scry monitor notification, not a user "
-        f"message): this session's prompt cache goes cold at {at}, in about "
-        f"{minutes} min, and work it started has not finished. As far as Scry can "
-        f"tell from file metadata: {listed}. When that work finishes, its "
-        "notification wakes this session, and on a cold cache that wake re-reads "
-        "the whole context at the full rate; your reply to this keeps it warm. "
-        "Post ONE short plain-language status line for the user from this list "
-        "(e.g. \"Piece 2: 5 of 8 agents done; build and review still running\"). "
-        "Compare it with your previous status in this conversation: if a worker "
-        "shows no movement since then, check on it and handle it as the "
-        "orchestrator; otherwise take no other action — the work reports back by "
-        f"itself. Keep-alive {cycle + 1} of at most {ka_max} for this user message."
+        f"{head}, and work it started has not finished. As far as Scry can tell "
+        f"from file metadata: {listed}.{behind} A wake on a cold cache re-reads "
+        "the whole context at the full rate; any reply to this keeps it warm for "
+        "another hour. A one-line plain-language status for the user is enough "
+        "of a reply (e.g. \"Piece 2: 5 of 8 agents done; build and review in "
+        "progress\"). The ages above are how long each has gone without "
+        "writing: one that reads the same as in your previous status has not "
+        f"moved, and it is this session's own to look at. {count}"
     )
     sys.exit(0)
 
@@ -375,8 +441,14 @@ if roster:
     running = (
         f" Work this session started has not finished and will not be kept warm "
         f"for ({why_not}). As far as Scry can tell from file metadata: {listed}. "
-        "End the summary with those still-running workers, as listed, so whoever "
+        "End the summary with those unfinished workers, as listed, so whoever "
         "picks this up collects them rather than starting them again."
+    )
+if roster and all_silent:
+    running += (
+        " Work that never finishes never sends the notification that would wake "
+        "this session, and nothing else is watching these — whether they are "
+        "still worth running is something the user would act on now."
     )
 print(
     "Scry — cache deadline (this is a Scry monitor notification, not a user "

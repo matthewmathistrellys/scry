@@ -218,8 +218,8 @@ def roster_items(sid, projects, task_roots, fresh=3600, launch=None, now=None):
                 candidates.append((m, os.path.basename(out)[:-len(".output")], real))
     for m, tid, real in candidates:
         if real in held_open([c[2] for c in candidates]):
-            items.append((m, f"background command {tid}: still running, "
-                             f"last output {age(now - m)} ago"))
+            items.append((m, f"background command {tid}: a process still holds its "
+                             f"output open, last output {age(now - m)} ago"))
     items.sort(key=lambda x: -x[0])
     return items
 
