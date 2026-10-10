@@ -3052,12 +3052,14 @@ class CacheHandoffTests(unittest.TestCase):
             self.assertIn("keep-alive", first.stdout)
             self.assertRegex(first.stdout, r'subagent a1b2c3 "build:opus": last activity \d+s ago')
             self.assertIn("As far as Scry can tell from file metadata", first.stdout)
-            self.assertIn("Post ONE short plain-language status line for the user from this list",
+            self.assertIn("A one-line plain-language status for the user is enough of a reply",
                           first.stdout)
-            # Scry reports; the session judges (Matt, 2026-09-13).
-            self.assertIn("Compare it with your previous status in this conversation: if a "
-                          "worker shows no movement since then, check on it and handle it as "
-                          "the orchestrator; otherwise take no other action", first.stdout)
+            # Scry reports; the session judges (Matt, 2026-09-13) — and
+            # nothing in the line reads as "wait" (2026-10-10).
+            self.assertIn("one that reads the same as in your previous status has not moved, "
+                          "and it is this session's own to look at", first.stdout)
+            self.assertNotIn("take no other action", first.stdout)
+            self.assertNotIn("gone silent", first.stdout)
             self.assertNotIn("SECRET", first.stdout)
             self.assertNotIn("summary", first.stdout)
             self.assertEqual(first.stdout.count("\n"), 1)
@@ -3088,7 +3090,9 @@ class CacheHandoffTests(unittest.TestCase):
                                             f"{self.SID}.state", f"pid/{self.PID}",
                                             f"pid/{self.PID}.sessions", f"pid/{self.PID}.watch"]))
             ka = json.loads((state / f"{self.SID}.keepalive").read_text())
-            self.assertEqual(set(ka), {"armed_at", "cycle", "sent_at", "sent_expires"})
+            self.assertEqual(set(ka), {"armed_at", "cycle", "sent_at", "sent_expires", "silent"})
+            # A count of keep-alives, not a record of what any worker wrote.
+            self.assertEqual(ka["silent"], 0)
 
     def test_a_subagent_is_listed_only_within_one_ttl_of_its_last_write(self):
         # Nothing in a plain subagent's metadata says it finished, so its
@@ -3139,8 +3143,8 @@ class CacheHandoffTests(unittest.TestCase):
             self._armed_near_expiry(td)
             said = self._monitor(td).stdout
             self.assertIn("keep-alive", said)
-            self.assertRegex(said, r"background command bq7shell1: still running, "
-                                   r"last output 2h0\dm ago")
+            self.assertRegex(said, r"background command bq7shell1: a process still holds its "
+                                   r"output open, last output 2h0\dm ago")
             self.assertNotIn(str(out), said)
             self.assertNotIn("SECRET", said)
 
@@ -3168,6 +3172,78 @@ class CacheHandoffTests(unittest.TestCase):
             self.assertNotIn("keep-alive", said)
             self.assertNotIn("wf_done", said)
 
+    def test_work_silent_for_a_whole_ttl_is_said_as_the_sessions_own_to_look_at(self):
+        # 2026-10-09: three background commands hung on stdin; the old line
+        # said "still running … when that work finishes, its notification
+        # wakes this session" and asked for a status, so a session answered
+        # "still waiting" hourly for a night and never looked.
+        with tempfile.TemporaryDirectory() as td:
+            self._shell_task(td, "SECRET waiting\n", age=12 * 3600 + 60, held=True)
+            self._armed_near_expiry(td)
+            said = self._monitor(td).stdout
+            self.assertIn("keep-alive", said)
+            self.assertIn("the only thing keeping it warm is work this session started "
+                          "that has gone silent", said)
+            self.assertRegex(said, r"Nothing listed has written anything for 12h0\dm — longer "
+                                   r"than a whole cache lifetime \(1h00m\)")
+            self.assertIn("it cannot see whether one is working quietly or will never finish", said)
+            self.assertIn("work that never finishes never sends it, so waiting does not "
+                          "resolve this", said)
+            self.assertIn("These are this session's own tasks: nobody else is watching them, "
+                          "and looking at them needs nothing from the user", said)
+            self.assertIn("this is 1 of at most 3 for work this silent", said)
+            # Nothing that reads as "wait", nothing asking for a status,
+            # and no claim about what the command is doing.
+            for gone in ("still running", "status line", "wakes this session", "in a row",
+                         "hung", "stuck", "SECRET"):
+                self.assertNotIn(gone, said)
+            self.assertEqual(said.count("\n"), 1)
+        with tempfile.TemporaryDirectory() as td:
+            # One worker still writing: the silent one is counted beside it,
+            # and the line stays the ordinary keep-alive.
+            self._workflow(td, age=3 * 3600)
+            self._subagent(td)
+            self._armed_near_expiry(td)
+            said = self._monitor(td).stdout
+            self.assertIn("1 of these wrote nothing for over 1h00m, a whole cache lifetime", said)
+            self.assertNotIn("gone silent", said)
+
+    def test_silent_work_is_counted_across_keep_alives_and_then_no_longer_kept_warm(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._workflow(td, age=3 * 3600)
+            self._armed_near_expiry(td)
+            first = self._monitor(td, SCRY_KEEPALIVE_SILENT_MAX="2").stdout
+            self.assertIn("this is 1 of at most 2 for work this silent", first)
+            time.sleep(1.1)
+            self._statusline(td, 90)
+            second = self._monitor(td, SCRY_KEEPALIVE_SILENT_MAX="2").stdout
+            self.assertIn("This is keep-alive 2 in a row to find exactly that: nothing "
+                          "changed in between.", second)
+            self.assertIn("the next one like this is the summary request instead", second)
+            self.assertEqual(self._state(td)[0], "armed")
+            time.sleep(1.1)
+            self._statusline(td, 90)
+            third = self._monitor(td, SCRY_KEEPALIVE_SILENT_MAX="2").stdout
+            self.assertNotIn("keep-alive (", third)
+            self.assertRegex(third, r"will not be kept warm for \(none of it has written for "
+                                    r"3h0\dm, through 2 keep-alives in a row\)")
+            self.assertIn("workflow wf_abc-123: 1 of 2 agents done", third)
+            self.assertIn("whether they are still worth running is something the user would "
+                          "act on now", third)
+            self.assertEqual(self._state(td)[0], "requested")
+            self.assertEqual(self._monitor(td, SCRY_KEEPALIVE_SILENT_MAX="2").stdout, "")
+        with tempfile.TemporaryDirectory() as td:
+            # A write in between ends the run: the count starts again.
+            wf = self._workflow(td, age=3 * 3600)
+            self._armed_near_expiry(td)
+            self.assertIn("this is 1 of at most 3", self._monitor(td).stdout)
+            os.utime(wf / "journal.jsonl")
+            time.sleep(1.1)
+            self._statusline(td, 90)
+            self.assertNotIn("gone silent", self._monitor(td).stdout)
+            ka = json.loads((Path(td) / "state" / f"{self.SID}.keepalive").read_text())
+            self.assertEqual(ka["silent"], 0)
+
     def test_the_cap_ends_keep_alives_with_a_summary_that_names_the_work(self):
         with tempfile.TemporaryDirectory() as td:
             self._subagent(td)
@@ -3178,7 +3254,7 @@ class CacheHandoffTests(unittest.TestCase):
             said = self._monitor(td, SCRY_KEEPALIVE_MAX="1").stdout
             self.assertIn("goes cold", said)
             self.assertIn("allowed per user message are spent", said)
-            self.assertIn("End the summary with those still-running workers", said)
+            self.assertIn("End the summary with those unfinished workers", said)
             self.assertIn(f"pick up from session {self.SID}", said)
             self.assertRegex(said, r'subagent a1b2c3 "build:opus": last activity \d+s ago')
             self.assertEqual(self._state(td)[0], "requested")
@@ -3398,7 +3474,7 @@ class RosterTests(unittest.TestCase):
             self._task(td, "b4jdo82tu", "SECRET\n[exited with code 0]\n")
             out = self._roster(td).stdout
             self.assertIn(f"roster for session {self.SID}", out)
-            self.assertRegex(out, r"- background command b55udo2rk: still running, last output 7h0\dm ago")
+            self.assertRegex(out, r"- background command b55udo2rk: a process still holds its output open, last output 7h0\dm ago")
             self.assertNotIn("b2287w1k9", out)
             self.assertNotIn("b4jdo82tu", out)
             self.assertNotIn("SECRET", out)
@@ -3421,7 +3497,7 @@ class RosterTests(unittest.TestCase):
             self.assertNotIn("bmonitor1", out)
             self.assertNotIn("bbigfind1", out)
             self.assertNotIn("bcredo001", out)
-            self.assertIn("background command bstillon1: still running, last output 25m ago", out)
+            self.assertIn("background command bstillon1: a process still holds its output open, last output 25m ago", out)
             self.assertNotIn("SECRET", out)
 
     def test_a_plugin_monitor_is_listed_with_the_version_it_is_running(self):
@@ -3460,7 +3536,7 @@ class RosterTests(unittest.TestCase):
             self._task(td, "bnew00001", "going\n", sid=new, held=True)
             out = self._roster(td, SCRY_PS_OUTPUT="").stdout
             self.assertIn(f"roster for session {new}", out)
-            self.assertIn("background command bnew00001: still running", out)
+            self.assertIn("background command bnew00001: a process still holds its output open", out)
 
     def test_fleet_names_this_sessions_unfinished_work_on_resume_and_its_monitors(self):
         with tempfile.TemporaryDirectory() as td:
@@ -3493,7 +3569,7 @@ class RosterTests(unittest.TestCase):
                        "source": "resume"}
             report = context(run_hook("fleet.sh", repo, payload, env))
             self.assertIn("WORK THIS SESSION STARTED HAS NOT FINISHED", report)
-            self.assertIn("background command bwatch001: still running", report)
+            self.assertIn("background command bwatch001: a process still holds its output open", report)
             self.assertNotIn("bdone0001", report)
             self.assertNotIn("SECRET", report)
             self.assertIn("Plugin monitor(s) under this Claude process: plugin monitor "
