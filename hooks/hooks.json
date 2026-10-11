@@ -41,8 +41,23 @@
           },
           {
             "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/statusline_setup.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/cache_handoff_arm.sh",
             "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/pins.sh",
+            "timeout": 10
           }
         ]
       }
@@ -100,6 +115,11 @@
             "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/doc_currency_advisory.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/pins_edit_advisory.sh",
+            "timeout": 10
           }
         ]
       },

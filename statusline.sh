@@ -5,7 +5,7 @@
 # 2026-09-10: "usage for the week, usage for the session in context, and
 # current cache"):
 #
-#   scry  3 uncommitted  2 unpushed  Fable 5.1  $4.20  👥 3  🗓️ 64% Wed  🌕 42k/200k  ♻️ 39m
+#   scry  3 uncommitted  2 unpushed  pins 4!  Fable 5.1  $4.20  👥 3  🗓️ 64% Wed  🌕 42k/200k  ♻️ 39m
 #
 #   folder          bold cyan; basename of the session's directory; in a worktree that is
 #                   the branch name, which is why the branch segment stays
@@ -19,6 +19,15 @@
 #                   (no upstream: commits origin/<default> does not have).
 #                   Hidden when there are none. Between them these two answer
 #                   "what would be lost if this machine died now"
+#   pins 4!         red; runtime dependencies pinned here with a high or
+#                   critical published advisory, from the summary pins.sh
+#                   leaves in its cache (`pins ?`, yellow, when its lookups
+#                   have failed for a week, so a blank would claim a check
+#                   that did not happen). One small file is read: no network,
+#                   no lockfile, and when the cache directory does not exist
+#                   not even the git call that names the worktree. Hidden
+#                   when clean. The session is told once (pins.sh); this is
+#                   where the human keeps seeing it
 #   model           Claude Code's display name
 #   $cost           the session so far, from the payload, exact
 #   👥 N            yellow; OTHER live Claude sessions in this same directory
@@ -59,7 +68,7 @@ payload="$(cat 2>/dev/null || true)"
 cache="$(printf '%s' "$payload" | bash "$here/cache_deadline_statusline.sh" 2>/dev/null || true)"
 
 bar="$(SCRY_PAYLOAD="$payload" python3 - <<'PY' 2>/dev/null
-import json, os, re, subprocess, sys, time
+import hashlib, json, os, re, subprocess, sys, time
 from datetime import datetime
 
 YEL, RED, DIM, OFF = "\033[33m", "\033[31m", "\033[2m", "\033[0m"
@@ -122,6 +131,25 @@ if cwd and git("rev-parse", "--is-inside-work-tree") == "true":
         ahead = git("rev-list", "--count", f"origin/{default}..HEAD")
     if ahead and ahead.isdigit() and int(ahead) > 0:
         segs.append(f"{YEL}{ahead} unpushed{OFF}")
+
+# ── pinned versions with a high or critical advisory ─────────────────────
+try:
+    pins_dir = os.environ.get("SCRY_PINS_CACHE_DIR") or os.path.join(
+        os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "scry")
+    if cwd and os.environ.get("SCRY_PINS", "1") != "0" and os.path.isdir(pins_dir):
+        top = git("rev-parse", "--show-toplevel")
+        if top:
+            # the same name scanners/pins.py gives the summary of this worktree.
+            tag = hashlib.sha1(os.path.realpath(top).encode()).hexdigest()[:12]
+            with open(os.path.join(pins_dir, f"summary-{tag}.json")) as f:
+                pins = json.load(f)
+            urgent = pins.get("urgent")
+            if isinstance(urgent, int) and urgent > 0:
+                segs.append(f"{RED}pins {urgent}!{OFF}")
+            elif pins.get("dark") is True:
+                segs.append(f"{YEL}pins ?{OFF}")
+except Exception:
+    pass
 
 # ── model ────────────────────────────────────────────────────────────────
 model = get("model", "display_name") or get("model", "id")
