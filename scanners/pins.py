@@ -66,6 +66,10 @@ token is read from the environment. Packages that do not come from the public
 registry (a private Hex repo, a git or file dependency, a non-registry
 `resolved` URL) are skipped, so their names are never sent anywhere.
 
+SEVERITY is the publisher's label when an advisory has one; otherwise it is
+scored from the CVSS vector the record carries (cvss_score.py), which is how
+most Hex advisories are rated at all. Only a record with neither is unrated.
+
 SOURCES. OSV's querybatch covers Hex, npm and PyPI advisories in one request.
 Latest releases and their publish dates come from hex.pm, the npm registry,
 PyPI and GitHub releases. None of it needs the project's dependencies fetched
@@ -103,9 +107,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import projects  # noqa: E402  (path set above so hooks can run from anywhere)
+import cvss_score  # noqa: E402
 
 USER_AGENT = "scry-pins/1 (+https://github.com/matthewmathistrellys/scry)"
-CACHE_SCHEMA = 2
+CACHE_SCHEMA = 3  # 3: severity scored from the CVSS vector; 2: publish dates
 MAX_DEPTH = 4
 REQUEST_TIMEOUT = 6
 # An npm packument carries every version ever published; a few are megabytes.
@@ -699,11 +704,45 @@ def fetch_latest(key, conf, hex_gate):
     return None
 
 
+def vector_severity(record):
+    """SEVERITY_RANK from the record's CVSS vectors, or None when it carries
+    none that can be scored. CVSS 4.0 first, then 3.x: where a record has
+    both, the newer one is the publisher's current assessment. An advisory
+    scored 0.0 has a usable vector and no severity: rank 0, not None."""
+    listed = lambda value: value if isinstance(value, list) else []
+    entries = list(listed(record.get("severity")))
+    for affected in listed(record.get("affected")):
+        if isinstance(affected, dict):
+            entries += listed(affected.get("severity"))
+    for wanted in ("CVSS_V4", "CVSS_V3"):
+        scores = [cvss_score.score(e.get("score")) for e in entries
+                  if isinstance(e, dict) and e.get("type") == wanted]
+        scores = [found for found in scores if found is not None]
+        if scores:
+            return SEVERITY_RANK.get(cvss_score.band(max(scores)), 0)
+    return None
+
+
 def digest_vuln(record):
-    """Keep only what the report prints: severity, aliases, fixed ranges."""
+    """Keep only what the report prints: severity, aliases, fixed ranges.
+
+    Severity is the publisher's label when there is one. Without one -- most
+    Hex advisories -- it is scored from the CVSS vector the record carries
+    (scanners/cvss_score.py). `rated` says whether either was there: only a
+    record with neither is worth asking its GHSA alias about."""
     severity = ((record.get("database_specific") or {}).get("severity") or "").upper()
+    rank, rated = SEVERITY_RANK.get(severity, 0), severity in SEVERITY_RANK
+    if not rated:
+        try:
+            scored = vector_severity(record)
+        except Exception:  # an odd record stays unrated; it never fails a refresh
+            scored = None
+        if scored is not None:
+            rank, rated = scored, True
     fixed = {}
     for affected in record.get("affected") or []:
+        if not isinstance(affected, dict):
+            continue
         package = affected.get("package") or {}
         eco, name = package.get("ecosystem"), package.get("name")
         if not eco or not name:
@@ -720,7 +759,7 @@ def digest_vuln(record):
                 elif "fixed" in event:
                     fixed.setdefault("%s|%s" % (eco, name), []).append(
                         [introduced, event["fixed"]])
-    return {"sev": SEVERITY_RANK.get(severity, 0),
+    return {"sev": rank, "rated": rated,
             "aliases": sorted(set(record.get("aliases") or [])),
             "fixed": fixed}
 
@@ -800,11 +839,11 @@ def _refresh_locked(root, conf):
             digest = digest_vuln(data)
         except (urllib.error.URLError, OSError, ValueError):
             return vid, None
-        # A record from a database that publishes only a CVSS vector (most
-        # Hex advisories) has no severity label; the GitHub advisory it names
-        # as an alias does. Without this, a lockfile's worst offenders are
-        # all "unrated" and cannot be ranked.
-        if not digest["sev"] and time.time() < deadline:
+        # A record with neither a label nor a vector that can be scored may
+        # still be rated by the GitHub advisory it names as an alias. (Most
+        # Hex advisories carry a CVSS 4.0 vector and are scored from it; their
+        # GHSA alias is usually not in OSV at all.)
+        if not digest.pop("rated") and time.time() < deadline:
             for alias in digest["aliases"]:
                 if not alias.startswith("GHSA-"):
                     continue

@@ -3777,6 +3777,195 @@ class SeedDataAdvisoryTests(unittest.TestCase):
         self.assertEqual(matchers, {"Read", "Grep|Glob|Bash"})
 
 
+class CvssScoreTests(unittest.TestCase):
+    """scanners/cvss_score.py: severity from a CVSS vector, for the advisories
+    that publish a vector and no label. Born 2026-10-11: on one repo 16
+    runtime packages -- `ash` with 24 advisories among them -- were "unrated"
+    for that reason, and unrated never reaches the startup line or the bar.
+
+    The expected scores below are the ones FIRST publishes. During development
+    the scorer was also compared with the `cvss` package from PyPI on every
+    CVSS 4.0 base vector (104,976) and every 3.x one (2,592), and on random
+    vectors carrying threat and environmental metrics; that package is not a
+    dependency and is not imported here."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+
+        def load(name):
+            spec = importlib.util.spec_from_file_location(
+                "scry_" + name, ROOT / "scanners" / (name + ".py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        cls.cvss = load("cvss_score")
+        cls.pins = load("pins")
+
+    # FIRST, "CVSS v4.0 Examples" (first.org/cvss/v4.0/examples), the score in
+    # each example's summary row; and the reference calculator's README.
+    V4 = [
+        (7.3, "AV:L/AC:L/AT:P/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"),
+        (7.7, "AV:N/AC:L/AT:P/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"),
+        (5.2, "AV:N/AC:L/AT:P/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:U"),
+        (8.3, "AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:L/VA:L/SC:N/SI:N/SA:N"),
+        (8.1, "AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:L/VA:L/SC:N/SI:N/SA:N"
+              "/CR:H/IR:L/AR:L/MAV:N/MAC:H/MVC:H/MVI:L/MVA:L"),
+        (4.6, "AV:L/AC:L/AT:N/PR:N/UI:A/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N"),
+        (5.1, "AV:N/AC:L/AT:N/PR:N/UI:A/VC:N/VI:N/VA:N/SC:L/SI:L/SA:N"),
+        (6.9, "AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:L/SI:L/SA:N"),
+        (5.9, "AV:L/AC:L/AT:N/PR:H/UI:N/VC:N/VI:N/VA:N/SC:H/SI:N/SA:N"),
+        (9.4, "AV:L/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H"),
+        (9.3, "AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:H/VA:N/SC:H/SI:H/SA:H"),
+        (8.3, "AV:P/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:H/SA:N/S:P/V:D"),
+        (10.0, "AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H/E:A"),
+        (8.7, "AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N/E:A"),
+        (9.3, "AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"),
+        (5.5, "AV:N/AC:H/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
+              "/E:P/MAC:L/MAT:N/MVC:N/MVI:N/MVA:L"),
+        (8.2, "AV:N/AC:H/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:P"),
+        (6.4, "AV:A/AC:L/AT:N/PR:N/UI:N/VC:N/VI:L/VA:N/SC:H/SI:N/SA:H"),
+        (8.4, "AV:L/AC:L/AT:N/PR:H/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/R:I"),
+        (7.0, "AV:P/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"),
+        (7.1, "AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N"),
+        (6.6, "AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:L/E:U/MVA:H/MSA:N"),
+        (8.5, "AV:N/AC:L/AT:N/PR:L/UI:A/VC:H/VI:H/VA:H/SC:L/SI:L/SA:N"),
+        (5.6, "AV:L/AC:L/AT:N/PR:H/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N/E:U"),
+        (5.7, "AV:L/AC:L/AT:N/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:U/MUI:A"),
+        (5.4, "AV:P/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"),
+        (2.7, "AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SI:L/SA:N/E:U/CR:L/IR:L/AR:L"),
+        (7.8, "AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:L/VA:N/SC:L/SI:N/SA:H"),
+        (9.4, "AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H/S:P/AU:Y/V:C/RE:L"),
+        (7.0, "AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H/E:P/CR:L/IR:H/AR:L"
+              "/MAV:L/MAC:H/MAT:N/MPR:N/MUI:N/MVC:N/MVI:H/MVA:L/MSC:N/MSI:S/MSA:L"),
+        (7.4, "AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H/MAV:A/MAC:H/MAT:N"
+              "/MPR:L/MUI:N/MVC:L/MVI:H/MVA:H/MSC:L/MSI:S/MSA:S/CR:L/IR:H/AR:H/E:P"),
+        (8.7, "AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H/MAV:N/MAC:H/MAT:N"
+              "/MPR:L/MUI:N/MVC:H/MVI:H/MVA:H/MSC:H/MSI:S/MSA:H/CR:M/IR:H/AR:M/E:P"),
+        (9.7, "AV:A/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N/MSI:S/S:P"),
+        (2.4, "AV:N/AC:L/AT:N/PR:L/UI:N/VC:N/VI:N/VA:N/SC:H/SI:L/SA:H/E:U/MAV:A/R:U/V:C"),
+        (8.9, "AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H"
+              "/E:A/CR:H/IR:H/AR:H/MAV:L/MAT:P"),
+        (0.0, "AV:L/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:A/MVC:N/MVI:N/MVA:N"),
+        (0.0, "AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SI:N/SA:N"),
+        (10.0, "AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H"),
+        (5.1, "AV:N/AC:L/AT:N/PR:H/UI:N/VC:L/VI:L/VA:N/SC:N/SI:N/SA:N"),  # README
+    ]
+    # FIRST, "CVSS v3.1 Examples", and the v3.1 scores beside the v4.0
+    # examples above.
+    V3 = [
+        (6.1, "AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"),     # phpMyAdmin XSS
+        (6.4, "AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:N"),     # MySQL stored SQLi
+        (3.1, "AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N"),     # POODLE
+        (9.9, "AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H"),     # VMware guest to host
+        (7.5, "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"),     # Heartbleed
+        (9.8, "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"),
+        (10.0, "AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"),
+        (7.6, "AV:P/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"),
+        (8.2, "AV:L/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:H"),
+        (7.5, "AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N"),
+        (0.0, "AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"),
+    ]
+
+    def test_cvss_4_scores_are_the_ones_first_publishes(self):
+        for expected, body in self.V4:
+            self.assertEqual(self.cvss.score("CVSS:4.0/" + body), expected, body)
+
+    def test_cvss_3_base_scores_are_the_ones_first_publishes(self):
+        for expected, body in self.V3:
+            for version in ("3.1", "3.0"):
+                self.assertEqual(self.cvss.score("CVSS:%s/%s" % (version, body)),
+                                 expected, body)
+        # Temporal and environmental metrics do not move the BASE score.
+        self.assertEqual(self.cvss.score(
+            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H/E:U/RL:O/RC:C/CR:L/MAV:P"), 9.8)
+
+    def test_every_macrovector_in_the_table_is_reachable_and_in_range(self):
+        table = self.cvss.V4_LOOKUP
+        self.assertEqual(len(table), 270)
+        self.assertEqual(table["000000"], 100)
+        self.assertTrue(all(0 < tenths <= 100 for tenths in table.values()))
+        seen = set()
+        import itertools
+        base = self.cvss.V4_BASE
+        for combo in itertools.product(*base.values()):
+            metrics = dict(zip(base, combo))
+            if all(metrics[m] == "N" for m in ("VC", "VI", "VA", "SC", "SI", "SA")):
+                continue
+            eqs = self.cvss._v4_macrovector(self.cvss._v4_effective(metrics))
+            seen.add("".join(map(str, eqs)))
+        self.assertTrue(seen <= set(table))
+
+    def test_a_malformed_vector_scores_none_and_never_raises(self):
+        good = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
+        for bad in (None, "", 7.5, [], {}, "garbage", "CVSS:4.0", "CVSS:4.0/",
+                    "CVSS:2.0/AV:N/AC:L/Au:N/C:P/I:P/A:P", "AV:N/AC:L/Au:N/C:P/I:P/A:P",
+                    "CVSS:5.0/" + good[9:],
+                    good.replace("/AT:N", ""),              # a base metric missing
+                    good.replace("AV:N", "AV:Z"),           # a value that is not one
+                    good.replace("AV:N", "AV"),             # no value at all
+                    good + "/AV:N",                         # a metric twice
+                    good + "/XX:Y", good + "/", good + "/E:",
+                    good.replace("SI:N", "SI:S"),           # S is for MSI only
+                    good.lower(), " " + good.replace("/", " / "),
+                    "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H",          # no A
+                    "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:X/C:H/I:H/A:H",
+                    "CVSS:3.1/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+                    "CVSS:4.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"):
+            self.assertIsNone(self.cvss.score(bad), repr(bad))
+            self.assertIsNone(self.cvss.band(self.cvss.score(bad)))
+
+    def test_bands_are_the_standard_ones(self):
+        band = self.cvss.band
+        self.assertEqual([band(v) for v in (10.0, 9.0, 8.9, 7.0, 6.9, 4.0, 3.9, 0.1, 0.0)],
+                         ["CRITICAL", "CRITICAL", "HIGH", "HIGH", "MEDIUM", "MEDIUM",
+                          "LOW", "LOW", "NONE"])
+
+    def test_an_advisory_is_rated_from_its_vector_and_a_label_wins(self):
+        digest = self.pins.digest_vuln
+        v4 = lambda body: {"type": "CVSS_V4", "score": "CVSS:4.0/" + body}
+        v3 = lambda body: {"type": "CVSS_V3", "score": "CVSS:3.1/" + body}
+        critical = "AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"    # 9.3
+        high = "AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N"        # 8.7
+        medium = "AV:N/AC:L/AT:N/PR:H/UI:N/VC:L/VI:L/VA:N/SC:N/SI:N/SA:N"      # 5.1
+        low = "AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SI:L/SA:N/E:U/CR:L/IR:L/AR:L"
+        rank = lambda record: (digest(record)["sev"], digest(record)["rated"])
+        # What a Hex advisory looks like: a vector, and nothing else.
+        self.assertEqual(rank({"severity": [v4(critical)]}), (4, True))
+        self.assertEqual(rank({"severity": [v4(high)]}), (3, True))
+        self.assertEqual(rank({"severity": [v4(medium)]}), (2, True))
+        self.assertEqual(rank({"severity": [v4(low)]}), (1, True))
+        self.assertEqual(rank({"severity": [v3("AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N")]}),
+                         (3, True))
+        # 4.0 before 3.x when a record has both, whichever is the higher.
+        self.assertEqual(rank({"severity": [
+            v3("AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), v4(medium)]}), (2, True))
+        # ...but a 4.0 vector that cannot be read does not hide a 3.x that can.
+        self.assertEqual(rank({"severity": [
+            {"type": "CVSS_V4", "score": "CVSS:4.0/nonsense"},
+            v3("AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H")]}), (4, True))
+        # A vector published on the affected package counts as well.
+        self.assertEqual(rank({"affected": [{"severity": [v4(high)]}]}), (3, True))
+        # The publisher's label wins over anything worked out here.
+        self.assertEqual(rank({"database_specific": {"severity": "LOW"},
+                               "severity": [v4(critical)]}), (1, True))
+        self.assertEqual(rank({"database_specific": {"severity": "MODERATE"},
+                               "severity": [v4(critical)]}), (2, True))
+        # No impact at all is a usable vector with no severity: rated, rank 0.
+        self.assertEqual(rank({"severity": [v4(
+            "AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SI:N/SA:N")]}), (0, True))
+        # Nothing usable stays unrated, and nothing raises.
+        for record in ({}, {"severity": None}, {"severity": []}, {"severity": "HIGH"},
+                       {"severity": [None, 7, "x", {}, {"type": "CVSS_V4"},
+                                     {"type": "CVSS_V4", "score": None},
+                                     {"type": "CVSS_V4", "score": "CVSS:4.0/AV:N"},
+                                     {"type": "CVSS_V2", "score": "AV:N/AC:L/Au:N/C:P/I:P/A:P"},
+                                     {"type": "Ubuntu", "score": "high"}]},
+                       {"affected": [None, {"severity": [None]}]},
+                       {"database_specific": {"severity": "who knows"}}):
+            self.assertEqual(rank(record), (0, False), record)
+
+
 class PinsTests(unittest.TestCase):
     """pins.sh: a pinned version with a published advisory, or far behind the
     latest release. Born 2026-10-09: `config :tailwind, version: "4.1.12"`
@@ -4188,6 +4377,61 @@ class PinsTests(unittest.TestCase):
         self.assertIn("(plug)", self.startup(**every))
         self.git("checkout", "-q", "main")
         self.assertIn("(plug)", self.startup(**every))
+
+    def test_an_advisory_with_a_vector_and_no_label_is_no_longer_unrated(self):
+        """Most Hex advisories: a CVSS 4.0 vector, no severity label, and a
+        GHSA alias OSV does not hold. Unscored they were "unrated", and never
+        reached the startup line or the bar (2026-10-11)."""
+        critical = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
+        medium = "CVSS:4.0/AV:N/AC:L/AT:N/PR:H/UI:N/VC:L/VI:L/VA:N/SC:N/SI:N/SA:N"
+        self.VULNS = dict(self.VULNS)
+        self.VULNS.update({
+            "EEF-CVE-2026-9": {"aliases": ["CVE-2026-9", "GHSA-gone-gone-gone"],
+                               "severity": [{"type": "CVSS_V4", "score": critical}],
+                               "affected": []},
+            "EEF-CVE-2026-8": {"aliases": ["CVE-2026-8"], "affected": [],
+                               "severity": [{"type": "CVSS_V4", "score": medium}]},
+            # No label and no vector that can be read: the alias is still asked.
+            "EEF-CVE-2026-7": {"aliases": ["CVE-2026-7", "GHSA-high-high-high"],
+                               "severity": [{"type": "CVSS_V4", "score": "CVSS:4.0/?"}],
+                               "affected": []},
+            "EEF-CVE-2026-6": {"aliases": ["CVE-2026-6"], "affected": []},
+        })
+        self.ADVISORIES = {("Hex", "jason", "1.4.4"): ["EEF-CVE-2026-9"],
+                           ("Hex", "mime", "2.0.0"): ["EEF-CVE-2026-8"],
+                           ("Hex", "plug", "1.18.1"): ["EEF-CVE-2026-7", "EEF-CVE-2026-6"]}
+        self.refresh()
+        full = self.full()
+        self.assertIn("Runtime dependencies with a published security advisory: "
+                      "3 (1 critical, 1 high, 1 moderate)", full)
+        self.assertIn("- jason 1.4.4 (apps/engine/mix.lock): critical CVE-2026-9", full)
+        self.assertIn("- mime 2.0.0 (apps/engine/mix.lock): moderate CVE-2026-8", full)
+        self.assertIn("- plug 1.18.1 (apps/engine/mix.lock): 2 advisories, "
+                      "worst high CVE-2026-7", full)
+        self.assertNotIn("unrated", full.replace("unrated CVE-2026-6", ""))
+        line = self.startup()
+        self.assertIn("2 runtime dependencies have a high or critical advisory", line)
+        self.assertIn("jason", line)
+        self.assertIn("pins 2!", self.bar())
+        asked = [path for _, path, _ in self.requests]
+        # A record rated from its own vector is not looked up a second way.
+        self.assertNotIn("/v1/vulns/GHSA-gone-gone-gone", asked)
+        self.assertIn("/v1/vulns/GHSA-high-high-high", asked)
+
+    def test_a_cache_from_before_vectors_were_scored_is_asked_again(self):
+        self.refresh()
+        path = self.cache / "pins.json"
+        cache = json.loads(path.read_text())
+        self.assertEqual(cache["schema"], 3)
+        cache["schema"] = 2                       # digests with `sev: 0` in them
+        for record in cache["vuln"].values():
+            record["sev"] = 0
+        path.write_text(json.dumps(cache))
+        self.assertNotIn("high", self.full())     # none of it is believed
+        seen = len(self.requests)
+        self.refresh()
+        self.assertGreater(len(self.requests), seen)
+        self.assertIn("plug 1.18.1 (apps/engine/mix.lock): high CVE-2026-1", self.full())
 
     # ── cooldown ──────────────────────────────────────────────────────────
 

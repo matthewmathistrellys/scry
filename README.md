@@ -183,11 +183,17 @@ machine is carrying. Independent checks and advisories fill that in.
   Outside a git repository the hook does nothing.
 
   One vulnerability published under several ids (GHSA, CVE, EEF-CVE, PYSEC)
-  is counted once. Many Hex advisories publish a CVSS vector and no severity
-  label; those are listed as `unrated` rather than given a severity Scry
-  worked out for itself — which means **an unrated advisory is in `--full`
-  and in the edit note, and never in the startup line or the status-line
-  count**. Data older than `SCRY_PINS_STALE_DAYS` is labelled with its age in
+  is counted once. Severity is the publisher's label when the advisory has
+  one. Many advisories — most of Hex's — publish a CVSS vector and no label,
+  and the GHSA alias they name is usually not in OSV; those are **scored from
+  the vector** (`scanners/cvss_score.py`: CVSS 4.0 as FIRST specifies it, with
+  FIRST's lookup table, and the CVSS 3.0/3.1 base formula; 4.0 is preferred
+  when a record has both) and banded the standard way: 9.0+ critical, 7.0+
+  high, 4.0+ moderate, 0.1+ low. So they count toward the startup line and
+  the status line like any other. An advisory with neither a label nor a
+  vector that can be read is asked for through its GHSA alias, and failing
+  that is listed as `unrated` — in `--full` and the edit note only, never in
+  the startup line or the status-line count. Data older than `SCRY_PINS_STALE_DAYS` is labelled with its age in
   `--full`. When the lookups have failed for that long, `--full` says NOT
   CHECKED and the status line shows `pins ?`, rather than a blank that would
   read as "checked and clean"; the session is still not told at startup.
@@ -785,11 +791,11 @@ $ bash pins.sh --full
 Pinned versions in /Users/you/Dev/myapp (advisories from OSV, releases from the
 package registries, read from a local cache checked 3h ago; no project tooling
 was run; 326 pinned version(s) read):
-Runtime dependencies with a published security advisory: 20 (4 high, 16 unrated)
+Runtime dependencies with a published security advisory: 21 (2 critical, 12 high, 5 moderate, 2 low)
 - hackney 1.25.0 (apps/engine/mix.lock): 4 advisories, worst high CVE-2026-47071, fixed in 4.0.1
 - braces 3.0.3 (apps/web/package-lock.json): high CVE-2026-93687
 - ...
-Dev/test-only dependencies with a published security advisory: 4 (1 moderate, 3 unrated)
+Dev/test-only dependencies with a published security advisory: 4 (1 moderate, 3 low)
 - cowlib 2.19.0 (apps/engine/mix.lock) [dev]: 3 advisories, worst moderate CVE-2026-43966, fixed in 2.21.0
 - ...
 Pinned in Elixir config (a version written in a config file is in no lockfile,
