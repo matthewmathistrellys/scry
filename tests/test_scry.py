@@ -4302,14 +4302,17 @@ class PinsTests(unittest.TestCase):
         self.assertIn("2 runtime dependencies have a high or critical advisory", line)
         self.assertIn("jason", line)
         self.assertEqual(self.startup(), "")
-        # ...or a week passes. One going away is not news.
+        # ...or a day passes (the default). One going away is not news.
         del self.ADVISORIES[("Hex", "jason", "1.4.4")]
         self.refresh(again=True)
         self.assertEqual(self.startup(), "")
         said = next(self.cache.glob("said-*.json"))
         record = json.loads(said.read_text())
         self.assertEqual(record["ids"], ["CVE-2026-1", "GHSA-crit-crit-crit"])
-        record["at"] = time.time() - 8 * 86400
+        record["at"] = time.time() - 23 * 3600
+        said.write_text(json.dumps(record))
+        self.assertEqual(self.startup(), "")
+        record["at"] = time.time() - 25 * 3600
         said.write_text(json.dumps(record))
         self.assertIn("1 runtime dependency has", self.startup())
         self.assertEqual(self.startup(), "")

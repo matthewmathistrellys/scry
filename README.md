@@ -111,7 +111,8 @@ machine is carrying. Independent checks and advisories fill that in.
   *Once per advisory set.* What was said is recorded in the cache, per
   repository (every worktree of it shares the record). Nothing is said again
   until a high or critical advisory id appears that was not in it, or
-  `SCRY_PINS_REMIND_DAYS` (7) pass. An advisory going away is not news, so a
+  `SCRY_PINS_REMIND_DAYS` (1) pass — daily, because a weekly line is said to
+  one of the many sessions that start in a repository and missed by the rest. An advisory going away is not news, so a
   shrinking set says nothing.
 
   *Not what the branch itself changes.* A pin whose version differs from the
@@ -752,7 +753,7 @@ industrialise that problem.
 | Elixir build state | `_build` populated | `_build` cold — next compile is a FULL build |
 | Force-rebuild command | any ordinary command | first `--force`/`rm -rf _build` attempt |
 | Open PRs | none, or `gh` unavailable | any open PR exists |
-| Pinned version with an advisory (session start) | none high or critical on a runtime dependency; or dev/test-only; or the branch itself changes that pin; or already said for this advisory set within 7 days; or the start is a resume, clear or compact | one line, once: the count and up to three names |
+| Pinned version with an advisory (session start) | none high or critical on a runtime dependency; or dev/test-only; or the branch itself changes that pin; or already said for this advisory set within the last day; or the start is a resume, clear or compact | one line, once: the count and up to three names |
 | Pinned version with an advisory (status line) | none high or critical on a runtime dependency | `pins N!` |
 | Edited dependency manifest | the file has no advisory and nothing behind; or already said for this file this session | that file's advisories and what in it is behind |
 | Pin in Elixir config, declared package behind latest | never said unasked | in `pins.sh --full` and the edit note: ≥1 minor behind, or any major, against a release at least 5 days old |
@@ -1138,7 +1139,7 @@ starts changing a decision.
 | `SCRY_KEEPALIVE_SILENT_MAX` | `3` | keep-alives in a row for work where nothing listed has written for a whole TTL; the next one is the summary request instead. `0` never keeps a session warm for work that silent |
 | `SCRY_PINS` | `1` | `0` disables the pinned-version check everywhere: startup line, edit note, status-line segment, background lookups |
 | `SCRY_PINS_COOLDOWN_DAYS` | `5` | days a release must have been published before a pin counts as behind it. `0` counts a release at once. Advisories are exempt |
-| `SCRY_PINS_REMIND_DAYS` | `7` | days before the startup line is said again for an advisory set already said. `0` says it at every startup |
+| `SCRY_PINS_REMIND_DAYS` | `1` | days before the startup line is said again for an advisory set already said. `0` says it at every startup |
 | `SCRY_PINS_BEHIND_MINORS` | `1` | minor versions behind the latest release before a pin is reported; a major behind is always reported. `0` reports any newer release |
 | `SCRY_PINS_BEHIND` | `1` | `0` reports advisories only and looks up no latest releases |
 | `SCRY_PINS_LIST_MAX` | `3` | pins named in the edit note before the rest become a count (the startup line never names more than three) |
