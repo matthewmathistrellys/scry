@@ -25,7 +25,11 @@ most of it unchanged since the last time. Now:
              Then it is one line, said once per repository per advisory set:
              what was said is recorded in the cache, and nothing is said
              again until an advisory id appears that was not in it, or
-             SCRY_PINS_REMIND_DAYS pass.
+             SCRY_PINS_REMIND_DAYS (1) pass. Daily, not weekly (Matt,
+             2026-10-11: "we need once per day"): one repo sat on 61
+             advisories for a month, and with many sessions starting in a
+             repository a weekly line is said to one of them and missed by
+             the rest.
   edit note  (`--edited`; PostToolUse on Edit/Write) speaks when the edited
              file is a dependency manifest or a pinned-tool config, about
              that file's findings only, once per session per file.
@@ -163,7 +167,7 @@ def settings():
         "minors": max(0, env_int("SCRY_PINS_BEHIND_MINORS", 1)),
         "list_max": max(1, env_int("SCRY_PINS_LIST_MAX", 3)),
         "cooldown_secs": max(0.0, env_float("SCRY_PINS_COOLDOWN_DAYS", 5)) * 86400,
-        "remind_secs": max(0.0, env_float("SCRY_PINS_REMIND_DAYS", 7)) * 86400,
+        "remind_secs": max(0.0, env_float("SCRY_PINS_REMIND_DAYS", 1)) * 86400,
         "refresh_secs": max(0.0, env_float("SCRY_PINS_REFRESH_HOURS", 24)) * 3600,
         "stale_secs": max(0.0, env_float("SCRY_PINS_STALE_DAYS", 7)) * 86400,
         "budget": max(1.0, env_float("SCRY_PINS_REFRESH_BUDGET", 45)),
