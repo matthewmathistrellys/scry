@@ -2837,7 +2837,7 @@ class CacheHandoffTests(unittest.TestCase):
             # The record the monitor reads is unchanged by any of this.
             rec = json.loads((Path(td) / "state" / f"{self.SID}.deadline").read_text())
             self.assertEqual(set(rec), {"session_id", "observed_at", "warm",
-                                        "ttl", "expires_at", "requests"})
+                                        "ttl", "expires_at", "requests", "tab"})
 
     def test_the_status_line_records_nothing_without_cache_data(self):
         with tempfile.TemporaryDirectory() as td:
