@@ -4252,7 +4252,8 @@ class PinsTests(unittest.TestCase):
         line = self.startup()
         self.assertIn("12 runtime dependencies have", line)
         self.assertEqual(len(line.splitlines()), 1)
-        self.assertLessEqual(len(line), 200)
+        # The cap is on the sentence; the command after it is a path.
+        self.assertLessEqual(len(line.split(" Full list: ")[0]), 160)
         self.assertLessEqual(line.count("a_rather_long_package_name"), 3)
         self.assertIn("more)", line)
 

@@ -101,7 +101,7 @@ machine is carrying. Independent checks and advisories fill that in.
 
   | Where | What | When |
   |---|---|---|
-  | session start (`pins.sh`) | **nothing**, or one line under 200 characters: the count, up to three package names, and the command for the full list | `startup` only — never resume, clear or compact — and only for a **high or critical** advisory on a **runtime** dependency that the current branch does not itself change against the default branch. Said **once per repository per advisory set** |
+  | session start (`pins.sh`) | **nothing**, or one line: a sentence of at most 160 characters with the count of packages and up to three names, then the command for the full list | `startup` only — never resume, clear or compact — and only for a **high or critical** advisory on a **runtime** dependency that the current branch does not itself change against the default branch. Said **once per repository per advisory set** |
   | status line (`statusline.sh`) | `pins 4!` in red: runtime dependencies with a high or critical advisory. Nothing when clean | always, for the human; read from one small file in the cache |
   | an edited manifest (`pins_edit_advisory.sh`) | one line about **that file's** findings: its advisories, and what in it is behind | `PostToolUse` on Edit/Write of a dependency manifest or pinned-tool config, once per session per file, silent when the file has no findings |
   | on demand | everything, one finding per line | `bash pins.sh --full` (from the plugin directory; `--full <dir>` for another repo) |
@@ -780,7 +780,7 @@ deliberately not consulted):
 ```
 Pinned versions: 4 runtime dependencies have a high or critical advisory
 (pydantic-ai-slim, hackney, braces, +1 more). Full list: bash
-~/.claude/plugins/cache/scry/scry/1.39.0/pins.sh --full
+~/.claude/plugins/cache/scry/scry/1.40.0/pins.sh --full
 ```
 
 That is the whole of what `pins.sh` says at startup (one line; wrapped here),

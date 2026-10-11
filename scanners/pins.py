@@ -1177,7 +1177,7 @@ def full_command():
     return pins_command("--full")
 
 
-STARTUP_MAX_CHARS = 200
+STARTUP_MAX_CHARS = 160
 
 
 def startup_line(root, found, conf, now):
@@ -1210,17 +1210,20 @@ def startup_line(root, found, conf, now):
         name = row["pin"].get("config") or row["pin"]["name"]
         if name not in names:
             names.append(name)
-    noun = "dependency has" if len(rows) == 1 else "dependencies have"
+    # The count is of packages, so it agrees with the names: one package pinned
+    # at two versions is one thing to fix. The cap is on the sentence; the
+    # command after it is as long as the plugin's install path.
+    noun = "dependency has" if len(names) == 1 else "dependencies have"
     for shown in range(min(3, len(names)), -1, -1):
         listed_names = names[:shown]
         if len(names) > shown and shown:
             listed_names.append("+%d more" % (len(names) - shown))
-        text = "Pinned versions: %d runtime %s a high or critical advisory%s. Full list: %s" % (
-            len(rows), noun,
-            " (%s)" % ", ".join(listed_names) if listed_names else "", full_command())
+        text = "Pinned versions: %d runtime %s a high or critical advisory%s." % (
+            len(names), noun,
+            " (%s)" % ", ".join(listed_names) if listed_names else "")
         if len(text) <= STARTUP_MAX_CHARS:
             break
-    return text
+    return "%s Full list: %s" % (text, full_command())
 
 
 def vulnerable_text(row, src=True):
