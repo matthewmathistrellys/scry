@@ -2758,6 +2758,46 @@ class PrOpenAdvisoryTests(unittest.TestCase):
             self.assertEqual(context(result), "")
 
 
+class ReviewHandbackAdvisoryTests(unittest.TestCase):
+    """A reviewer's report comes back; the note separates kinds of finding.
+
+    Observed 2026-10-12: every finding of an adverse review was built,
+    including a guard against a worry the reviewer called unconfirmed.
+    """
+
+    @staticmethod
+    def _handback(report):
+        return ('Another Claude session sent a message:\n<agent-message from="a1">\n'
+                "[Subagent hand-back] The text below is the final report of a subagent "
+                "this session delegated to. The report follows:\n  " + report)
+
+    def _run(self, prompt):
+        payload = {"session_id": "rv-1", "hook_event_name": "UserPromptSubmit",
+                   "cwd": "/tmp", "prompt": prompt}
+        return run_hook("review_handback_advisory.sh", "/tmp", payload)
+
+    def test_it_speaks_when_a_report_reads_as_a_review(self):
+        for report in ("Verdict: not safe to run.\n1. Blocker: undo can run twice.",
+                       "## Findings\n1. x\nSmallest fix: add a check.",
+                       "Two must-fix items, most serious first."):
+            note = context(self._run(self._handback(report)))
+            self.assertIn("three kinds of finding", note, report)
+            self.assertIn("A quality finding", note)
+
+    def test_it_is_silent_for_a_report_that_is_not_a_review(self):
+        report = "Researched three libraries. Recommendation: use the second one."
+        self.assertEqual(context(self._run(self._handback(report))), "")
+
+    def test_it_never_reads_a_human_message(self):
+        """Review words typed by a person are not a reviewer's report."""
+        self.assertEqual(context(self._run("Verdict: smallest fix is fine, safe to merge")), "")
+
+    def test_it_never_fails_on_a_bad_payload(self):
+        result = run_hook("review_handback_advisory.sh", "/tmp", {"prompt": None})
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(context(result), "")
+
+
 class CacheHandoffTests(unittest.TestCase):
     """One summary request per user-work cycle, shortly before the prompt
     cache goes cold, and only a user message re-arms it (designed with Codex,

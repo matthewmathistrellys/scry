@@ -754,6 +754,7 @@ industrialise that problem.
 | Force-rebuild command | any ordinary command | first `--force`/`rm -rf _build` attempt |
 | Open PRs | none, or `gh` unavailable | any open PR exists |
 | Pull request about to open | any command but `gh pr create`; under 10 changed lines; only prose changed; already said for this branch this session | once: lines and files changed, then what the research shows about a second reader and its findings |
+| Subagent report comes back | not a subagent hand-back; the report does not read as a review | the kinds of finding a review returns (defect, quality, speculative) and how each is settled |
 | Pinned version with an advisory (session start) | none high or critical on a runtime dependency; or dev/test-only; or the branch itself changes that pin; or already said for this advisory set within the last day; or the start is a resume, clear or compact | one line, once: the count and up to three names |
 | Pinned version with an advisory (status line) | none high or critical on a runtime dependency | `pins N!` |
 | Edited dependency manifest | the file has no advisory and nothing behind; or already said for this file this session | that file's advisories and what in it is behind |
@@ -1145,6 +1146,36 @@ Observed 2026-10-12 in trellys-app: a session built every finding an adverse
 reviewer returned, including a second check against a worry the reviewer itself
 called an unconfirmed suspicion. In one week, 44 of 57 pull requests there
 opened with no reviewer dispatched first.
+
+## When a review comes back
+
+A subagent's report reaches its parent as a turn of its own, and a
+`UserPromptSubmit` hook runs before the session acts on it. When the report
+reads as a review (a line-leading "Verdict", "smallest fix", "safe to merge",
+"blocker / must-fix / should-fix", a Findings heading, "most serious first"),
+Scry says what is known about the three kinds of finding a review returns:
+a defect, settled by reproducing it; a quality finding (framework idiom,
+project convention, sibling code), settled against the docs or neighbouring
+code with no failing test needed; and a speculative risk, a new guard, retry or
+check for a danger nobody has shown. It never tells the session what to do.
+
+Detection, measured 2026-10-14 on 239 hand-backs: 20 of 25 defect-hunting
+reviews caught, 2 false alarms among 205 other reports. Gemma 3 1B, Qwen3 4B
+and Haiku each did worse than the wording.
+
+The note was chosen by a blind test: 169 real findings from 26 real reviews,
+each review shown unlabelled to a session that decided fix, verify, ask or
+skip, three runs per condition, scored on the 125 findings where two
+independent judges agreed. No note: 14% of should-not-build findings built,
+83% of should-do findings acted on. This note: 3% and 78%.
+
+| Claim | Source |
+|---|---|
+| About 75% of review-driven changes are maintainability, 25% functional | Beller et al., MSR 2014; Mäntylä & Lassenius, TSE 2009 |
+| 35% of AI functional comments rejected as invalid, against 25% of maintainability comments | [arXiv 2607.03316](https://arxiv.org/abs/2607.03316) |
+
+OWNER DECISION (2026-10-14): this hook reads the text of a subagent's report,
+never a human message, and keeps nothing.
 
 ## Tuning
 
