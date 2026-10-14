@@ -38,8 +38,10 @@
 # non-human turns of the b1746f6b transcript (origin task-notification, or
 # none); every human turn there opened otherwise. The prefix is compared and
 # discarded — never stored, never logged, never printed. OWNER DECISION
-# (AGENTS.md, metadata not content): this is the one place Scry reads any part
-# of a prompt, because no metadata field separates a user from a notification.
+# (AGENTS.md, metadata not content): this reads a prompt's first bytes,
+# because no metadata field separates a user from a notification. The only
+# other prompt reader is review_handback_advisory.sh, which reads a subagent's
+# report and never a human message.
 #
 # Every run with CLAUDE_PID set also writes pid/<CLAUDE_PID> = "<session_id>
 # <time>" — the session this process is running now — and appends the id to
