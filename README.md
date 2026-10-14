@@ -753,6 +753,7 @@ industrialise that problem.
 | Elixir build state | `_build` populated | `_build` cold — next compile is a FULL build |
 | Force-rebuild command | any ordinary command | first `--force`/`rm -rf _build` attempt |
 | Open PRs | none, or `gh` unavailable | any open PR exists |
+| Pull request about to open | any command but `gh pr create`; under 10 changed lines; only prose changed; already said for this branch this session | once: lines and files changed, then what the research shows about a second reader and its findings |
 | Pinned version with an advisory (session start) | none high or critical on a runtime dependency; or dev/test-only; or the branch itself changes that pin; or already said for this advisory set within the last day; or the start is a resume, clear or compact | one line, once: the count and up to three names |
 | Pinned version with an advisory (status line) | none high or critical on a runtime dependency | `pins N!` |
 | Edited dependency manifest | the file has no advisory and nothing behind; or already said for this file this session | that file's advisories and what in it is behind |
@@ -1110,6 +1111,40 @@ Observed 2026-09-09 on a freshly built remote box: an agent asked to make one
 change ran `git checkout -b <name>` with no start point and no preceding fetch.
 `git reflog` recorded "Created from HEAD" and the checkout had no `FETCH_HEAD` at
 all. The branch was current only because the clone was minutes old.
+
+## Before a pull request opens
+
+Opening a pull request is the last cheap moment for a second reader. In a
+standard flow a person still reviews and a person still deploys after it; where
+auto-merge is armed on open and merge deploys, nothing does.
+
+A `PreToolUse` advisory speaks just before `gh pr create`, once per branch per
+session. It reads only git's line and file counts against the merge base with
+`origin/<default>`. It does not try to know whether a review happened, and it
+never denies. It says what the research shows: who makes a good reader, what a
+useful review does, and that a finding is input to a decision, not the decision.
+It is silent under 10 changed lines and when every changed file is prose.
+
+Sources (every number was opened at its source on 2026-10-14):
+
+| Claim | Source |
+|---|---|
+| About 70% of outages come from changes | Google SRE |
+| Low review coverage: up to 2–5 more post-release bugs | McIntosh et al., MSR 2014 / EMSE 2016 |
+| Same-model self-correction: 91.5% → 88.0% | Huang et al., ICLR 2024 |
+| Filtered review 65% addressed (Uber) vs unfiltered 7–8% accepted (Mozilla, Ubisoft) | [Uber uReview](https://www.uber.com/blog/ureview/), [arXiv 2411.07091](https://arxiv.org/abs/2411.07091) |
+| Combining review runs raised F1 up to 43.67% | [arXiv 2509.01494](https://arxiv.org/abs/2509.01494) |
+| Every model did worse from diff to full context (one preprint) | [arXiv 2603.26130](https://arxiv.org/abs/2603.26130) |
+| Reviewers report something even when the work is sound | [Claude Code best practices](https://code.claude.com/docs/en/best-practices) |
+| Unneeded defensive code in 20–30% of overlong agent fixes | arXiv 2603.24755, 2608.12355 |
+
+Not claimed because the evidence is missing: that persona prompts, specialist
+reviewers, checklists, or a different model as reviewer catch more defects.
+
+Observed 2026-10-12 in trellys-app: a session built every finding an adverse
+reviewer returned, including a second check against a worry the reviewer itself
+called an unconfirmed suspicion. In one week, 44 of 57 pull requests there
+opened with no reviewer dispatched first.
 
 ## Tuning
 
