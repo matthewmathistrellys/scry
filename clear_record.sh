@@ -5,17 +5,18 @@
 # /clear ends the session and starts a new one. The new session's
 # SessionStart hooks are told only that it began with source "clear"; nothing
 # in the payload, the transcript, or the binary links it back to the session
-# it replaced (searched 2.1.268 on 2026-09-10 — parentSessionId is for
-# subagents and teams). Guessing by transcript mtime is wrong exactly when it
-# matters: ten sessions open, several in one directory (Matt, 2026-09-10).
-# The session that is ending knows its own id. This writes it down.
+# it replaced (searched in 2.1.268 — parentSessionId is for subagents and
+# teams). Guessing by transcript mtime fails exactly when it matters: many
+# sessions open, several in one directory. The session that is ending knows
+# its own id. This writes it down.
 #
-# Where: $TMPDIR/scry-last-cleared/<session_id>.json — one file per cleared
-# session, so two clears in one directory in the same second cannot clobber
-# each other. Contents: session_id, transcript_path, cwd, ended_at. Nothing
-# from the conversation (AGENTS.md: metadata, not content). Lifecycle: the
-# next SessionStart with source "clear" in that directory reads its record
-# and deletes it; records nobody claims within a day are swept here on every
+# Where: $SCRY_CLEAR_STATE_DIR (default $TMPDIR/scry-last-cleared)/
+# <session_id>.json — one file per cleared session, so two clears in one
+# directory in the same second cannot clobber each other. Contents:
+# session_id, transcript_path, cwd, ended_at. Nothing from the conversation
+# (AGENTS.md: metadata, not content). Lifecycle: fleet.sh, on the next
+# SessionStart with source "clear" in that directory, reads its record and
+# deletes it; records nobody claims within a day are swept here on every
 # run, and the OS reaps the temp directory anyway. Nothing under $HOME.
 #
 # Any other end reason (logout, exit, other) writes nothing. Stdout from a

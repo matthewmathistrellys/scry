@@ -2,8 +2,7 @@
 """roster.py — what a session started that has not finished, read from file
 metadata and the process table, never from the conversation.
 
-One list, three readers (2026-09-14, Matt: "we can see things that it forgot
-about?" — "make it so"):
+One list, three readers:
 
   cache_handoff_monitor.sh   near the cache deadline, to decide keep-alive
                              versus summary and to name the unfinished work.
@@ -13,21 +12,20 @@ about?" — "make it so"):
                              so "what is still running?" has an answer that
                              does not depend on the model's memory.
 
-Why this exists: on 2026-09-13 session 62aa5e9f stopped four log-watchers,
-missed a fifth, and told the user "nothing running" twice over a night. The
-fifth watcher's output file had no exit marker the whole time. The session
-had no list of its own Monitor tasks other than what it remembered creating;
-the file system had one all along. Scry reports; the session judges.
+Why this exists: a session has no list of its own background tasks other
+than what it remembers creating, so it can stop four watchers, miss a fifth,
+and report "nothing running". The file system has the list all along.
+Scry reports; the session judges.
 
 What is listed, and what Scry can read for each:
   subagent            <session>/subagents/agent-*.jsonl — nothing in the
                       metadata says "finished", so listed only while written
                       within `fresh` seconds (one cache TTL by default). In
                       the last quarter of that window the row says what the
-                      silence means (Matt, 2026-09-22): its own cache goes
-                      cold at the TTL; finished, nothing happens; still
-                      working, its next step re-reads its context once at
-                      the full rate; stuck, stop it before that read.
+                      silence means: its own cache goes cold at the TTL;
+                      finished, nothing happens; still working, its next
+                      step re-reads its context once at the full rate;
+                      stuck, stop it before that read.
   workflow            a journal with an agent `started` and no `result` —
                       unfinished by its own record, however quiet.
   background command  <tasks>/b*.output that a process still holds open.
@@ -36,14 +34,13 @@ What is listed, and what Scry can read for each:
                       or background, has no holder. Read with one `lsof`
                       call over the candidates (files with no exit marker
                       in their last 64 bytes; a marker means finished and
-                      saves the call). Until 2026-09-22 the marker alone was
-                      the test, and it is not one: a foreground Bash call
-                      writes the same file and never gets a marker, so every
-                      large-output command a session ever ran read as
-                      "still running" forever — one session carried fifty
-                      of them, up to four days old, and the keep-alive kept
-                      that session warm every hour for nothing. Left out: a
-                      Scry monitor's own notification stream (opens with
+                      saves the call). The marker alone is not a test: a
+                      foreground Bash call writes the same file and never
+                      gets a marker, so by the marker alone every
+                      large-output command a session ever ran would read as
+                      "still running" forever, and the keep-alive would keep
+                      the session warm for nothing. Left out: a Scry
+                      monitor's own notification stream (opens with
                       "Scry — ", held open by the monitor while it lives).
                       Without `lsof` no background command is listed.
   teammate            <session>/subagents/agent-*.meta.json whose taskKind is
@@ -57,8 +54,7 @@ What is listed, and what Scry can read for each:
                       process has held the session that spawned it (Scry's
                       own per-process record, pid/<pid>.sessions). Not
                       part of the keep-alive roster: an idle teammate is not
-                      unfinished work. (2026-09-21: twenty of them, four days
-                      old, found in a trellys-app process only when Matt asked.)
+                      unfinished work, though dozens can pile up unseen.
   plugin monitor      a process under this Claude process running a script
                       from ~/.claude/plugins/cache/<market>/<plugin>/<ver>/
                       that the plugin's monitors/monitors.json registers (a
@@ -66,9 +62,8 @@ What is listed, and what Scry can read for each:
                       Claude Code starts these once per process and never
                       restarts them, so the version in the path is what is
                       actually running; when it differs from the installed
-                      version, that is said. (62aa5e9f ran a 1.29.0 monitor
-                      all night while 1.31.0, which fixed its loop, had been
-                      installed since the afternoon.)
+                      version, that is said — an upgrade installed mid-session
+                      does not reach a monitor already running.
 
 Nothing here reads a prompt, a transcript line, or a task's output beyond
 its last 64 bytes for the exit marker (never printed).

@@ -13,11 +13,11 @@
 # and a lost one.
 #
 # Because the harm is time rather than damage, a hard block is the wrong
-# instrument -- sometimes a forced rebuild genuinely is the answer. So this is a
-# TWO-STRIKE gate (Matt, 2026-08-22): the first attempt is denied with the cost
-# stated plainly and the cheaper options named; running the same command again
-# within the window lets it straight through. An unthinking reflex becomes a
-# deliberate choice, and nothing is ever truly blocked.
+# instrument -- sometimes a forced rebuild genuinely is the answer. So this is
+# a TWO-STRIKE gate: the first attempt is denied with the cost stated plainly
+# and the cheaper options named; running the same command again within the
+# window lets it straight through. An unthinking reflex becomes a deliberate
+# choice, and nothing is ever truly blocked.
 #
 # Fails open everywhere: not Bash, not an Elixir project, malformed payload,
 # unwritable state directory -- all allow the command silently.

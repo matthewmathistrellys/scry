@@ -5,9 +5,8 @@
 # A session cannot see the cost of its own parallelism. It dispatches
 # eight agents, spawns test runs and dev servers, and observes none of
 # the contention that follows — so the tenth parallel task looks exactly
-# as free as the first. On 2026-07-26 one laptop carried load 19.6 across
-# 8 cores with six Claude sessions, a Codex process, five BEAM VMs and
-# two node servers live; nothing running on it could tell.
+# as free as the first, even with the load at more than twice the core
+# count and nothing running able to tell.
 #
 # Reports load, swap, disk and locally-listening dev servers. All of it
 # comes from local macOS/Linux system interfaces — instant, local, no network.

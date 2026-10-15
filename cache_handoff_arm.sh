@@ -2,45 +2,39 @@
 # cache_handoff_arm.sh — UserPromptSubmit hook: a new user message arms the
 # cache-deadline summary request for one more cycle. Also a SessionStart hook:
 # records which session this Claude process is running, for the monitor to
-# follow.
+# follow. (The "handoff" in the name is from when the summary was a file; it
+# is now written into the conversation.)
 #
 # `cache_handoff_monitor.sh` asks the session once, shortly before its prompt
-# cache goes cold, to write a summary as its reply in the conversation (until
-# 1.31.0 it was a handoff file). Writing that summary is itself a request, and
-# a request pushes the expiry forward an hour — so a monitor that re-armed on
-# every warm cache would ask every hour, forever, with no user in the loop.
-# The rule that stops that: ONLY a user message re-arms it. Tool calls, cache
-# hits, monitor notifications, and the summary itself never do (designed with
-# Codex, 2026-09-10; the file name keeps its original "handoff" wording).
+# cache goes cold, to write a summary as its reply. Writing that summary is
+# itself a request, and a request pushes the expiry forward an hour — so a
+# monitor that re-armed on every warm cache would ask every hour, forever,
+# with no user in the loop. The rule that stops that: ONLY a user message
+# re-arms it. Tool calls, cache hits, monitor notifications, and the summary
+# itself never do.
 #
 # The one bounded exception is the monitor's keep-alive: while work this
 # session started is unfinished, the monitor sends the roster and asks for one
 # status line instead of the summary, so the cache is warm when that work
-# reports back. It
-# does not re-arm anything either; it is counted and capped in the monitor
-# (SCRY_KEEPALIVE_MAX per user message), and only an arm from this hook
-# starts a new per-message count.
+# reports back. It does not re-arm anything either; it is counted and capped
+# in the monitor (SCRY_KEEPALIVE_MAX per user message), and only an arm from
+# this hook starts a new per-message count.
 #
-# UserPromptSubmit is not only user messages (binary 2.1.270, 2026-09-13):
-# Claude Code runs it for every queued "task-notification" too — a background
-# task finishing, a workflow completing, and every plugin-monitor line,
-# Scry's own summary request included. The payload has no field that says
+# UserPromptSubmit is not only user messages (Claude Code 2.1.270): it also
+# runs for every queued notification — a background task finishing, a
+# workflow completing, every plugin-monitor line (Scry's own summary request
+# included), and a subagent's hand-back. The payload has no field that says
 # which (session_id, transcript_path, cwd, prompt_id, permission_mode,
-# agent_id, agent_type, effort, prompt, session_title — no origin). Two
-# consequences were live: b1746f6b.state read "armed 1789322148", the second a
-# workflow's completion notice arrived, with no user message near it; and
-# 62aa5e9f, one human message on 09-12, was asked for three handoffs an hour
-# apart because each request re-armed the next.
+# agent_id, agent_type, effort, prompt, session_title — no origin). Arming on
+# those means a workflow's completion arms the session with no user near it,
+# and each summary request arms the next one an hour later.
 #
 # So this hook looks at the first bytes of `prompt` and nothing further: a
-# prompt that opens with `<task-notification>` or `Another Claude session sent
-# a message:` does not arm. Those are the two openings observed on the
-# non-human turns of the b1746f6b transcript (origin task-notification, or
-# none); every human turn there opened otherwise. A subagent's hand-back is a
-# third: the transcript shows it as `Another Claude session sent a
-# message:\n<agent-message from=...>`, but the hook's `prompt` drops that
-# preamble and opens `<agent-message from="...">` (livetest payload, session
-# a28191cb, 2026-10-14) — so every hand-back armed. The prefix is compared and
+# prompt that opens with `<task-notification>`, `Another Claude session sent
+# a message:`, or `<agent-message from=` does not arm. Those are the openings
+# observed on non-human turns; a subagent's hand-back shows in the transcript
+# with the "Another Claude session" preamble, but the hook's `prompt` drops
+# it and opens with `<agent-message from="...">`. The prefix is compared and
 # discarded — never stored, never logged, never printed. OWNER DECISION
 # (AGENTS.md, metadata not content): this reads a prompt's first bytes,
 # because no metadata field separates a user from a notification. The only
@@ -49,9 +43,10 @@
 #
 # Every run with CLAUDE_PID set also writes pid/<CLAUDE_PID> = "<session_id>
 # <time>" — the session this process is running now — and appends the id to
-# pid/<CLAUDE_PID>.sessions, every session the process has held. /clear changes the
-# session inside a process whose monitor never restarts; this record, beside
-# Claude Code's own ~/.claude/sessions/<pid>.json, is how the monitor keeps up.
+# pid/<CLAUDE_PID>.sessions, every session the process has held. /clear
+# changes the session inside a process whose monitor never restarts; this
+# record, beside Claude Code's own ~/.claude/sessions/<pid>.json, is how the
+# monitor keeps up.
 #
 # One report, and only here: if the previous cycle ended with the cache
 # expiring before a summary was requested (the monitor saw the deadline pass

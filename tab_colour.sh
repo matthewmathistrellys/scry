@@ -4,9 +4,9 @@
 # cache_deadline_statusline.sh when the state changes, and with `none` by the
 # SessionEnd hook so a tab where Claude has stopped does not stay red.
 #
-# Matt, 2026-09-27: "I'll just know, okay, these ones are cold" — nothing on
-# the tabs that are fine, yellow when close, red once cold; the same colours
-# the status line's cache segment uses. It replaces any colour set by hand.
+# Nothing on the tabs that are fine, so a glance across tabs picks out the
+# cold ones; the colours match the status line's cache segment. It replaces
+# any colour set by hand. Outside iTerm2 (LC_TERMINAL) it does nothing.
 #
 # Hooks and the status line run detached; the tab is the terminal of the
 # nearest ancestor that has one (the claude process). Exits non-zero when

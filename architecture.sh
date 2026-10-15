@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# architecture.sh — Claude Code SessionStart hook: answers "what is this
-# codebase?" the instant a session starts, so a fresh agent doesn't have
-# to go digging. Runs in well under a second.
+# architecture.sh — SessionStart hook: answers "what is this codebase?" the
+# instant a session starts, so a fresh agent doesn't have to go digging.
+# Runs in well under a second.
 #
-# This file is a DISPATCHER, not a language scanner. It detects which
-# stack it's looking at and hands off to the matching scanner under
-# scanners/ — today that's Elixir/Ash (via mix.exs), with Python and
-# TypeScript to follow. The language name belongs on the scanner, never
-# on this entry point: one hook wired once has to work in every repo,
-# including a polyglot tree, so it cannot require the installer to know
-# the stack in advance. Adding a language means adding a scanner and a
-# detection line here — never a second hook to install.
+# This file is a DISPATCHER, not a language scanner. It hands the repo root
+# to a scanner under scanners/ — scanners/elixir_ash.py, which searches DOWN
+# for mix.exs files, is the one language scanner — and prints what that
+# scanner reports. The language name belongs on the scanner, never on this
+# entry point: one hook wired once has to work in every repo, including a
+# polyglot tree, so it cannot require the installer to know the stack in
+# advance. Adding a language means adding a scanner and a call here — never
+# a second hook to install.
 #
-# If no scanner matches, it falls back to a quick layout of the
-# subdirectories below cwd — some orientation beats none.
+# If no scanner reports anything, it falls back to a quick layout of the
+# subdirectories of cwd — some orientation beats none.
 #
 # Install: copy architecture.sh + scanners/ into your project (e.g.
 # .claude/hooks/), then wire architecture.sh into settings.json — see

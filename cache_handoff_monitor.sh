@@ -4,38 +4,30 @@
 # report that work's status as Scry can read it, or, when nothing is left to
 # wait for, ask the session for a summary written into the conversation.
 #
-# Claude Code keeps a prompt cache with a time-to-live (an hour on this
-# account's plan; the payload says which). Every request refreshes it. A
-# session that goes idle — the user stepped away, the work paused on a
-# question — lets it run out, and the next request re-reads the whole context
-# at the full rate. An hour-old session with a large context is the expensive
-# case, and it is also the one where the most is lost if the session is
-# simply abandoned instead. A summary written in the last minutes of the warm
-# window costs one cached request and leaves the record at the end of the
-# transcript, where a /clear'd successor or a new window can find it.
+# Claude Code keeps a prompt cache with a time-to-live (the payload says how
+# long). Every request refreshes it. A session that goes idle — the user
+# stepped away, the work paused on a question — lets it run out, and the next
+# request re-reads the whole context at the full rate. An hour-old session
+# with a large context is the expensive case, and it is also the one where the
+# most is lost if the session is simply abandoned instead. A summary written
+# in the last minutes of the warm window costs one cached request and leaves
+# the record at the end of the transcript, where a /clear'd successor or a new
+# window can find it.
 #
-# WHAT SCRY DOES AND DOES NOT DO (Matt, 2026-09-13, approved "do what you think
-# is best"): "Scry is here to provide insight and information … make sure Scry
-# isn't doing too much compared to what the orchestrator should do with the
-# information. If it's deterministic and simple and reliable keep doing it; if
-# not, just tell the orchestrator you've got so many agents and here's their
-# status as far as I can tell." So this script reports facts read from file
-# metadata and the session judges them: no stored progress fingerprints, no
-# comparison between polls, no "stuck" verdict. (A fingerprint comparison was
-# tried and dropped: quiet workers fell out of the list before they were
-# compared, so its "no movement" was unreliable.) And: "Scry shouldn't say
-# anything about agent comms or ThreadTask or anything else" — its messages
-# name no other system.
+# WHAT SCRY DOES AND DOES NOT DO. Scry reports facts it can read
+# deterministically from file metadata, and the session judges them: no
+# stored progress fingerprints, no comparison between polls, no "stuck"
+# verdict. (A fingerprint comparison was tried and dropped: quiet workers fell
+# out of the list before they were compared, so its "no movement" did not
+# hold.) Its messages name no other system.
 #
-# THE SUMMARY IS INLINE (same decision): "Why does it need a file, why can't it
-# just write it inline … tell the next agent post-clear that it can go and get
-# it as needed … dispatch a Sonnet subagent to go back through the
-# transcript." "Put the session ID there in case I need to start a new window
-# and work off of that chat." Until 1.31.0 the request named a file under
+# THE SUMMARY IS INLINE: the session writes it as its reply, opening with the
+# session id so a new window can pick it up, and a successor reads it back
+# from the transcript when it needs it. Older versions named a file under
 # ~/.claude/scry/handoffs; nothing is written there any more, and what is
 # already there is left alone (it is the user's).
 #
-# How the pieces fit (designed with Codex, 2026-09-10):
+# How the pieces fit:
 #
 #   cache_deadline_statusline.sh  writes <session>.deadline — when the cache
 #                                 expires, from the only place Claude Code
@@ -52,16 +44,15 @@
 #                                 notification — that is what wakes an idle
 #                                 session.
 #
-# WHICH session (2026-09-13). Claude Code starts a plugin monitor once per
-# Claude process and freezes its environment, so CLAUDE_CODE_SESSION_ID is
-# the id the terminal LAUNCHED with. /clear starts a new session in the same
-# process and the monitor is not restarted (binary 2.1.270: monitors are
-# armed once per plugin:name key, no session in it). Before this change the
-# watcher kept following the launch id: session 60ef841d was cleared into
-# b1746f6b at 17:54 on 09-11, 60ef841d.state froze, b1746f6b sat "armed"
-# through a 36-hour idle and went cold at 13:56 on 09-13 with nothing asked.
-# Worse, the old id's frozen warm deadline fired a request for the wrong
-# session into the new one. So every poll resolves the CURRENT session:
+# WHICH session. Claude Code starts a plugin monitor once per Claude process
+# and freezes its environment, so CLAUDE_CODE_SESSION_ID is the id the
+# terminal LAUNCHED with. /clear starts a new session in the same process and
+# the monitor is not restarted (2.1.270: monitors are armed once per
+# plugin:name key, no session in it). Following the launch id leaves the new
+# session unwatched — it can sit armed through a long idle and go cold with
+# nothing asked — and lets the old id's frozen deadline fire a request meant
+# for the old session into the new one. So every poll resolves the CURRENT
+# session:
 #
 #   1. ~/.claude/sessions/$CLAUDE_PID.json `sessionId` — Claude Code's own
 #      per-process record, rewritten when /clear changes the id. Internal and
@@ -93,18 +84,17 @@
 #               `armed:<time>` — so fleet.sh can still say whether a summary
 #               was asked for.
 #
-# KEEP-ALIVE (Matt, 2026-09-13, approved: "go"). A subagent, workflow or
-# background shell that finishes wakes the session that started it. If that
-# session's cache went cold in the meantime, the wake re-reads everything: in
-# b1746f6b a workflow completion 2h08m after the last request wrote 289,347
-# cache tokens instead of reading them. A notification turn on a warm cache is
-# a cache read (62aa5e9f: read 125,092, wrote 749). So at the lead window,
-# while THIS session has unfinished work, the line printed is a keep-alive:
-# the roster and what its silence means. Any reply is the request that pushes
-# the deadline out another hour.
+# KEEP-ALIVE. A subagent, workflow or background shell that finishes wakes
+# the session that started it. If that session's cache went cold in the
+# meantime, the wake re-reads everything: a workflow finishing two hours after
+# the last request writes the whole context to cache again (hundreds of
+# thousands of tokens), where the same notification on a warm cache is a
+# cache read. So at the lead window, while THIS session has unfinished work,
+# the line printed is a keep-alive: the roster and what its silence means.
+# Any reply is the request that pushes the deadline out another hour.
 #
 #   roster      every unfinished worker this session started, with what Scry
-#               can read deterministically from metadata:
+#               can read deterministically from metadata (roster.py):
 #                 workflow — a journal with an agent `started` and no
 #                   `result`: "<finished> of <started> agents done, last
 #                   activity <age> ago". Listed however long it has been
@@ -122,35 +112,32 @@
 #                   left out rather than reported as running.
 #               Agents and workflows are looked up under the current session,
 #               shell tasks under both the launch and the current session —
-#               that is where Claude Code files each (read 2026-09-13).
+#               that is where Claude Code files each.
 #   bounded     SCRY_KEEPALIVE_MAX (8) per user message; a new user message
 #               starts the count again (it is the signal the session is
-#               alive — Matt, 2026-09-22: no per-session ceiling, "that
-#               defeats the purpose"). Counted in <session>.keepalive
-#               BEFORE the line is printed.
+#               alive), and there is deliberately no per-session ceiling —
+#               one would end the keep-alive while the user is still working.
+#               Counted in <session>.keepalive BEFORE the line is printed.
 #   verified    one keep-alive per deadline. If the deadline has not moved
 #               half a lead later, the ack did not happen: ask for the summary.
-#   silent      (2026-10-10) when NOTHING listed has written for a whole
-#               cache TTL (SCRY_KEEPALIVE_FRESH_SECS — the one bound Scry
-#               already has, and the hour the previous keep-alive bought),
-#               the keep-alive says so instead of listing it as work to wait
-#               for: how long the silence is, that it is the only reason the
-#               session is still woken, that hung work never sends the
-#               notification the session is kept warm for, and that these are
-#               the session's own to look at. It says how many keep-alives in
-#               a row found the same, and after SCRY_KEEPALIVE_SILENT_MAX (3)
-#               of them the summary is requested instead. The count lives in
+#   silent      when NOTHING listed has written for a whole cache TTL
+#               (SCRY_KEEPALIVE_FRESH_SECS — the one bound Scry already has,
+#               and the hour the previous keep-alive bought), the keep-alive
+#               says so instead of listing it as work to wait for: how long
+#               the silence is, that it is the only reason the session is
+#               still woken, that hung work never sends the notification the
+#               session is kept warm for, and that these are the session's own
+#               to look at. It says how many keep-alives in a row found the
+#               same, and after SCRY_KEEPALIVE_SILENT_MAX (3) of them the
+#               summary is requested instead. The count lives in
 #               <session>.keepalive (`silent`) and is a number, not a
 #               fingerprint: each pass compares write times with the clock,
 #               never with an earlier pass. Scry does not say what a command
-#               is doing or what to do about it (Matt: "It's not scrys job to
-#               tell you exactly what's going on with them. It should give
-#               you insights along with its namesake and you can then run
-#               with it."). Why: on 2026-10-09 a session's three background
-#               commands hung on stdin; the old line said "still running …
-#               when that work finishes, its notification wakes this session"
-#               and asked for a status, so for eight hourly keep-alives the
-#               session answered "still waiting" and never looked.
+#               is doing or what to do about it. Why this exists: a line that
+#               says "still running … its notification wakes this session"
+#               and asks for a status gets "still waiting" back every hour
+#               from a session whose commands are hung on stdin, and the
+#               session never looks.
 #
 # When nothing is unfinished, a cap is reached, or a keep-alive did not take,
 # the summary is requested: written as the session's reply in the
@@ -163,8 +150,10 @@
 # labels from metadata, and the last 64 bytes of a shell task's output for its
 # exit marker, which is never emitted.
 #
-# SCRY_CACHE_HANDOFF=0 disables it (monitor exits at once). Claude only —
-# Codex has no monitor equivalent as of 2026-09-10.
+# Tuning: SCRY_CACHE_HANDOFF_LEAD_SECONDS (120) is the lead window,
+# SCRY_CACHE_HANDOFF_POLL_SECONDS (15) the poll gap. SCRY_CACHE_HANDOFF=0
+# disables it (monitor exits at once). Claude only — Codex has no monitor
+# equivalent.
 set -uo pipefail
 
 if [ "${SCRY_CACHE_HANDOFF:-1}" = "0" ]; then

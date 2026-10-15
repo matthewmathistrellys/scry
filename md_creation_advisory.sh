@@ -10,9 +10,7 @@
 # It states two facts and stops. The file is not one this repo's conventions
 # expect, and scratch Markdown written this session may be cleared out when the
 # session ends. Which of several homes the content "belongs" in is not a fact
-# this hook can check, and it used to say it anyway — that framing was cut
-# 2026-09-09 as moralizing, along with the client detection that existed only
-# to gate its one client-specific line.
+# this hook can check, so it does not say one.
 #
 # Exemptions live in md_exemptions.sh — one list, in one place.
 #

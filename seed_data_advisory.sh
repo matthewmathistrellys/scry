@@ -6,9 +6,8 @@
 # a seed usually runs once against an empty database and is rarely kept
 # current as records are edited live, and fixtures and factories hold values
 # built for tests. A code search that finds nothing proves nothing about rows
-# in a database either. (Born 2026-09-24: a session searched the code, found a
-# document kind missing from the seed file, and told the user it did not
-# exist. It had been in the database all along.)
+# in a database either: a record missing from the seed file can have been in
+# the database all along.
 #
 # Three moments, each an insight, never an instruction:
 #   - a Read of a seed or test-data file;

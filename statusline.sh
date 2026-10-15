@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # statusline.sh — Scry's whole status line for Claude Code.
 #
-# One bar, read left to right from slow-moving to fast-moving (Matt,
-# 2026-09-10: "usage for the week, usage for the session in context, and
-# current cache"):
+# One bar, read left to right from slow-moving to fast-moving: the repo, the
+# week's usage, the session's context, the current cache.
 #
 #   scry  3 uncommitted  2 unpushed  pins 4!  Fable 5.1  $4.20  👥 3  🗓️ 64% Wed  🌕 42k/200k  ♻️ 39m
 #
@@ -37,14 +36,13 @@
 #                   Hidden at zero
 #   🗓️ 64% Wed      the seven-day window, used percent and the day it resets;
 #                   yellow from 70, red from 90. The five-hour window and any
-#                   pace multiplier are deliberately absent: the multiplier
-#                   worktrunk showed was used ÷ elapsed, gated by a Bayesian
-#                   model that hid and re-showed it and switched windows
-#                   silently (Matt: "never seems 100% right"). This is the
-#                   same number the Anthropic app shows
+#                   pace multiplier are deliberately absent: a multiplier is a
+#                   model's estimate that can hide, reappear and switch windows
+#                   without saying so, while this is the same number the
+#                   Anthropic app shows
 #   🌕 42k/200k     context: total input tokens over the window size, moon
-#                   phase by percent used (worktrunk's thresholds: 🌕 to 51,
-#                   🌔 to 77, 🌓 to 90, 🌒 to 97, 🌑 after)
+#                   phase by percent used (🌕 to 51, 🌔 to 77, 🌓 to 90,
+#                   🌒 to 97, 🌑 after)
 #   ♻️ 39m          the prompt-cache segment, from cache_deadline_statusline.sh,
 #                   which also writes the deadline record the handoff monitor
 #                   reads. Nothing here duplicates that
@@ -58,8 +56,6 @@
 # Nothing else. No prompt or response text is ever read (AGENTS.md).
 #
 # Install: point statusLine.command at this file (README, Install).
-# Dropped from worktrunk's bar on purpose (2026-09-10): the fish-style path,
-# the ?^| glyph string, the line diff against LOCAL main, the 5h window.
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

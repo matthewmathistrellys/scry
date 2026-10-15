@@ -9,9 +9,9 @@
 # module. A claim that reaches wider — other modules, the pipeline, production
 # behavior, "the system always/never" — is stricken: not merely stale-able but
 # categorically inadmissible, because the file has no authority over what it
-# describes. (Born 2026-08-27: a moduledoc's "the pipeline is text-only"
-# claim, wrong for weeks, was re-asserted by four sessions in a row while the
-# disproving sibling module sat two files away.)
+# describes. The failure it guards against: a moduledoc's claim about the
+# whole pipeline drifts, and session after session repeats it while the
+# sibling module that contradicts it sits a few files away.
 #
 # Fires on every Read of a source file (.ex, .exs, .py) and injects the
 # doctrine at the exact moment the prose enters a session's context.

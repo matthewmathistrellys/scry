@@ -9,12 +9,13 @@
 # The cache is time-to-live: every request pushes the expiry forward, and an
 # idle session lets it run out. The ONLY place Claude Code reports when that
 # happens is the status-line payload (`prompt_cache.expires_at`, verified
-# against the 2.1.267 binary on 2026-09-10) — no hook event carries it, and
-# no plugin can install a status line (settings.json is the user's). So this
-# is a wrapper the user points `statusLine.command` at, once. It keeps only
-# the deadline metadata and passes everything else straight through.
+# against the 2.1.267 binary) — no hook event carries it, and no plugin can
+# install a status line (settings.json is the user's). So this is a wrapper
+# the user points `statusLine.command` at, once. It keeps only the deadline
+# metadata and passes everything else straight through.
 #
-# What it stores, per session, in a file keyed on session_id:
+# What it stores, per session, in a file keyed on session_id under
+# SCRY_CACHE_STATE_DIR:
 #   observed_at, warm, ttl, expires_at, requests — numbers and one boolean —
 #   and tab, the colour last sent to the tab (none, yellow, red).
 # Nothing else from the payload is read or kept (AGENTS.md: metadata, not
@@ -27,20 +28,15 @@
 # bar. Any failure here degrades to "no deadline recorded", never to a
 # broken status line.
 #
-# The segment (Matt, 2026-09-10: "the TTL thing is critically important …
-# have that at the bottom"; later that day: no "cache 1h" label, icon then a
-# space like worktrunk's own segments, fire while warm, snowflake once cold,
-# no middle icon — "KISS" — the colour carries the warning. 2026-09-27: the
-# icons became reuse and discard — fire read as red, the tab's colour for
-# expired — and cold turned red to match the tab):
+# The segment — an icon, a space, a number; the colour carries the warning,
+# and red is the same colour tab_colour.sh gives a cold tab:
 #   ♻️ 43m            default text; warm, minutes until it goes cold
 #   ♻️ 4m ~150k       yellow; warm but inside the last ten minutes. The
 #                     number is what the next request re-reads at the full
 #                     rate if nobody speaks before then
 #   🗑️ ~150k          red; expired. The next request pays that re-read no matter
 #                     what — /compact included, since the summary request
-#                     reads the same history (prompt-caching reference, read
-#                     2026-09-10)
+#                     reads the same history (Claude Code prompt-caching docs)
 # Claude Code re-runs the status line when a warm cache reaches expires_at,
 # so 🗑️ appears on time; the minute count only ticks between events unless
 # statusLine.refreshInterval is set (README, Install).

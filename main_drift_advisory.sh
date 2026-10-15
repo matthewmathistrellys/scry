@@ -10,12 +10,12 @@
 # subagent", Claude Code 2.1.266), which is why this check lives here rather
 # than being folded into health.sh.
 #
-# Born 2026-09-09. A session dispatched subagents to describe another repo's
-# architecture. The dispatch brief hard-coded a checkout path and never
-# mentioned origin/main; that checkout's local main was 427 commits and 14
-# days behind. The agents grepped a working tree in which a whole pipeline
-# stage did not yet exist, and reported a 5-stage pipeline that has 6. Nothing
-# failed, nothing was flagged, and the wrong architecture was the deliverable.
+# The incident it answers: subagents were sent to describe a repo's
+# architecture from a checkout whose local main was hundreds of commits and
+# two weeks behind. They grepped a working tree in which a whole pipeline
+# stage did not yet exist, and reported a 5-stage pipeline that has 6.
+# Nothing failed, nothing was flagged, and the drifted architecture was the
+# deliverable.
 #
 # What makes that failure silent is that absence looks identical to
 # non-existence: a file added upstream since the local tip is simply not on
@@ -32,8 +32,10 @@
 #     session; a fetch on a subagent-spawn path would put network latency in
 #     front of every dispatch. Missing refs mean silence, not a fetch.
 #   - Never mutates. No merge, no checkout, no ref update — an automatic
-#     `git merge --ff-only origin/main` was removed on 2026-09-06 (PR #11) and
-#     is not coming back through this door.
+#     `git merge --ff-only origin/main` was removed in PR #11 and is not
+#     coming back through this door.
+#   - Escalates past SCRY_SUBAGENT_STALE_DAYS (7) or SCRY_SUBAGENT_STALE_COMMITS
+#     (50) behind.
 #
 # agent_type: no exemptions. Every agent type that can read files can read a
 # stale one, and the built-in Explore agent — a heavy searcher whose entire
