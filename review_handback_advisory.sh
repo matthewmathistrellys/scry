@@ -70,7 +70,7 @@ note = (
     "(a new guard, retry or check for a danger nobody has shown) has no evidence behind "
     "it, and building it adds a moving part. Once someone shows it, it becomes a defect. "
     "AI reviewers are least reliable on the functional kind: in one study of 31,000 "
-    "comments, 35% of their functional comments were rejected as invalid, against 25% of "
+    "comments, 35% of their functional comments were rejected, against 25% of "
     "their maintainability comments. A defect claim is therefore cheap to confirm before "
     "the fix is written. A reviewer's \"smallest fix\" for a worry it labels unconfirmed "
     "repairs nothing that has been shown to be broken."
