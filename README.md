@@ -1228,6 +1228,14 @@ It is silent for Markdown, for paths under `$TMPDIR`, `/tmp/` or a
 | Claims about another module were false 15.7% of the time, against 4.7% for claims about the file's own code; comments that restate the code were stale about 3% of the time | Measured 2026-10-14 on 20,516 comment blocks in trellys-app and Scry |
 | Comments should say why and what the code cannot, not restate it or carry its history | Style-guide consensus: Google C++ and Python guides, PEP 8, Go, Rust, Ousterhout |
 
+Live test, 2026-10-15: agents were given a small real task (document the main
+function) on copies of six real engine files, 3 runs each with the hook on and
+3 with it off. With the hook, 4 of 18 runs also removed names and dates from
+comments already in the file and kept the reasons; with it off, 0 of 18. No run
+changed code. An earlier wording made agents replace a true reference to another
+module with a vague one in 3 of 3 runs on one file; the sentence about a
+reference that still holds brought that to 1 of 3.
+
 ## Tuning
 
 Every threshold is an environment variable. Defaults are set where the number

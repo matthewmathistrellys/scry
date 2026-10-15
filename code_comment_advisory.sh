@@ -169,7 +169,9 @@ SENTENCE = {
     "other": "A claim about another module or file is falsified by an edit made "
              "elsewhere; in one codebase such claims were wrong about one time in "
              "six, three times the rate for claims about the file's own code. "
-             "Whether one still holds is a search for what it names.",
+             "Whether one still holds is a search for what it names; one that still "
+             "holds tells the next reader exactly where to look, and that is lost "
+             "when it is made vague.",
     "history": "A name, a date or the story of a decision reads later as a standing "
                "rule nobody can check from the code, and stays the same when the "
                "decision changes; git and the pull request already hold who and when.",
@@ -232,7 +234,7 @@ parts += [SENTENCE[k] for k in found]
 parts.append(
     "What lasts is what the code cannot show: the why, an invariant, a unit, a "
     "failure mode, a deliberate choice, and the measured fact behind it. Those "
-    "read the same without the name, the date or the far-off reference, and "
+    "read the same without the name or the date, and "
     "comments that plainly restate the code are rarely wrong.")
 
 os.makedirs(marker_dir, exist_ok=True)
