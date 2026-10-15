@@ -2798,119 +2798,196 @@ class ReviewHandbackAdvisoryTests(unittest.TestCase):
         self.assertEqual(context(result), "")
 
 
-class CommentHistoryAdvisoryTests(unittest.TestCase):
-    """An edit adds a name, a date or an incident story to a comment.
+class CodeCommentAdvisoryTests(unittest.TestCase):
+    """An edit adds comment or doc text to a source file. The note always says
+    what keeps a comment true, and adds a sentence for each flagged kind found
+    in the added text or already in the file."""
 
-    Measured on one week of transcripts: 38 of 85 code edits that added
-    comment text did so, and all were shipped as written.
-    """
+    LEAD_PLAIN = "Scry: this edit adds comment text."
+    CLOSE = "What lasts is what the code cannot show"
+    HISTORY = "git and the pull request already hold who and when"
+    OTHER = "Whether one still holds is a search for what it names."
 
     def setUp(self):
         td = tempfile.TemporaryDirectory()
         self.addCleanup(td.cleanup)
-        self.state = Path(td.name)
+        self.state = Path(td.name) / "state"
+        self.work = Path(td.name) / "work"
+        self.state.mkdir()
+        self.work.mkdir()
 
-    def _run(self, tool, tool_input, session="ch-1"):
+    def _run(self, tool, tool_input, session="cc-1"):
         payload = {"session_id": session, "hook_event_name": "PostToolUse",
                    "tool_name": tool, "tool_input": tool_input}
-        return run_hook("comment_history_advisory.sh", "/",
+        return run_hook("code_comment_advisory.sh", "/",
                         payload, env={"TMPDIR": str(self.state)})
 
-    def _edit(self, path, new, old="x = 1\n", session="ch-1"):
+    def _edit(self, path, new, old="x = 1\n", session="cc-1"):
         return context(self._run("Edit", {"file_path": path, "old_string": old,
                                           "new_string": new}, session))
 
     def _write(self, path, content):
         return context(self._run("Write", {"file_path": path, "content": content}))
 
-    def assertFires(self, note):
-        self.assertIn("names who decided or asked, a date, or the story", note)
-        self.assertIn("git and the pull request already hold who and when", note)
+    def assertHistory(self, note):
+        self.assertIn("carries a name, a date or the story of a decision", note)
+        self.assertIn(self.HISTORY, note)
+        self.assertIn(self.CLOSE, note)
 
-    # Fires
+    # History in the added text
 
     def test_a_name_and_date_tag_in_a_shell_comment(self):
-        self.assertFires(self._edit("/work/ops/run.sh",
-                                    '# (Matt, 2026-10-07: "pull the calls")\nx = 1\n'))
+        note = self._edit("/work/ops/run.sh", '# (Matt, 2026-10-07: "pull the calls")\nx = 1\n')
+        self.assertTrue(note.startswith("Scry: comment text this edit added carries"), note)
+        self.assertHistory(note)
 
     def test_a_secondhand_name_in_a_moduledoc(self):
         content = ('defmodule App.Models do\n  @moduledoc """\n'
                    "  Calls go to one model (Matt via the orchestrator, 2026-10-08).\n"
                    '  """\nend\n')
-        self.assertFires(self._write("/work/app/lib/models.ex", content))
+        self.assertHistory(self._write("/work/app/lib/models.ex", content))
 
     def test_a_dated_docstring_line(self):
         content = ('def f():\n    """\n    WHY THIS EXISTS (2026-10-09). Two cases need it.\n'
                    '    """\n    return 1\n')
-        self.assertFires(self._write("/work/app/check.py", content))
-
-    def test_a_measurement_with_its_date(self):
-        self.assertFires(self._edit(
-            "/work/app/lib/poll.ex",
-            "# The call can hit the 4 s ceiling on 2 of 10 tries, 2026-10-14.\nx = 1\n"))
+        self.assertHistory(self._write("/work/app/check.py", content))
 
     def test_an_incident_story_without_a_date(self):
-        self.assertFires(self._edit(
+        self.assertHistory(self._edit(
             "/work/app/lib/tenant.ex",
             "# Born from the tenant-16 incident, where two jobs ran at once.\nx = 1\n"))
 
     def test_a_multiedit_whose_second_edit_adds_a_per_name(self):
         edits = [{"old_string": "a = 1", "new_string": "a = 2"},
                  {"old_string": "b = 1", "new_string": "# per Matt, keep acronyms\nb = 1"}]
-        self.assertFires(context(self._run("MultiEdit", {"file_path": "/work/app/names.py",
-                                                         "edits": edits})))
+        self.assertHistory(context(self._run("MultiEdit", {"file_path": "/work/app/names.py",
+                                                           "edits": edits})))
 
     def test_a_test_file_is_not_excluded(self):
-        self.assertFires(self._edit(
+        self.assertHistory(self._edit(
             "/work/app/test/foo_test.exs",
             "# Matt, 2026-10-09: an acronym stays upper case.\nx = 1\n"))
 
-    # Silent
+    # Any comment text
 
-    def test_silent_when_the_tagged_line_was_already_there(self):
-        line = '# (Matt, 2026-10-07: "pull the calls")\n'
-        self.assertEqual(self._edit("/work/ops/run.sh", line + "x = 2\n",
-                                    old=line + "x = 1\n"), "")
+    def test_a_plain_why_comment_gets_the_plain_lead_and_the_close(self):
+        note = self._edit("/work/app/lib/poll.ex",
+                          "# Retries stop at three because the upstream lock expires.\nx = 1\n")
+        self.assertTrue(note.startswith(self.LEAD_PLAIN), note)
+        self.assertIn("takes a comment as true", note)
+        self.assertIn(self.CLOSE, note)
+        self.assertNotIn(self.HISTORY, note)
+        self.assertNotIn(self.OTHER, note)
 
-    def test_silent_for_a_doctest_date(self):
+    def test_a_doctest_date_is_not_history(self):
         content = ('defmodule App.Log do\n  @doc """\n'
                    "      iex> log_name(:cleanup, ~U[2026-10-12 21:05:09Z])\n"
                    '  """\n  def log_name(_, _), do: :ok\nend\n')
-        self.assertEqual(self._write("/work/app/lib/log.ex", content), "")
+        self.assertTrue(self._write("/work/app/lib/log.ex", content).startswith(self.LEAD_PLAIN))
 
-    def test_silent_for_a_date_inside_a_path(self):
-        self.assertEqual(self._edit(
-            "/work/app/lib/checks.ex",
-            "# See docs/plans/2026-08-17-disbursement-check-tracking.md\nx = 1\n"), "")
+    def test_a_date_inside_a_path_is_not_history(self):
+        note = self._edit("/work/app/lib/checks.ex",
+                          "# Plan lives at docs/plans/2026-08-17-disbursement-check-tracking.md\nx = 1\n")
+        self.assertTrue(note.startswith(self.LEAD_PLAIN), note)
+
+    def test_per_and_an_acronym_is_not_history(self):
+        note = self._edit("/work/ops/run.sh", "# Per AGENTS.md this exits zero\nx = 1\n")
+        self.assertNotIn(self.HISTORY, note)
+
+    def test_a_normative_word_is_not_a_kind(self):
+        note = self._edit("/work/app/lib/lock.ex",
+                          "# The lock must never be held across a call out.\nx = 1\n")
+        self.assertTrue(note.startswith(self.LEAD_PLAIN), note)
+
+    # Another module or file
+
+    def test_a_named_function_elsewhere_adds_the_other_file_sentence(self):
+        note = self._edit("/work/app/lib/invoice.ex", "# see Billing.charge/2\nx = 1\n")
+        self.assertTrue(note.startswith(
+            "Scry: comment text this edit added makes claims about another module or file."), note)
+        self.assertIn(self.OTHER, note)
+        self.assertIn(self.CLOSE, note)
+
+    def test_another_file_name_counts(self):
+        self.assertIn(self.OTHER, self._edit("/work/app/lib/reader.ex",
+                                             "# The order matches writer.ex.\nx = 1\n"))
+
+    def test_the_files_own_module_is_not_another(self):
+        content = ("defmodule App.Billing.Invoice do\n"
+                   "  # App.Billing.Invoice.total/1 sums the lines; App.Billing groups them.\n"
+                   "  def total(lines), do: Enum.sum(lines)\nend\n")
+        note = self._write("/work/app/lib/invoice.ex", content)
+        self.assertTrue(note.startswith(self.LEAD_PLAIN), note)
+
+    def test_a_library_function_is_not_another_module(self):
+        note = self._edit("/work/app/lib/sum.ex", "# Enum.reduce/3 keeps the order.\nx = 1\n")
+        self.assertTrue(note.startswith(self.LEAD_PLAIN), note)
+
+    # Already in the file
+
+    def test_existing_dated_tags_with_an_added_plain_comment(self):
+        path = self.work / "run.py"
+        path.write_text("# (Matt, 2026-10-07) pull the calls\n"
+                        "a = 1\n\n"
+                        "# Born from the outage of the week before.\n"
+                        "# Second line of the same block.\n"
+                        "b = 2\n"
+                        "# A plain reason added now.\nc = 3\n")
+        note = self._edit(str(path), "# A plain reason added now.\nc = 3\n", old="c = 3\n")
+        self.assertTrue(note.startswith(
+            "Scry: comment text already in this file (2 comments) carries a name, "
+            "a date or the story of a decision."), note)
+        self.assertIn(self.HISTORY, note)
+
+    def test_added_and_existing_both_flagged(self):
+        path = self.work / "both.ex"
+        path.write_text("defmodule App.Both do\n  # (Matt, 2026-10-07) old tag\n"
+                        "  # see Billing.charge/2\n  def f, do: 1\nend\n")
+        note = self._edit(str(path), "  # see Billing.charge/2\n  def f, do: 1\n",
+                          old="  def f, do: 1\n")
+        self.assertTrue(note.startswith(
+            "Scry: comment text this edit added, and already in this file (1 comment), "
+            "makes claims about another module or file and carries a name"), note)
+        self.assertIn(self.OTHER, note)
+        self.assertIn(self.HISTORY, note)
+
+    # Silent
+
+    def test_silent_for_a_code_only_edit_even_with_tags_in_the_file(self):
+        path = self.work / "tagged.sh"
+        path.write_text("# (Matt, 2026-10-07) pull the calls\nx = 2\n")
+        self.assertEqual(self._edit(str(path), "x = 2\n"), "")
+
+    def test_silent_when_the_comment_line_was_already_there(self):
+        line = "# A plain reason.\n"
+        self.assertEqual(self._edit("/work/ops/run.sh", line + "x = 2\n",
+                                    old=line + "x = 1\n"), "")
+
+    def test_silent_for_a_date_in_code_with_no_comment(self):
+        self.assertEqual(self._edit("/work/app/cut.py", 'CUTOFF = "2026-10-14"\n'), "")
 
     def test_silent_for_markdown(self):
         self.assertEqual(self._write("/work/app/NOTES.md",
                                      "# History\n(Matt, 2026-10-07) decided this.\n"), "")
 
     def test_silent_under_tmpdir_or_a_scratchpad(self):
-        line = "# (Matt, 2026-10-07) pull the calls\nx = 1\n"
+        line = "# A plain reason.\nx = 1\n"
         self.assertEqual(self._edit(str(self.state / "work" / "run.sh"), line), "")
         self.assertEqual(self._edit("/work/scratchpad/probe.py", line), "")
         self.assertEqual(self._edit("/tmp/probe.py", line), "")
 
-    def test_silent_for_a_date_in_code_with_no_comment(self):
-        self.assertEqual(self._edit("/work/app/cut.py", 'CUTOFF = "2026-10-14"\n'), "")
-
-    def test_silent_for_per_and_an_acronym(self):
-        self.assertEqual(self._edit("/work/ops/run.sh",
-                                    "# Per AGENTS.md this exits zero\nx = 1\n"), "")
-
-    def test_once_per_file_per_session(self):
+    def test_once_per_file_per_session_marked_only_when_said(self):
         path = "/work/ops/run.sh"
-        self.assertNotEqual(self._edit(path, "# (Matt, 2026-10-07) one\nx = 1\n"), "")
-        self.assertEqual(self._edit(path, "# (Matt, 2026-10-08) two\nx = 1\n"), "")
-        self.assertNotEqual(self._edit("/work/ops/other.sh", "# (Matt, 2026-10-08) two\n"), "")
-        self.assertNotEqual(self._edit(path, "# (Matt, 2026-10-08) two\n", session="ch-2"), "")
+        self.assertEqual(self._edit(path, "x = 2\n"), "")
+        self.assertNotEqual(self._edit(path, "# one\nx = 1\n"), "")
+        self.assertEqual(self._edit(path, "# two\nx = 1\n"), "")
+        self.assertNotEqual(self._edit("/work/ops/other.sh", "# two\n"), "")
+        self.assertNotEqual(self._edit(path, "# two\n", session="cc-2"), "")
 
     def test_it_never_fails_on_a_bad_payload(self):
         for raw in ("not json", "{}", '{"tool_name": "Edit"}',
                     '{"tool_name": "Edit", "tool_input": null}', "[]"):
-            result = subprocess.run(["bash", str(ROOT / "comment_history_advisory.sh")],
+            result = subprocess.run(["bash", str(ROOT / "code_comment_advisory.sh")],
                                     input=raw, text=True, capture_output=True,
                                     env={**os.environ, "TMPDIR": str(self.state)})
             self.assertEqual(result.returncode, 0, raw)
@@ -2919,8 +2996,10 @@ class CommentHistoryAdvisoryTests(unittest.TestCase):
     def test_registered_after_edit_write_and_multiedit(self):
         groups = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]["PostToolUse"]
         matchers = [g.get("matcher") for g in groups
-                    if any("comment_history_advisory.sh" in h["command"] for h in g["hooks"])]
+                    if any("code_comment_advisory.sh" in h["command"] for h in g["hooks"])]
         self.assertEqual(matchers, ["Edit|Write|MultiEdit"])
+        self.assertNotIn("comment_history_advisory.sh",
+                         (ROOT / "hooks/hooks.json").read_text())
 
 
 class CacheHandoffTests(unittest.TestCase):
