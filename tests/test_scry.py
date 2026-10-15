@@ -2798,6 +2798,131 @@ class ReviewHandbackAdvisoryTests(unittest.TestCase):
         self.assertEqual(context(result), "")
 
 
+class CommentHistoryAdvisoryTests(unittest.TestCase):
+    """An edit adds a name, a date or an incident story to a comment.
+
+    Measured on one week of transcripts: 38 of 85 code edits that added
+    comment text did so, and all were shipped as written.
+    """
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.state = Path(td.name)
+
+    def _run(self, tool, tool_input, session="ch-1"):
+        payload = {"session_id": session, "hook_event_name": "PostToolUse",
+                   "tool_name": tool, "tool_input": tool_input}
+        return run_hook("comment_history_advisory.sh", "/",
+                        payload, env={"TMPDIR": str(self.state)})
+
+    def _edit(self, path, new, old="x = 1\n", session="ch-1"):
+        return context(self._run("Edit", {"file_path": path, "old_string": old,
+                                          "new_string": new}, session))
+
+    def _write(self, path, content):
+        return context(self._run("Write", {"file_path": path, "content": content}))
+
+    def assertFires(self, note):
+        self.assertIn("names who decided or asked, a date, or the story", note)
+        self.assertIn("git and the pull request already hold who and when", note)
+
+    # Fires
+
+    def test_a_name_and_date_tag_in_a_shell_comment(self):
+        self.assertFires(self._edit("/work/ops/run.sh",
+                                    '# (Matt, 2026-10-07: "pull the calls")\nx = 1\n'))
+
+    def test_a_secondhand_name_in_a_moduledoc(self):
+        content = ('defmodule App.Models do\n  @moduledoc """\n'
+                   "  Calls go to one model (Matt via the orchestrator, 2026-10-08).\n"
+                   '  """\nend\n')
+        self.assertFires(self._write("/work/app/lib/models.ex", content))
+
+    def test_a_dated_docstring_line(self):
+        content = ('def f():\n    """\n    WHY THIS EXISTS (2026-10-09). Two cases need it.\n'
+                   '    """\n    return 1\n')
+        self.assertFires(self._write("/work/app/check.py", content))
+
+    def test_a_measurement_with_its_date(self):
+        self.assertFires(self._edit(
+            "/work/app/lib/poll.ex",
+            "# The call can hit the 4 s ceiling on 2 of 10 tries, 2026-10-14.\nx = 1\n"))
+
+    def test_an_incident_story_without_a_date(self):
+        self.assertFires(self._edit(
+            "/work/app/lib/tenant.ex",
+            "# Born from the tenant-16 incident, where two jobs ran at once.\nx = 1\n"))
+
+    def test_a_multiedit_whose_second_edit_adds_a_per_name(self):
+        edits = [{"old_string": "a = 1", "new_string": "a = 2"},
+                 {"old_string": "b = 1", "new_string": "# per Matt, keep acronyms\nb = 1"}]
+        self.assertFires(context(self._run("MultiEdit", {"file_path": "/work/app/names.py",
+                                                         "edits": edits})))
+
+    def test_a_test_file_is_not_excluded(self):
+        self.assertFires(self._edit(
+            "/work/app/test/foo_test.exs",
+            "# Matt, 2026-10-09: an acronym stays upper case.\nx = 1\n"))
+
+    # Silent
+
+    def test_silent_when_the_tagged_line_was_already_there(self):
+        line = '# (Matt, 2026-10-07: "pull the calls")\n'
+        self.assertEqual(self._edit("/work/ops/run.sh", line + "x = 2\n",
+                                    old=line + "x = 1\n"), "")
+
+    def test_silent_for_a_doctest_date(self):
+        content = ('defmodule App.Log do\n  @doc """\n'
+                   "      iex> log_name(:cleanup, ~U[2026-10-12 21:05:09Z])\n"
+                   '  """\n  def log_name(_, _), do: :ok\nend\n')
+        self.assertEqual(self._write("/work/app/lib/log.ex", content), "")
+
+    def test_silent_for_a_date_inside_a_path(self):
+        self.assertEqual(self._edit(
+            "/work/app/lib/checks.ex",
+            "# See docs/plans/2026-08-17-disbursement-check-tracking.md\nx = 1\n"), "")
+
+    def test_silent_for_markdown(self):
+        self.assertEqual(self._write("/work/app/NOTES.md",
+                                     "# History\n(Matt, 2026-10-07) decided this.\n"), "")
+
+    def test_silent_under_tmpdir_or_a_scratchpad(self):
+        line = "# (Matt, 2026-10-07) pull the calls\nx = 1\n"
+        self.assertEqual(self._edit(str(self.state / "work" / "run.sh"), line), "")
+        self.assertEqual(self._edit("/work/scratchpad/probe.py", line), "")
+        self.assertEqual(self._edit("/tmp/probe.py", line), "")
+
+    def test_silent_for_a_date_in_code_with_no_comment(self):
+        self.assertEqual(self._edit("/work/app/cut.py", 'CUTOFF = "2026-10-14"\n'), "")
+
+    def test_silent_for_per_and_an_acronym(self):
+        self.assertEqual(self._edit("/work/ops/run.sh",
+                                    "# Per AGENTS.md this exits zero\nx = 1\n"), "")
+
+    def test_once_per_file_per_session(self):
+        path = "/work/ops/run.sh"
+        self.assertNotEqual(self._edit(path, "# (Matt, 2026-10-07) one\nx = 1\n"), "")
+        self.assertEqual(self._edit(path, "# (Matt, 2026-10-08) two\nx = 1\n"), "")
+        self.assertNotEqual(self._edit("/work/ops/other.sh", "# (Matt, 2026-10-08) two\n"), "")
+        self.assertNotEqual(self._edit(path, "# (Matt, 2026-10-08) two\n", session="ch-2"), "")
+
+    def test_it_never_fails_on_a_bad_payload(self):
+        for raw in ("not json", "{}", '{"tool_name": "Edit"}',
+                    '{"tool_name": "Edit", "tool_input": null}', "[]"):
+            result = subprocess.run(["bash", str(ROOT / "comment_history_advisory.sh")],
+                                    input=raw, text=True, capture_output=True,
+                                    env={**os.environ, "TMPDIR": str(self.state)})
+            self.assertEqual(result.returncode, 0, raw)
+            self.assertEqual(result.stdout, "", raw)
+
+    def test_registered_after_edit_write_and_multiedit(self):
+        groups = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]["PostToolUse"]
+        matchers = [g.get("matcher") for g in groups
+                    if any("comment_history_advisory.sh" in h["command"] for h in g["hooks"])]
+        self.assertEqual(matchers, ["Edit|Write|MultiEdit"])
+
+
 class CacheHandoffTests(unittest.TestCase):
     """One summary request per user-work cycle, shortly before the prompt
     cache goes cold, and only a user message re-arms it (designed with Codex,
