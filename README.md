@@ -755,7 +755,7 @@ industrialise that problem.
 | Open PRs | none, or `gh` unavailable | any open PR exists |
 | Pull request about to open | any command but `gh pr create`; under 10 changed lines; only prose changed; already said for this branch this session | once: lines and files changed, then what the research shows about a second reader and its findings |
 | Subagent report comes back | not a subagent hand-back; the report does not read as a review | the kinds of finding a review returns (defect, quality, speculative) and how each is settled |
-| Code comment written | not a source file; Markdown; under `$TMPDIR`, `/tmp/` or a `scratchpad/` directory; the edit adds no comment or doc text, whatever the file already holds; already said for this file this session | once per file: what keeps a comment true, plus a sentence for a claim about another module or file, or a name, a date or a story, in the added text or already in the file |
+| Code comment written | not a source file; Markdown; under `$TMPDIR`, `/tmp/` or a `scratchpad/` directory; the edit adds no comment or doc text, whatever the file already holds; already said for this file this session | once per file: what keeps a comment in step with its code, plus a sentence for a comment about another module or file, or a name, a date or a story, in the added text or already in the file |
 | Pinned version with an advisory (session start) | none high or critical on a runtime dependency; or dev/test-only; or the branch itself changes that pin; or already said for this advisory set within the last day; or the start is a resume, clear or compact | one line, once: the count and up to three names |
 | Pinned version with an advisory (status line) | none high or critical on a runtime dependency | `pins N!` |
 | Edited dependency manifest | the file has no advisory and nothing behind; or already said for this file this session | that file's advisories and what in it is behind |
@@ -1173,7 +1173,7 @@ independent judges agreed. No note: 14% of should-not-build findings built,
 | Claim | Source |
 |---|---|
 | About 75% of review-driven changes are maintainability, 25% functional | Beller et al., MSR 2014; Mäntylä & Lassenius, TSE 2009 |
-| 35% of AI functional comments rejected as invalid, against 25% of maintainability comments | [arXiv 2607.03316](https://arxiv.org/abs/2607.03316) |
+| 35% of AI functional comments rejected, against 25% of maintainability comments | [arXiv 2607.03316](https://arxiv.org/abs/2607.03316) |
 
 OWNER DECISION (2026-10-14): this hook reads the text of a subagent's report,
 never a human message, and keeps nothing.
@@ -1183,9 +1183,9 @@ never a human message, and keeps nothing.
 A `PostToolUse` hook on `Edit`, `Write` and `MultiEdit` reads the lines an edit
 added to a source file (`.ex .exs .py .sh .ts .tsx .js .rb .go .heex .yml
 .yaml .toml`, tests included). When any of them is comment or doc text, Scry
-says what keeps a comment true for a later reader: a reader, human or model,
-takes a comment as true, wrong comments cost far more than missing ones, and
-almost all comment fixes ship in the same revision as the code beside them. It
+says what keeps a comment in step with its code for a later reader: a reader,
+human or model, relies on a comment as written, misleading comments cost far
+more than missing ones, and almost all comment updates ship in the same revision as the code beside them. It
 closes with what lasts: the why, an invariant, a unit, a failure mode, a
 deliberate choice, and the measured fact behind it. An edit that adds no
 comment text is silent, whatever comments the file already holds. It never
@@ -1199,7 +1199,7 @@ the comment blocks that carry one.
 - **Another module or file.** A dotted module name, a `Module.function/arity`
   or a source file name other than this file's own modules or name, leaving
   out common library modules (`Enum`, `Repo`, `Ecto` and the like). Such a
-  claim is falsified by an edit made elsewhere. On the 300 labelled blocks of
+  comment drifts when that other file changes. On the 300 labelled blocks of
   the profile sample, 39 of the 48 blocks the rule flagged (81%) were labelled
   as describing other modules; it finds 39 of the 105 such blocks.
 - **A name, a date or a story.** A name bound to a decision ("per Matt",
@@ -1232,9 +1232,9 @@ Live test, 2026-10-15: agents were given a small real task (document the main
 function) on copies of six real engine files, 3 runs each with the hook on and
 3 with it off. With the hook, 4 of 18 runs also removed names and dates from
 comments already in the file and kept the reasons; with it off, 0 of 18. No run
-changed code. An earlier wording made agents replace a true reference to another
-module with a vague one in 3 of 3 runs on one file; the sentence about a
-reference that still holds brought that to 1 of 3.
+changed code. An earlier wording made agents replace a precise, current reference
+to another module with a vague one in 3 of 3 runs on one file; the sentence about a
+reference that still matches brought that to 1 of 3.
 
 ## Tuning
 

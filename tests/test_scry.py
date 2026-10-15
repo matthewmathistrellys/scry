@@ -2800,7 +2800,7 @@ class ReviewHandbackAdvisoryTests(unittest.TestCase):
 
 class CodeCommentAdvisoryTests(unittest.TestCase):
     """An edit adds comment or doc text to a source file. The note always says
-    what keeps a comment true, and adds a sentence for each flagged kind found
+    what keeps a comment in step with its code, and adds a sentence for each flagged kind found
     in the added text or already in the file."""
 
     LEAD_PLAIN = "Scry: this edit adds comment text."
@@ -2874,7 +2874,7 @@ class CodeCommentAdvisoryTests(unittest.TestCase):
         note = self._edit("/work/app/lib/poll.ex",
                           "# Retries stop at three because the upstream lock expires.\nx = 1\n")
         self.assertTrue(note.startswith(self.LEAD_PLAIN), note)
-        self.assertIn("takes a comment as true", note)
+        self.assertIn("relies on a comment as written", note)
         self.assertIn(self.CLOSE, note)
         self.assertNotIn(self.HISTORY, note)
         self.assertNotIn(self.OTHER, note)
@@ -2904,7 +2904,7 @@ class CodeCommentAdvisoryTests(unittest.TestCase):
     def test_a_named_function_elsewhere_adds_the_other_file_sentence(self):
         note = self._edit("/work/app/lib/invoice.ex", "# see Billing.charge/2\nx = 1\n")
         self.assertTrue(note.startswith(
-            "Scry: comment text this edit added makes claims about another module or file."), note)
+            "Scry: comment text this edit added describes another module or file."), note)
         self.assertIn(self.OTHER, note)
         self.assertIn(self.CLOSE, note)
 
@@ -2947,7 +2947,7 @@ class CodeCommentAdvisoryTests(unittest.TestCase):
                           old="  def f, do: 1\n")
         self.assertTrue(note.startswith(
             "Scry: comment text this edit added, and already in this file (1 comment), "
-            "makes claims about another module or file and carries a name"), note)
+            "describes another module or file and carries a name"), note)
         self.assertIn(self.OTHER, note)
         self.assertIn(self.HISTORY, note)
 

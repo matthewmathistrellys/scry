@@ -162,16 +162,16 @@ def kinds(x):
 
 ORDER = ["other", "history"]
 PHRASE = {
-    "other": "makes claims about another module or file",
+    "other": "describes another module or file",
     "history": "carries a name, a date or the story of a decision",
 }
 SENTENCE = {
-    "other": "A claim about another module or file is falsified by an edit made "
-             "elsewhere; in one codebase such claims were wrong about one time in "
-             "six, three times the rate for claims about the file's own code. "
-             "Whether one still holds is a search for what it names; one that still "
-             "holds tells the next reader exactly where to look, and that is lost "
-             "when it is made vague.",
+    "other": "A comment about another module or file drifts when that file "
+             "changes, because the edit happens elsewhere; in one codebase such "
+             "comments had drifted from the code about one time in six, three times "
+             "the rate for comments about their own file. A search for what it names "
+             "shows whether it still matches; one that still matches tells the next "
+             "reader exactly where to look, and that is lost when it is made vague.",
     "history": "A name, a date or the story of a decision reads later as a standing "
                "rule nobody can check from the code, and stays the same when the "
                "decision changes; git and the pull request already hold who and when.",
@@ -224,18 +224,18 @@ else:
 
 parts = [
     lead,
-    "A later reader, human or model, takes a comment as true: in one test of 17 "
-    "models, plausible wrong comments cut accuracy by about a third, while in "
-    "another study missing documentation made no measurable difference. Almost "
-    "all comment fixes ship in the same revision as the code beside them, which "
-    "is what keeps a comment true.",
+    "A later reader, human or model, relies on a comment as written: in one test "
+    "of 17 models, plausible but misleading comments cut accuracy by about a "
+    "third, while in another study missing documentation made no measurable "
+    "difference. Almost all comment updates ship in the same revision as the code "
+    "beside them, which is what keeps a comment in step with its code.",
 ]
 parts += [SENTENCE[k] for k in found]
 parts.append(
     "What lasts is what the code cannot show: the why, an invariant, a unit, a "
     "failure mode, a deliberate choice, and the measured fact behind it. Those "
     "read the same without the name or the date, and "
-    "comments that plainly restate the code are rarely wrong.")
+    "comments that plainly restate the code rarely drift.")
 
 os.makedirs(marker_dir, exist_ok=True)
 open(marker, "w").close()
