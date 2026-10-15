@@ -2,22 +2,19 @@
 # review_handback_advisory.sh — UserPromptSubmit
 #
 # A subagent's report reaches its parent session as a turn of its own, and
-# Claude Code runs UserPromptSubmit for it before the session acts (tested live
-# 2026-10-14: a note added here was read on that same turn). When the report
-# reads as a review, this says what is known about the kinds of finding a
-# review returns and how each is settled.
-#
-# Observed 2026-10-12: a session sent an adverse reviewer, got back findings
-# each with a "smallest fix", and built all of them within minutes, including a
-# second "is this folder empty" check against a worry the reviewer itself
-# called an unconfirmed suspicion.
+# Claude Code runs UserPromptSubmit for it before the session acts (tested
+# live: a note added here is read on that same turn). When the report reads
+# as a review, this says what is known about the kinds of finding a review
+# returns and how each is settled. Without it, a session handed findings each
+# with a "smallest fix" tends to build every one, including guards against
+# worries the reviewer itself called unconfirmed.
 #
 # A report reads as a review when its wording says so: a line-leading
 # "Verdict", "smallest fix", "safe to merge/ship/run/build", "ready to build", a
 # Findings heading, "most serious first", or "blocker / must-fix / should-fix".
-# Measured 2026-10-14 on 239 hand-backs: 20 of 25 defect-hunting reviews caught,
-# 2 false alarms among 205 other reports. A small local model (Gemma 3 1B,
-# Qwen3 4B) and Haiku all did worse than this wording.
+# Measured on 239 hand-backs: 20 of 25 defect-hunting reviews caught, 2 false
+# alarms among 205 other reports. Small local models and Haiku classifying the
+# same reports did worse than this wording.
 #
 # The note text was chosen by a blind test on 169 real findings from 26 real
 # reviews, three runs each, scored on the 125 where two independent judges
@@ -25,11 +22,11 @@
 # have been built and acted on 83% of those that should; with this note, 3%
 # and 78%. Three other drafts did worse on one or both.
 #
-# OWNER DECISION (AGENTS.md, metadata not content; Matt, 2026-10-14): this
-# hook reads the text of a subagent's report. It reads only a prompt that opens
-# as a subagent hand-back, matches it against the wording above, and discards
-# it — never stored, never logged, never printed. A human message is never
-# read past its first bytes.
+# OWNER DECISION (AGENTS.md, metadata not content): this hook reads the text
+# of a subagent's report. It reads only a prompt that opens as a subagent
+# hand-back, matches it against the wording above, and discards it — never
+# stored, never logged, never printed. A human message is never read past its
+# first bytes.
 #
 # Exits zero always and never instructs.
 set -uo pipefail

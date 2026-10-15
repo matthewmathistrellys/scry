@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
 # fleet.sh — Claude Code / Codex SessionStart hook: answers "what else is
-# happening right now?" — the question no session can currently ask.
+# happening right now?" — the question no session can otherwise ask.
 #
 # Every agent session believes it is alone. It is told its directory and
 # its git state, and nothing at all about the other sessions editing the
 # same files on the same machine. That blindness is structural, not
-# careless: no session can yield to another it cannot see. On 2026-07-26
-# six Claude sessions and a Codex process were live on one laptop, five
-# of them in the same repo, three older than 36 hours — and the branch
-# sprawl that produced is documented in ~/Dev/CLAUDE.md.
+# careless: no session can yield to another it cannot see, and several
+# long-lived sessions in one repo produce branch sprawl nobody chose.
 #
-# Reports three things, all read locally, no network:
-#   1. Other Claude and Codex sessions live in this repo FAMILY (the repo
-#      and every one of
-#      its linked worktrees — they are one work stream, so a session in
-#      .worktrees/foo is a neighbour, not a stranger).
-#   2. Other agent CLIs on the box (Codex, Gemini, aider, ...) — they
-#      compete for the same files and the same 8 cores.
-#   3. What the previous session in THIS directory was doing, by title.
+# Reports, all read locally, no network (section numbers match the code):
+#   1.  Other Claude and Codex sessions live in this repo FAMILY — the repo
+#       and every one of its linked worktrees. They are one work stream, so
+#       a session in .worktrees/foo is a neighbour, not a stranger.
+#   1b. Subagents working in the family, attributed by the cwd they record
+#       for themselves and by the session that launched them.
+#   2.  Other agent CLIs on the box (Codex, Gemini, aider, ...) — they
+#       compete for the same files and the same cores.
+#   3.  What the previous session in THIS directory was doing, by title.
+#   4.  What THIS session started that has not finished (roster.py).
+#   1a. After /clear only: the session just left (below).
 #
-# On that third point: it emits the session TITLE only, never the last
+# On the third point: it emits the session TITLE only, never the last
 # prompt or a content summary. A title is a label and reads as a label.
 # Content from a session you cannot see reads as current context when it
 # may have been reversed an hour ago, and acting on it is worse than not
@@ -29,36 +30,26 @@
 # One case is different: `/clear`. Claude Code ends the session and starts
 # a new one (SessionStart fires with source "clear"), and the session just
 # left is the one the user was in seconds ago — same seat, same intent. The
-# live-window rule below hides exactly that session, because its transcript
-# was written moments ago, so the new session used to start knowing nothing
-# about where it came from (Matt, 2026-09-10: "the new one has no idea where
-# it just came from"). On "clear" this hook names that session — id, title,
-# what resuming it costs — and whether Scry's cache-deadline monitor asked it
-# for a summary before it went idle, read from Scry's own state file for that
-# session, never from the transcript. Since 1.31.0 that summary is written as
-# the session's last reply, not to a file (Matt, 2026-09-13: "tell the next
-# agent post-clear that it can go and get it as needed … dispatch a Sonnet
-# subagent to go back through the transcript"), so this hook says where to
-# look and never what it says. Which session that was comes
-# from clear_record.sh, written as the old session ended; with ten sessions
-# open the newest-transcript guess is wrong exactly when it matters, so the
-# guess is only a labelled fallback (council + Matt, 2026-09-10). Still no
-# prompts, no responses, no recipe: the facts, and the decision is the
-# reader's.
+# live-window rule below would hide exactly that session, because its
+# transcript was written moments ago. On "clear" this hook names that
+# session — id, title, what resuming it costs — and whether Scry's
+# cache-deadline monitor asked it for a summary before it went idle, read
+# from Scry's own state file for that session, never from the transcript.
+# That summary is the session's last reply, so this hook says where to look
+# and never what it says. Which session that was comes from clear_record.sh,
+# written as the old session ended; with many sessions open the
+# newest-transcript guess fails exactly when it matters, so the guess is only
+# a labelled fallback. Still no prompts, no responses, no recipe: the facts,
+# and the decision is the reader's.
 #
-# The fifth fact is what that session left RUNNING. A subagent, a workflow
-# agent or a background job does not stop when the session that launched it
-# is cleared — but its results have nowhere to land, because the session id
-# they would report to takes no more turns and the new session was never
-# told they exist. Until 2026-09-11 this hook made that worse rather than
-# better: section 1b saw those subagents, found their id was not this
-# session's, and reported them as "from other sessions" — which reads as
-# somebody else's work, and is the one reading that makes a reader start
-# the same job a second time. That is not hypothetical: on 2026-09-11 a
-# session cleared mid-build, could not see its own still-running builder,
-# launched a second one on the same branch, and the two collided on the
-# same PR (Matt, 2026-09-11). Attribution is the whole fix — the subagents
-# were always visible, they were just filed under the wrong owner.
+# On "clear" it also names what that session left RUNNING. A subagent, a
+# workflow agent or a background job does not stop when the session that
+# launched it is cleared — but its results have nowhere to land, because the
+# session id they would report to takes no more turns and the new session
+# was never told they exist. Filed under "other sessions", that work reads
+# as somebody else's, which is the one reading that makes a reader start the
+# same job a second time and collide with it on the same branch. Attribution
+# to the cleared session is the whole fix.
 #
 # Silence is the default and the point. A signal speaks only when it
 # would change a decision; one lone session in a quiet repo prints

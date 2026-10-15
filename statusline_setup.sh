@@ -4,14 +4,12 @@
 #
 # A plugin cannot install a status line: `statusLine` is a user setting, and
 # Claude Code reads it from settings.json, not from any plugin. So a fresh
-# install of Scry has hooks, a monitor, and no bar — and until this existed,
-# nothing said why. On 2026-10-09 Matt installed Scry on a new Mac, got no
-# status bar, and had to find the snippet in the README's Install section.
-# The missing bar is also not only cosmetic: cache_deadline_statusline.sh is
-# the one place the prompt-cache expiry is recorded, so without it the
+# install of Scry has hooks, a monitor, and no bar, and nothing else says
+# why. The missing bar is also not only cosmetic: cache_deadline_statusline.sh
+# is the one place the prompt-cache expiry is recorded, so without it the
 # cache-deadline monitor has nothing to read and never speaks.
 #
-# Two modes, and the default is the one that cannot write:
+# Modes, and the default is the one that cannot write:
 #
 #   (no arguments)  SessionStart hook. READS the settings files and prints one
 #                   line when the status line in effect is not Scry's. Silent

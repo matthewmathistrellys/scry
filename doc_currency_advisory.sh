@@ -4,17 +4,16 @@
 #
 # That hook fires on Read and says what trust EXISTING embedded prose
 # deserves (testimony, atomicity, stricken-if-wider-than-the-file). This one
-# fires on Edit/Write of a source file and closes the loop at the moment
-# stale testimony is CREATED: an edit that changes behavior while leaving the
-# old moduledoc/docstring standing manufactures exactly the artifact the
-# Read-side doctrine exists to defend against. Cheapest fix is in the same
-# edit pass, while the change is still in working memory (1x now vs 10x when
-# a later session re-derives what the prose should have said).
+# fires on Edit/Write of a source file (.ex, .exs, .py) and closes the loop
+# at the moment stale testimony is CREATED: an edit that changes behavior
+# while leaving the old moduledoc/docstring standing manufactures exactly the
+# artifact the Read-side doctrine exists to defend against. Cheapest fix is
+# in the same edit pass, while the change is still in working memory (1x now
+# vs 10x when a later session re-derives what the prose should have said).
 #
-# Deliberately light (per Matt, 2026-09-09: "like the Python plugin, but not
-# quite as extra"): fires once per file per session, injects three sentences,
-# never blocks, never spawns a runtime. Test files are excluded — their code
-# is its own documentation.
+# Deliberately light: fires once per file per session, injects a short
+# paragraph, never blocks, never spawns a runtime. Test files are excluded —
+# their code is its own documentation.
 set -uo pipefail
 
 read -r payload

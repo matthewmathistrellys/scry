@@ -2,15 +2,13 @@
 # provenance.sh — SessionStart hook: answers "how much prose is in this
 # repo, and what goes wrong when an agent mistakes it for authority?"
 #
-# Documents are historical artifacts, not sensors. On 2026-08-14/15 four
-# separate stale doc claims each derailed a session in the same repo in
-# one night: an OCR service described as "suspended" that had two live
-# machines on autostop; a "the nightly batch is the only pipeline" claim
-# written after the real-time event backbone shipped; a classifier
-# promotion recorded as pending six days after it went live; a schema
-# change flagged "pending" the same day it merged. Those incidents exposed
-# one scenario, not the boundary: architectural decisions and intended plans
-# are equally untrusted when Markdown is mistaken for authority.
+# Documents are historical artifacts, not sensors. The stale claims that
+# derail a session are ordinary ones: a service described as "suspended"
+# that still has live machines; "the nightly batch is the only pipeline"
+# written after a real-time backbone shipped; a promotion recorded as pending
+# days after it went live; a schema change flagged "pending" the day it
+# merged. The same holds for architectural decisions and intended plans:
+# each is equally untrusted when Markdown is mistaken for authority.
 #
 # The same rule applies to every repository Markdown artifact, including
 # plans, decisions, designs, memories, READMEs, and factual claims inside

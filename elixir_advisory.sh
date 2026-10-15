@@ -17,15 +17,12 @@
 # nearest mix.exs, grep that project's own mix.lock) so this works dropped
 # into any Elixir project with zero configuration.
 #
-# ── V1 checks ────────────────────────────────────────────────────────────
-#   1. mix credo --strict, scoped to the edited file — only if the nearest
-#      mix.exs's mix.lock actually depends on credo.
-#   2. Direct Ecto Repo.* calls (Repo.get, Repo.insert, etc.) — warned on
-#      unconditionally, everywhere, no directory exemptions — but only in
-#      projects whose mix.lock depends on ash, since the whole point of the
-#      warning is "this bypasses Ash's pipeline."
+# ── The checks ───────────────────────────────────────────────────────────
+#   Each check carries its own comment below; the registry is the
+#   add_regex_check calls plus the EXTRA_CHECKS array, so read those for the
+#   current list rather than a copy kept here.
 #
-# ── How to add anti-pattern #3 (and beyond) ─────────────────────────────
+# ── How to add a check ───────────────────────────────────────────────────
 #   - Simple regex over the file's text? Add one `add_regex_check` call in
 #     the ANTI-PATTERN LIBRARY section below. Four arguments: a short name,
 #     the regex, the mix.lock dependency required for it to fire (or "" for

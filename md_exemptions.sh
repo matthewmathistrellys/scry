@@ -2,9 +2,8 @@
 # md_exemptions.sh — the one answer to "is this Markdown file scratch?"
 #
 # NOT A HOOK. It is sourced, defines two functions, and does nothing on its
-# own. md_creation_advisory.sh asks it at Write, before the file has a history.
-# (Its Stop-time partner, session_disposal_advisory.sh, was removed 2026-09-27.)
-# There is one list, and it lives here.
+# own. md_creation_advisory.sh asks it at Write, before the file has a
+# history. There is one list, and it lives here.
 #
 # Both exemptions are structural, never a judgement about content:
 #

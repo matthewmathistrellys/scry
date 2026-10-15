@@ -3,16 +3,13 @@
 #
 # Opening a pull request is the last cheap moment for a second reader. In a
 # standard GitHub flow a person still reviews and a person still deploys after
-# it; where auto-merge is armed on open and merge deploys (trellys-app, read
-# 2026-10-14), nothing does. One week there, 44 of 57 PRs had no reviewer
-# dispatched before they opened, and on 2026-10-12 a session built every
-# finding a reviewer returned, including a guard against a worry the reviewer
-# itself called an unconfirmed suspicion.
+# it; where auto-merge is armed on open and merge deploys, nothing does, and
+# most pull requests in such a repo open with no reviewer dispatched first.
 #
 # Scry does not try to know whether a review happened. It says, once per branch
 # per session, what the research shows about who should read a change and what
-# to do with what they find. Every number is from a source opened during the
-# 2026-10-14 research (see the README section "Before a pull request opens").
+# to do with what they find. Every number in the note comes from a source
+# listed in the README section "Before a pull request opens".
 #
 # Quiet for anything but `gh pr create`, for a change under 10 lines, for a
 # change that touches only prose, on a repeat for the same branch, and on every

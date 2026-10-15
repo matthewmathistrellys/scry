@@ -4,25 +4,20 @@
 # A branch is created from whatever ref the command names, and when it names
 # none, from HEAD. Nothing in git objects to starting a branch from a commit
 # that origin moved past hours ago; the branch is created happily and the work
-# begins on files that are already the older ones.
-#
-# The exposure this reports was observed on 2026-09-09 on a freshly built box:
-# an agent asked to make one change ran `git checkout -b <name>` with no start
-# point and no preceding fetch. `git reflog` recorded "Created from HEAD", and
-# the checkout had no FETCH_HEAD at all — origin had never been contacted. The
-# branch happened to be current, because the clone was minutes old. On a
-# checkout that had sat for a day the same command would have branched from a
-# day-old commit, silently.
+# begins on files that are already the older ones. `git checkout -b <name>`
+# with no start point and no preceding fetch, on a checkout that has sat for a
+# day, branches from a day-old commit, silently.
 #
 # Two distinct facts decide whether there is anything to say:
 #
 #   - How far the start point sits behind the remote default branch. This is
 #     countable and it is what lands in the new branch.
-#   - How long ago origin was last fetched. This bounds how much the first
-#     number can be trusted: a `behind` count computed against a remote-tracking
-#     ref that was last updated yesterday is itself yesterday's answer, and a
-#     zero from it means "nothing had landed as of yesterday", not "nothing has
-#     landed".
+#   - How long ago origin was last fetched (FETCH_HEAD's age; no FETCH_HEAD
+#     means never). This bounds how much the first number can be trusted: a
+#     `behind` count computed against a remote-tracking ref that was last
+#     updated yesterday is itself yesterday's answer, and a zero from it means
+#     "nothing had landed as of yesterday", not "nothing has landed". A fetch
+#     counts as recent inside SCRY_BRANCH_POINT_FETCH_HOURS (default 2).
 #
 # Quiet when the command names its own start point (the reader has already
 # decided where to branch from), when the tree is current and origin was

@@ -6,10 +6,9 @@
 # re-reads its context once at the full rate; stuck, the only saving is to
 # stop it before that read. The main agent can only act if it is told in
 # time, and telling it costs a turn — unless the turn is already happening.
-# So this hook rides a tool result the main agent is about to read anyway
-# (Matt, 2026-09-22: "say it whenever it is relevant, using whichever channel
-# is already open" — awake, the next tool result; idle, the keep-alive line
-# the cache monitor sends, which carries the same note from roster.py).
+# So this hook rides a tool result the main agent is about to read anyway.
+# When the main agent is idle instead, the cache monitor's keep-alive line
+# carries the same note (from roster.py).
 #
 # Speaks once per subagent, when its transcript has been silent for the last
 # quarter of SCRY_KEEPALIVE_FRESH_SECS (default 3600). Reads file names and

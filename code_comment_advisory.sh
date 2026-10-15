@@ -15,10 +15,10 @@
 # names a module or file other than this one (a dotted alias, a function with
 # its arity, a source file name), leaving out this file's own modules and
 # common library modules; and one that carries a name bound to a decision, a
-# date, or the story of how something went wrong. On 300 labelled comment blocks, 81% of what the
-# other-module rule flagged was labelled as describing other modules. A third
-# kind, the normative rule word, was tried and left out: on 40 sampled hits,
-# 7 stated a rule that nothing in the code checked.
+# date, or the story of how something went wrong. On 300 labelled comment
+# blocks, 81% of what the other-module rule flagged was labelled as describing
+# other modules. A third kind, the normative rule word, was tried and left
+# out: on 40 sampled hits, 7 stated a rule that nothing in the code checked.
 #
 # Source files only, tests included. Silent for Markdown and for paths under
 # $TMPDIR, /tmp/ or a scratchpad/ directory. Once per file per session, and

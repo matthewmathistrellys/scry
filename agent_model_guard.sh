@@ -5,17 +5,14 @@
 # ONE rule: a dispatch must CHOOSE a model. Leaving it blank is the defect,
 # because a blank model is not "the default" — it silently inherits whatever
 # the parent session runs on, invisibly at the call site, and a fan-out
-# multiplies that. On 2026-08-31 that consumed most of a week's premium quota
-# in a single session: four verifier agents and a builder, none naming a
-# model, none needing the model they got. Nobody typed the expensive model
-# even once; they typed nothing, and got it anyway.
+# multiplies that: a handful of verifier agents that name no model each run
+# on the parent's premium model, though none needs it.
 #
 # An external agent CLI fails the identical way, one layer out: with no model
 # flag the CLI's own config default answers, and a config default is set once
-# and then forgotten. On 2026-09-06 an overnight session ran seventeen design
-# reviews through such a CLI, every one on the premium config default because
-# no run named a model. It drained the month's budget and locked the account
-# out mid-day. Same defect, same fix — name the model at the call site.
+# and then forgotten. An unattended batch of runs through such a CLI lands
+# every run on that default. Same defect, same fix — name the model at the
+# call site.
 #
 # This guard is NOT against any particular model. A cheaper agent asking the
 # strongest model one hard question is a legitimate, useful thing to do, and
@@ -24,14 +21,15 @@
 #
 # It also does not name which model to pick. Model names age out; the rule
 # does not. The instruction is to choose, and to choose the cheapest one that
-# can actually do the job — never a roster that will be wrong in six months.
+# can actually do the job — never a roster that will drift out of date.
 #
 # Two events:
 #   PreToolUse  — deny a dispatch that names no model, so the call is fixed
 #                 before it runs. A fork, which inherits by design and ignores
 #                 the override, gets one speed bump and then proceeds.
 #   PostToolUse — when a premium model WAS chosen, note what it costs. Guidance
-#                 after a legitimate choice, never a block.
+#                 after a legitimate choice, never a block. Which models count
+#                 as premium: SCRY_PREMIUM_MODELS, comma-separated.
 #
 # Fails OPEN on every internal error: an unparseable payload, an unwritable
 # state directory, a missing python3 — all allow the dispatch. A cost guard

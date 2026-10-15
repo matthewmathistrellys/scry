@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
-# SessionStart hook: git/worktree dev-environment health report.
+# health.sh — SessionStart hook: git/worktree dev-environment health report.
 #
 # Reports primary worktree health unconditionally, plus the session's own
 # worktree health when it differs from the primary (branch staleness, base
 # drift, unpushed commits, already-merged status). Fetches remote state for
 # comparison without moving local branches or changing checked-out files.
 #
+# Sections, in order: primary worktree, deploy drift (only when
+# SCRY_HEALTH_URL is configured), session worktree, someone else pushing to
+# this session's branch, a worktree hygiene sweep (missing directories,
+# stale/merged branches, quietly abandoned branches), and open PRs with CI
+# status. Each section's own comment says when it speaks.
+#
 # Emits its findings via `additionalContext` so a fresh agent session sees
-# the repo's actual state up front — primary-worktree cleanliness, the
-# session worktree's branch health, whether local main has drifted from
-# origin/main, and a worktree hygiene sweep (missing directories,
-# stale/merged branches, quietly abandoned branches) — every session, not
-# just when something's wrong. Terminal-only systemMessage
-# output is easy to miss across many sessions; additionalContext reaches the
-# model directly, which is the point.
+# the repo's actual state up front, every session, not just when something's
+# wrong. Terminal-only systemMessage output is easy to miss across many
+# sessions; additionalContext reaches the model directly, which is the point.
 set -uo pipefail
 
 emit() { # $1 = systemMessage (user-visible, optional), $2 = additionalContext (model-visible)

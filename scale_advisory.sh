@@ -8,18 +8,18 @@
 # wrong because of that, and what the legitimate remedy is.
 #
 # The trigger is deliberately NOT raw line count. Line count alone flags the
-# wrong files: trellys-app's single largest source file (extraction_registry.py,
-# 3026 lines) is a flat declarative field registry that must not be split, while
-# the file that genuinely costs the most (filevine/client.ex, 2498 lines, 20
-# commits in six months) is well factored and would rank below it on any
-# density measure. Size is therefore gated on CHURN: a large file nobody is
-# touching costs nothing, and warning about it is noise that teaches sessions to
-# skim every advisory. Large AND live is the pair that hurts.
+# wrong files: a repo's largest file is often a flat declarative registry that
+# must not be split, while the file that costs the most is a well-factored
+# client that changes every few weeks and would rank below it on any density
+# measure. Size is therefore gated on CHURN (commits in the last six months):
+# a large file nobody is touching costs nothing, and warning about it is noise
+# that teaches sessions to skim every advisory. Large AND live is the pair that
+# hurts.
 #
 # The size threshold self-calibrates to the repository rather than importing a
 # folklore constant: p95 of the file-length distribution for that language,
-# clamped so it can neither nag a codebase of small files nor go silent as a
-# codebase bloats. In trellys-app today that is ~930 (.py) and ~585 (.ex).
+# cached daily, clamped so it can neither nag a codebase of small files nor go
+# silent as a codebase bloats.
 #
 # Advisory only: no blocking, no enforcement, just context injection. Fires at
 # most once per file per session — the risk is first contact, not sustained

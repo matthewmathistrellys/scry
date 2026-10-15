@@ -2,12 +2,11 @@
 # pins.sh — answers "is a version this repo pins known-vulnerable, or far
 # behind what is released?"
 #
-# Nothing else in Scry looks at a pinned version, and two cases in one week
-# (2026-10-09, same repo) went unseen for that reason: a Tailwind standalone
-# binary pinned in config/config.exs at a version that cannot run on the
-# current macOS — in no lockfile, so no tool tracks it — and a mix.lock with
-# a batch of published security advisories that surfaced only when someone
-# ran an audit by hand.
+# Nothing else in Scry looks at a pinned version, and two kinds of pin go
+# unseen without it: a tool binary pinned in a config file (a Tailwind
+# standalone version in config/config.exs) that is in no lockfile, so no
+# tool tracks it, and a lockfile carrying published security advisories that
+# surface only when someone runs an audit by hand.
 #
 #   pins.sh                 the SessionStart hook (source `startup` only).
 #                           Silent, except for ONE line when a runtime
@@ -17,10 +16,9 @@
 #   pins.sh --full [dir]    everything, for whoever asks. Reads the cache.
 #   pins.sh --refresh [dir] asks the registries now, in the foreground.
 #
-# The first cut of this hook listed every advisory and every out-of-date
-# package at every session start, resume, clear and compact: ~1,300
-# characters, several times a day, nearly all of it already said. The count
-# now lives in the status line (statusline.sh, `pins 4!`), the detail in
+# Every advisory and every out-of-date package at every session start would be
+# a long block, several times a day, nearly all of it already said. So the
+# count lives in the status line (statusline.sh, `pins 4!`), the detail in
 # --full, and a note scoped to one file in pins_edit_advisory.sh.
 #
 # Session start does NOT wait on the network. It reads a local cache and,
@@ -32,6 +30,8 @@
 # Outside a git repository it does nothing at all: without a repo root there
 # is no bound on what a downward search would read, and package names found
 # under a home directory are not Scry's to send out.
+#
+# SCRY_PINS=0 disables it.
 set -uo pipefail
 
 [ "${SCRY_PINS:-1}" = "0" ] && exit 0
