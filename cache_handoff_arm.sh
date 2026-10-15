@@ -36,7 +36,11 @@
 # prompt that opens with `<task-notification>` or `Another Claude session sent
 # a message:` does not arm. Those are the two openings observed on the
 # non-human turns of the b1746f6b transcript (origin task-notification, or
-# none); every human turn there opened otherwise. The prefix is compared and
+# none); every human turn there opened otherwise. A subagent's hand-back is a
+# third: the transcript shows it as `Another Claude session sent a
+# message:\n<agent-message from=...>`, but the hook's `prompt` drops that
+# preamble and opens `<agent-message from="...">` (livetest payload, session
+# a28191cb, 2026-10-14) — so every hand-back armed. The prefix is compared and
 # discarded — never stored, never logged, never printed. OWNER DECISION
 # (AGENTS.md, metadata not content): this reads a prompt's first bytes,
 # because no metadata field separates a user from a notification. The only
@@ -112,7 +116,8 @@ if event != "UserPromptSubmit":
 prompt = d.get("prompt")
 opening = prompt[:64].lstrip() if isinstance(prompt, str) else ""
 not_a_user = opening.startswith(("<task-notification>",
-                                 "Another Claude session sent a message:"))
+                                 "Another Claude session sent a message:",
+                                 "<agent-message from="))
 del prompt, opening
 if not_a_user:
     sys.exit(0)

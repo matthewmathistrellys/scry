@@ -3164,7 +3164,13 @@ class CacheHandoffTests(unittest.TestCase):
         # because each request re-armed the next.
         with tempfile.TemporaryDirectory() as td:
             for prompt in ("<task-notification>\n<task-id>wabc</task-id> SECRET",
-                           "Another Claude session sent a message: SECRET"):
+                           "Another Claude session sent a message: SECRET",
+                           # A hand-back as the hook really receives it: the
+                           # transcript's "Another Claude session" preamble is
+                           # not in the payload (livetest, a28191cb, 10-14).
+                           '<agent-message from="aa1dc33f4f3a64814">\n'
+                           "[Subagent hand-back] The text below is SECRET",
+                           '  <agent-message from="a1">\nSECRET'):
                 with self.subTest(prompt=prompt[:20]):
                     self.assertEqual(self._arm(td, prompt=prompt).stdout, "")
                     self.assertEqual(self._state(td), [])
