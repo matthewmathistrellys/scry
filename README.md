@@ -1122,8 +1122,9 @@ auto-merge is armed on open and merge deploys, nothing does.
 A `PreToolUse` advisory speaks just before `gh pr create`, once per branch per
 session. It reads only git's line and file counts against the merge base with
 `origin/<default>`. It does not try to know whether a review happened, and it
-never denies. It says what the research shows: who makes a good reader, what a
-useful review does, and that a finding is input to a decision, not the decision.
+never denies. It says what the research shows: who makes a good reader and what a useful
+review does. What to do with the findings is said when they come back (see
+"When a review comes back").
 It is silent under 10 changed lines and when every changed file is prose.
 
 Sources (every number was opened at its source on 2026-10-14):
@@ -1137,7 +1138,6 @@ Sources (every number was opened at its source on 2026-10-14):
 | Combining review runs raised F1 up to 43.67% | [arXiv 2509.01494](https://arxiv.org/abs/2509.01494) |
 | Every model did worse from diff to full context (one preprint) | [arXiv 2603.26130](https://arxiv.org/abs/2603.26130) |
 | Reviewers report something even when the work is sound | [Claude Code best practices](https://code.claude.com/docs/en/best-practices) |
-| Unneeded defensive code in 20–30% of overlong agent fixes | arXiv 2603.24755, 2608.12355 |
 
 Not claimed because the evidence is missing: that persona prompts, specialist
 reviewers, checklists, or a different model as reviewer catch more defects.
