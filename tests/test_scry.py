@@ -2806,7 +2806,7 @@ class CodeCommentAdvisoryTests(unittest.TestCase):
     LEAD_PLAIN = "Scry: this edit adds comment text."
     CLOSE = "What lasts is what the code cannot show"
     HISTORY = "git and the pull request already hold who and when"
-    OTHER = "Whether one still holds is a search for what it names."
+    OTHER = "tells the next reader exactly where to look"
 
     def setUp(self):
         td = tempfile.TemporaryDirectory()
