@@ -755,7 +755,7 @@ industrialise that problem.
 | Open PRs | none, or `gh` unavailable | any open PR exists |
 | Pull request about to open | any command but `gh pr create`; under 10 changed lines; only prose changed; already said for this branch this session | once: lines and files changed, then what the research shows about a second reader and its findings |
 | Subagent report comes back | not a subagent hand-back; the report does not read as a review | the kinds of finding a review returns (defect, quality, speculative) and how each is settled |
-| Comment that records who and when | not a source file; Markdown; under `$TMPDIR`, `/tmp/` or a `scratchpad/` directory; no added comment line names who decided or asked, carries a date, or tells an incident story; already said for this file this session | once per file: what a name, a date or a story in a comment costs a later reader |
+| Code comment written | not a source file; Markdown; under `$TMPDIR`, `/tmp/` or a `scratchpad/` directory; the edit adds no comment or doc text, whatever the file already holds; already said for this file this session | once per file: what keeps a comment true, plus a sentence for a claim about another module or file, or a name, a date or a story, in the added text or already in the file |
 | Pinned version with an advisory (session start) | none high or critical on a runtime dependency; or dev/test-only; or the branch itself changes that pin; or already said for this advisory set within the last day; or the start is a resume, clear or compact | one line, once: the count and up to three names |
 | Pinned version with an advisory (status line) | none high or critical on a runtime dependency | `pins N!` |
 | Edited dependency manifest | the file has no advisory and nothing behind; or already said for this file this session | that file's advisories and what in it is behind |
@@ -1178,44 +1178,55 @@ independent judges agreed. No note: 14% of should-not-build findings built,
 OWNER DECISION (2026-10-14): this hook reads the text of a subagent's report,
 never a human message, and keeps nothing.
 
-## When a comment records who and when
+## When a session writes comments
 
-A `PostToolUse` hook on `Edit`, `Write` and `MultiEdit` reads only the lines an
-edit added to a source file (`.ex .exs .py .sh .ts .tsx .js .rb .go .heex .yml
-.yaml .toml`, tests included) and looks at the comment and doc text among them.
-When that text names who decided or asked ("per Matt", "(Name via the
-orchestrator, date)"), carries a date, or tells the story of how something was
-found ("born from the … incident", "measured … on date"), Scry says what that
-costs a later reader: a name and a date in code read like that person's standing
-rule, nobody can check it from the code, and the line stays the same when the
-decision changes, while git and the pull request already hold who and when. It
-also says the reason, and any measured fact behind it, read the same without
-them. It never tells the session what to do.
+A `PostToolUse` hook on `Edit`, `Write` and `MultiEdit` reads the lines an edit
+added to a source file (`.ex .exs .py .sh .ts .tsx .js .rb .go .heex .yml
+.yaml .toml`, tests included). When any of them is comment or doc text, Scry
+says what keeps a comment true for a later reader: a reader, human or model,
+takes a comment as true, wrong comments cost far more than missing ones, and
+almost all comment fixes ship in the same revision as the code beside them. It
+closes with what lasts: the why, an invariant, a unit, a failure mode, a
+deliberate choice, and the measured fact behind it. An edit that adds no
+comment text is silent, whatever comments the file already holds. It never
+tells the session what to do.
 
-Doctests, sigil dates and dates inside a path are skipped. It is silent for
-Markdown, for paths under `$TMPDIR`, `/tmp/` or a `scratchpad/` directory, and
-after the first time for a file in a session.
+Two kinds of comment add a sentence of their own, whether the edit added them
+or they were already in the file (read from disk after an `Edit` or
+`MultiEdit`; a `Write` adds all of its content). For the file, the lead counts
+the comment blocks that carry one.
 
-Detection, measured on one week of transcripts: 36 of 38 history comments
-caught, no false alarm among the other 47 code edits that added comment text.
-On 12,215 existing comment blocks the rule was not tuned on, 54 of 56 sampled
-hits were history, and it found about 71% of the history; most misses are
-undated names and stories with no date.
+- **Another module or file.** A dotted module name, a `Module.function/arity`
+  or a source file name other than this file's own modules or name, leaving
+  out common library modules (`Enum`, `Repo`, `Ecto` and the like). Such a
+  claim is falsified by an edit made elsewhere. On the 300 labelled blocks of
+  the profile sample, 39 of the 48 blocks the rule flagged (81%) were labelled
+  as describing other modules; it finds 39 of the 105 such blocks.
+- **A name, a date or a story.** A name bound to a decision ("per Matt",
+  "(Name via the orchestrator, date)"), a date, or the story of how something
+  was found ("born from the … incident", "measured … on date"). It reads later
+  as a standing rule nobody can check from the code. Doctests, sigil dates and
+  dates inside a path are skipped. On one week of transcripts this rule caught
+  36 of 38 history comments with no false alarm among the other 47 code edits
+  that added comment text; on 12,215 existing blocks it was not tuned on, 54 of
+  56 sampled hits were history.
 
-The note was chosen by a blind test on 18 real flagged edits, three runs each.
-A session asked only to reconsider kept the reason and lost the history 59% of
-the time; with this note, 70%. Neither arm dropped a comment, and the note lost
-no more reasons than the control.
+A third kind, a rule that only the comment holds ("must", "MUST", "NEVER",
+"shall", "do not"), was measured and left out: of 40 sampled hits in the
+engine, 28 stated a rule, but 21 of those were already checked by a test,
+validation or compile-time check, so only 7 (18%) were a rule the comment alone
+held.
+
+It is silent for Markdown, for paths under `$TMPDIR`, `/tmp/` or a
+`scratchpad/` directory, and after the first note for a file in a session.
 
 | Claim | Source |
 |---|---|
-| Wrong documentation greatly hindered LLM code understanding; incomplete or missing documentation did not significantly affect it (GPT-3.5, GPT-4, HumanEval unit-test generation) | Macke & Doyle, "Testing the Effect of Code Documentation on Large Language Model Code Understanding", NAACL Findings 2024, [arXiv 2404.03114](https://arxiv.org/abs/2404.03114) (abstract and HTML opened 2026-10-14) |
-
-Observed in one week: 38 of 85 code edits that added comment text added a name,
-a date or an incident story, in 13 of 17 sessions, and all were shipped as
-written. One "(Name via the orchestrator, date)" comment was later stretched by
-an agent into a rule for every model call, and the named person had never said
-it.
+| Across 17 LLMs, plausible but wrong hint comments cut code-reasoning accuracy by about 33% | CodeCrash, NeurIPS 2025, [arXiv 2504.14119](https://arxiv.org/abs/2504.14119) |
+| Missing documentation had no significant effect on LLM code understanding; wrong documentation hurt it | Macke & Doyle, NAACL Findings 2024, [arXiv 2404.03114](https://arxiv.org/abs/2404.03114) |
+| 90–97% of comment changes land in the same revision as the code change they describe | Fluri, Würsch & Gall, WCRE 2007 |
+| Claims about another module were false 15.7% of the time, against 4.7% for claims about the file's own code; comments that restate the code were stale about 3% of the time | Measured 2026-10-14 on 20,516 comment blocks in trellys-app and Scry |
+| Comments should say why and what the code cannot, not restate it or carry its history | Style-guide consensus: Google C++ and Python guides, PEP 8, Go, Rust, Ousterhout |
 
 ## Tuning
 
