@@ -124,6 +124,16 @@
         ]
       },
       {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/comment_history_advisory.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
         "matcher": "Agent|Workflow",
         "hooks": [
           {

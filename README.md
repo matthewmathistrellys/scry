@@ -755,6 +755,7 @@ industrialise that problem.
 | Open PRs | none, or `gh` unavailable | any open PR exists |
 | Pull request about to open | any command but `gh pr create`; under 10 changed lines; only prose changed; already said for this branch this session | once: lines and files changed, then what the research shows about a second reader and its findings |
 | Subagent report comes back | not a subagent hand-back; the report does not read as a review | the kinds of finding a review returns (defect, quality, speculative) and how each is settled |
+| Comment that records who and when | not a source file; Markdown; under `$TMPDIR`, `/tmp/` or a `scratchpad/` directory; no added comment line names who decided or asked, carries a date, or tells an incident story; already said for this file this session | once per file: what a name, a date or a story in a comment costs a later reader |
 | Pinned version with an advisory (session start) | none high or critical on a runtime dependency; or dev/test-only; or the branch itself changes that pin; or already said for this advisory set within the last day; or the start is a resume, clear or compact | one line, once: the count and up to three names |
 | Pinned version with an advisory (status line) | none high or critical on a runtime dependency | `pins N!` |
 | Edited dependency manifest | the file has no advisory and nothing behind; or already said for this file this session | that file's advisories and what in it is behind |
@@ -1176,6 +1177,45 @@ independent judges agreed. No note: 14% of should-not-build findings built,
 
 OWNER DECISION (2026-10-14): this hook reads the text of a subagent's report,
 never a human message, and keeps nothing.
+
+## When a comment records who and when
+
+A `PostToolUse` hook on `Edit`, `Write` and `MultiEdit` reads only the lines an
+edit added to a source file (`.ex .exs .py .sh .ts .tsx .js .rb .go .heex .yml
+.yaml .toml`, tests included) and looks at the comment and doc text among them.
+When that text names who decided or asked ("per Matt", "(Name via the
+orchestrator, date)"), carries a date, or tells the story of how something was
+found ("born from the … incident", "measured … on date"), Scry says what that
+costs a later reader: a name and a date in code read like that person's standing
+rule, nobody can check it from the code, and the line stays the same when the
+decision changes, while git and the pull request already hold who and when. It
+also says the reason, and any measured fact behind it, read the same without
+them. It never tells the session what to do.
+
+Doctests, sigil dates and dates inside a path are skipped. It is silent for
+Markdown, for paths under `$TMPDIR`, `/tmp/` or a `scratchpad/` directory, and
+after the first time for a file in a session.
+
+Detection, measured on one week of transcripts: 36 of 38 history comments
+caught, no false alarm among the other 47 code edits that added comment text.
+On 12,215 existing comment blocks the rule was not tuned on, 54 of 56 sampled
+hits were history, and it found about 71% of the history; most misses are
+undated names and stories with no date.
+
+The note was chosen by a blind test on 18 real flagged edits, three runs each.
+A session asked only to reconsider kept the reason and lost the history 59% of
+the time; with this note, 70%. Neither arm dropped a comment, and the note lost
+no more reasons than the control.
+
+| Claim | Source |
+|---|---|
+| Wrong documentation greatly hindered LLM code understanding; incomplete or missing documentation did not significantly affect it (GPT-3.5, GPT-4, HumanEval unit-test generation) | Macke & Doyle, "Testing the Effect of Code Documentation on Large Language Model Code Understanding", NAACL Findings 2024, [arXiv 2404.03114](https://arxiv.org/abs/2404.03114) (abstract and HTML opened 2026-10-14) |
+
+Observed in one week: 38 of 85 code edits that added comment text added a name,
+a date or an incident story, in 13 of 17 sessions, and all were shipped as
+written. One "(Name via the orchestrator, date)" comment was later stretched by
+an agent into a rule for every model call, and the named person had never said
+it.
 
 ## Tuning
 
