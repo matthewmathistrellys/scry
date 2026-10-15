@@ -89,9 +89,7 @@ case "${lines:-}" in ''|*[!0-9]*) exit 0 ;; esac
 
 ADVISORY_TEXT="Scry: this pull request changes $lines lines across $files files. Where merge is automatic, opening it is the last moment a second reader costs minutes. About 70% of outages come from changes, and parts with low review coverage ship up to 2–5 more bugs.
 
-The author is a weak reader of its own work: studies show the same model rechecking its own work makes results worse (91.5% → 88.0% in one). What has evidence: a reader in a fresh context (\`/code-review\`, a separate agent, or a person); more than one pass combined; dropping findings the reader can't confirm, along with style nits (filtered reviews got 65% of comments acted on; unfiltered got 7–8%); and giving the reader the diff, the code around it and what the change is for, not the whole codebase (in one benchmark, every model did worse as more code was added).
-
-A finding is input, not a decision. Reviewers usually report something even when the work is sound, and 20–30% of oversized AI fixes carried defensive code nothing needed. A finding becomes a change once the risk is sized: how likely, how bad, and what already covers it."
+The author is a weak reader of its own work: studies show the same model rechecking its own work makes results worse (91.5% → 88.0% in one). What has evidence: a reader in a fresh context (\`/code-review\`, a separate agent, or a person); more than one pass combined; dropping findings the reader can't confirm, along with style nits (filtered reviews got 65% of comments acted on; unfiltered got 7–8%); and giving the reader the diff, the code around it and what the change is for, not the whole codebase (in one benchmark, every model did worse as more code was added)."
 
 CTX="$ADVISORY_TEXT" python3 - <<'PY'
 import json, os

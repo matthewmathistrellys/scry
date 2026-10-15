@@ -2719,7 +2719,7 @@ class PrOpenAdvisoryTests(unittest.TestCase):
             report = context(self._run(repo, 'gh pr create --title "x" --body "y"', base / "state"))
             self.assertIn("changes 40 lines across 1 files", report)
             self.assertIn("91.5% → 88.0%", report)
-            self.assertIn("A finding is input, not a decision", report)
+            self.assertNotIn("A finding is input", report)
             self.assertIn("`/code-review`, a separate agent, or a person", report)
 
     def test_it_is_said_once_per_branch_per_session(self):
