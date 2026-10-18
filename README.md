@@ -1267,9 +1267,55 @@ more words (`Verified 2026-10-18 against prod`, `Postgres 2026-10-18 migration
 rules`) do not. Month and weekday names,
 and a few heading words such as `Updated` or `Released`, are not read as names.
 
-It runs only on the dedicated edit tools; a file changed through a shell
-command is not seen. Once per file per session, and the marker is written only
-when the note is said. `SCRY_GUIDANCE_ATTRIBUTION=0` turns it off.
+A file changed through a shell command reaches it through the shell-writes
+hook below. Once per file per session, and the marker is written only when the
+note is said. `SCRY_GUIDANCE_ATTRIBUTION=0` turns it off.
+
+## When a shell command writes files
+
+The write notes above, and the others bound to `Edit` or `Write` in
+`hooks/hooks.json` (Elixir, scale, doc currency, pins, new Markdown), see only
+the file tools. A `PreToolUse` hook on `Bash` takes a picture of the disk before
+each command, and a hook on `PostToolUse` and `PostToolUseFailure` takes it
+again after and compares. The command text is never read, so a heredoc, `sed
+-i`, `cp`, `mv`, `git show … >` or a script writing a file it does not name all
+count the same.
+
+The picture: when the command's folder is in a git work tree, `HEAD` and the
+`git --no-optional-locks status --porcelain -z --untracked-files=all` list
+(ignored files left out) with each listed file's size and mtime; and, always,
+the size, mtime and a copy of `~/AGENTS.md`, `~/CLAUDE.md` and
+`~/.claude/CLAUDE.md`. Status never takes `index.lock`. A file changed when it
+is new in the list or its size or mtime moved, when a commit made during the
+command names it (commits between the two `HEAD`s dated no earlier than the
+first picture, so a checkout or fast-forward to older work is not counted), or
+when one of the home files moved. Deleted files are left out.
+
+For each changed file, at most 10, Scry builds the payload a file tool would
+have sent and runs every `PostToolUse` hook whose matcher names `Edit` or
+`Write`, read from `hooks/hooks.json`, with that hook's timeout and a 40-second
+budget for the whole step. A file that did not exist before goes as a `Write`
+with its content; any other as an `Edit` whose old text is the `HEAD` version
+(or the saved copy of a home file) and whose new text is the file now, so the
+comment and guidance notes read only the lines that were added. A file over
+256 KB goes without its text: the hooks that read the file from disk still
+speak, the ones that read added lines stay silent. The notes come back under
+one line naming the files, which says they *changed while that command ran*:
+the comparison cannot tell which process changed them. When no write hook
+speaks, nothing is said. `SCRY_SHELL_WRITES=0` turns both halves off.
+
+Known gaps:
+
+- A change another session makes in the same folder while the command runs is
+  counted as if the command made it.
+- A background command that writes after it returns is not seen, nor is a
+  write to another worktree, or outside the repo and the three home files.
+- Shell calls run in parallel take overlapping pictures, so each may name the
+  other's files.
+- A tracked file already changed before the command is compared with `HEAD`,
+  so lines an earlier edit added are read again.
+- Codex is not covered: there was no Codex build here to check its hook
+  payloads, and Codex writes files through `apply_patch`.
 
 ## Tuning
 
@@ -1309,6 +1355,7 @@ starts changing a decision.
 | `SCRY_PINS_CACHE_DIR` | `${XDG_CACHE_HOME:-~/.cache}/scry` | where the pin cache lives |
 | `SCRY_PINS_OSV_URL`, `_HEX_URL`, `_NPM_URL`, `_PYPI_URL`, `_GITHUB_URL` | the public services | base URL of each source, for a mirror |
 | `SCRY_GUIDANCE_ATTRIBUTION` | `1` | `0` stops the note when an edit adds a line opening with a name and a date to `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md` or a `.md` under `.claude/` |
+| `SCRY_SHELL_WRITES` | `1` | `0` stops the before-and-after picture around each Bash command, and with it the write notes for files a shell command changed |
 | `SCRY_STATUSLINE_CHECK` | `1` | `0` (in the environment or in settings.json `env`) stops the session-start note that Scry's status bar is not set up |
 
 Raising a threshold buys silence. Lowering one buys warning. Neither changes

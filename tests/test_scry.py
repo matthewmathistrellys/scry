@@ -3170,6 +3170,213 @@ class GuidanceAttributionAdvisoryTests(unittest.TestCase):
         self.assertEqual(matchers, ["Edit|Write|MultiEdit"])
 
 
+class ShellWritesTests(unittest.TestCase):
+    """A Bash command changes files. The before and after hooks run around a
+    real command in a temp git repo, and the write hooks' notes for the files
+    that changed come back through the after hook."""
+
+    LEAD = "changed while that command ran"
+    NEW_MD = "NEW MARKDOWN"
+    COMMENT = "Scry: comment text"
+    PLAIN_COMMENT = "Scry: this edit adds comment text."
+    ATTRIBUTION = "reads as one person's note from one day"
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        base = Path(td.name)
+        self.state, self.home, self.repo = base / "state", base / "home", base / "repo"
+        for p in (self.state, self.home, self.repo):
+            p.mkdir()
+        self.env = {"TMPDIR": str(self.state), "HOME": str(self.home)}
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.name", "Scry Test")
+        self.git("config", "user.email", "scry@example.test")
+        (self.repo / ".gitignore").write_text("*.log\nbuild/\n")
+        (self.repo / "a.py").write_text("# Matt decided this on 2026-01-02\nx = 1\n")
+        (self.repo / "b.py").write_text("y = 2\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "Initial")
+        self.uses = 0
+
+    def git(self, *args, env=None):
+        return subprocess.run(["git", "-C", str(self.repo), *args], check=True,
+                              capture_output=True, text=True,
+                              env={**os.environ, **self.env, **(env or {})}).stdout.strip()
+
+    def payload(self, event, use, cwd):
+        return {"session_id": "sw-1", "tool_use_id": use, "cwd": str(cwd),
+                "hook_event_name": event, "tool_name": "Bash",
+                "tool_input": {"command": "(not read)"}}
+
+    def bash(self, command, cwd=None, env=None):
+        """Before hook, the command, after hook; returns (event, context)."""
+        cwd = cwd or self.repo
+        env = {**self.env, **(env or {})}
+        self.uses += 1
+        use = f"toolu_{self.uses}"
+        self.assertEqual(run_hook("shell_writes.sh", cwd, self.payload("PreToolUse", use, cwd),
+                                  env).stdout, "")
+        code = subprocess.run(["bash", "-c", command], cwd=cwd, capture_output=True,
+                              env={**os.environ, **env}).returncode
+        event = "PostToolUse" if code == 0 else "PostToolUseFailure"
+        out = run_hook("shell_writes.sh", cwd, self.payload(event, use, cwd), env).stdout
+        self.assertEqual(list((self.state / "scry-shell-writes").glob("*.json")), [])
+        if not out.strip():
+            return event, ""
+        spec = json.loads(out)["hookSpecificOutput"]
+        self.assertEqual(spec["hookEventName"], event)
+        return event, spec["additionalContext"]
+
+    def note(self, command, **kw):
+        return self.bash(command, **kw)[1]
+
+    def named(self, ctx):
+        lead = ctx.split("\n", 1)[0]
+        self.assertIn(self.LEAD, lead)
+        return lead.split("ran: ", 1)[1].split(". ")[0].split(", ")
+
+    def test_a_heredoc_into_a_new_file_reads_as_a_write(self):
+        ctx = self.note("cat > notes.md <<'EOF'\n# Notes\n\nkept for later\nEOF")
+        self.assertEqual(self.named(ctx), ["notes.md"])
+        self.assertIn(self.NEW_MD, ctx)
+        self.assertTrue(ctx.startswith("Scry: 1 file changed while that command ran"))
+
+    def test_sed_on_a_tracked_file_reads_as_an_edit_of_the_added_lines(self):
+        ctx = self.note("sed -i.bak 's/^x = 1$/x = 1  # counts the runs/' a.py && rm a.py.bak")
+        self.assertEqual(self.named(ctx), ["a.py"])
+        # The dated comment was already in the file; only the plain one was added.
+        self.assertIn(self.COMMENT + " already in this file (1 comment)", ctx)
+        self.assertNotIn("this edit added", ctx)
+        self.assertNotIn(self.NEW_MD, ctx)
+
+    def test_cp_and_mv(self):
+        (self.repo / "a.md").write_text("# A\n")
+        self.git("add", "a.md")
+        self.git("commit", "-qm", "md")
+        ctx = self.note("cp a.md copy.md && mv a.md moved.md")
+        self.assertEqual(self.named(ctx), ["copy.md", "moved.md"])
+        self.assertEqual(ctx.count(self.NEW_MD), 2)
+
+    def test_git_show_into_a_new_file(self):
+        ctx = self.note("git show HEAD:a.py > restored.py")
+        self.assertEqual(self.named(ctx), ["restored.py"])
+        self.assertIn(self.COMMENT + " this edit added carries a name", ctx)
+
+    def test_a_script_writes_a_file_the_command_does_not_name(self):
+        (self.repo / "gen.py").write_text(
+            "open('out.py', 'w').write('# the report total\\nz = 3\\n')\n")
+        self.git("add", "gen.py")
+        self.git("commit", "-qm", "gen")
+        ctx = self.note("python3 gen.py")
+        self.assertEqual(self.named(ctx), ["out.py"])
+        self.assertIn(self.PLAIN_COMMENT, ctx)
+
+    def test_a_second_edit_to_an_already_dirty_file(self):
+        (self.repo / "b.py").write_text("y = 2\nw = 4\n")
+        (self.repo / "dirty.md").write_text("# untouched by the command\n")
+        ctx = self.note("printf '# the second edit\\n' >> b.py")
+        self.assertEqual(self.named(ctx), ["b.py"])
+        self.assertIn(self.PLAIN_COMMENT, ctx)
+
+    def test_a_commit_made_by_the_command(self):
+        ctx = self.note("printf '# made in a commit\\nq = 1\\n' > c.py && git add c.py "
+                        "&& git commit -qm c")
+        self.assertEqual(self.named(ctx), ["c.py"])
+        self.assertIn(self.PLAIN_COMMENT, ctx)
+
+    def test_a_fast_forward_to_older_work_is_not_counted(self):
+        old = {"GIT_COMMITTER_DATE": "2020-01-01T00:00:00", "GIT_AUTHOR_DATE": "2020-01-01T00:00:00"}
+        self.git("checkout", "-q", "-b", "older")
+        (self.repo / "older.md").write_text("# from older work\n")
+        self.git("add", "older.md")
+        self.git("commit", "-qm", "older", env=old)
+        self.git("checkout", "-q", "main")
+        self.assertEqual(self.note("git merge -q --ff-only older"), "")
+
+    def test_a_guidance_file_outside_the_repo(self):
+        (self.home / ".claude").mkdir()
+        guide = self.home / ".claude" / "CLAUDE.md"
+        guide.write_text("Sam, 2026-10-01.\n")
+        # The line already there is in the saved copy, so adding a plain line is silent.
+        self.assertEqual(self.note("printf 'Keep replies short.\\n' >> \"$HOME/.claude/CLAUDE.md\"",
+                                   cwd=self.home), "")
+        ctx = self.note("printf 'Matt, 2026-10-18.\\n' >> \"$HOME/.claude/CLAUDE.md\"",
+                        cwd=self.home)
+        self.assertEqual(self.named(ctx), ["~/.claude/CLAUDE.md"])
+        self.assertIn("line 3 of ~/.claude/CLAUDE.md", ctx)
+        self.assertIn(self.ATTRIBUTION, ctx)
+
+    def test_a_heredoc_into_home_agents_md_brings_the_attribution_note(self):
+        ctx = self.note("cat > \"$HOME/AGENTS.md\" <<'EOF'\n# Agents\n\nMatt, 2026-10-18.\nEOF")
+        self.assertEqual(self.named(ctx), ["~/AGENTS.md"])
+        self.assertIn('opens with a name and a date: "Matt, 2026-10-18."', ctx)
+        self.assertIn(self.ATTRIBUTION, ctx)
+
+    def test_a_read_only_command_is_silent(self):
+        self.assertEqual(self.note("cat a.py && git status && ls -la"), "")
+
+    def test_a_failing_command_that_wrote_a_file(self):
+        event, ctx = self.bash("printf '# Draft\\n' > draft.md; exit 3")
+        self.assertEqual(event, "PostToolUseFailure")
+        self.assertEqual(self.named(ctx), ["draft.md"])
+        self.assertIn(self.NEW_MD, ctx)
+
+    def test_more_than_ten_files(self):
+        ctx = self.note("for i in $(seq -w 1 12); do printf '# n\\n' > n$i.md; done")
+        self.assertIn("12 files changed while that command ran", ctx)
+        self.assertEqual(len(self.named(ctx)), 11)  # ten names, then the count
+        self.assertIn("and 2 more not read", ctx)
+        self.assertEqual(ctx.count(self.NEW_MD), 10)
+
+    def test_a_file_over_256_kb_goes_without_its_text(self):
+        filler = "v = 0\\n" * 50000
+        ctx = self.note(f"printf '# big\\n{filler}' > big.py && printf '# Big\\n{filler}' > big.md")
+        self.assertEqual(self.named(ctx), ["big.md", "big.py"])
+        self.assertIn(self.NEW_MD, ctx)  # read from disk
+        self.assertNotIn(self.COMMENT, ctx)  # needs the text
+        self.assertNotIn(self.PLAIN_COMMENT, ctx)
+
+    def test_no_snapshot_is_silent(self):
+        out = run_hook("shell_writes.sh", self.repo,
+                       self.payload("PostToolUse", "toolu_none", self.repo), self.env)
+        self.assertEqual(out.stdout, "")
+
+    def test_the_off_switch(self):
+        self.assertEqual(self.note("printf '# Off\\n' > off.md",
+                                   env={"SCRY_SHELL_WRITES": "0"}), "")
+        self.assertFalse((self.state / "scry-shell-writes").exists())
+
+    def test_an_ignored_file_is_silent(self):
+        self.assertEqual(self.note("mkdir -p build && printf '# B\\n' > build/out.md "
+                                   "&& printf 'x\\n' > run.log"), "")
+
+    def test_old_snapshots_are_swept(self):
+        folder = self.state / "scry-shell-writes"
+        folder.mkdir()
+        stale = folder / "stale.json"
+        stale.write_text("{}")
+        os.utime(stale, (time.time() - 2 * 86400,) * 2)
+        self.note("true")
+        self.assertFalse(stale.exists())
+
+    def test_it_never_fails_on_a_bad_payload(self):
+        for raw in ("not json", "{}", "[]", '{"tool_name": "Bash"}',
+                    '{"tool_name": "Bash", "hook_event_name": "PostToolUse", "session_id": "s"}'):
+            result = subprocess.run(["bash", str(ROOT / "shell_writes.sh")], input=raw,
+                                    text=True, capture_output=True,
+                                    env={**os.environ, **self.env})
+            self.assertEqual(result.returncode, 0, raw)
+            self.assertEqual(result.stdout, "", raw)
+
+    def test_registered_before_and_after_bash(self):
+        hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]
+        for event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+            matchers = [g.get("matcher") for g in hooks[event]
+                        if any("shell_writes.sh" in h["command"] for h in g["hooks"])]
+            self.assertEqual(matchers, ["Bash"], event)
+
+
 class CacheHandoffTests(unittest.TestCase):
     """One summary request per user-work cycle, shortly before the prompt
     cache goes cold, and only a user message re-arms it (designed with Codex,
