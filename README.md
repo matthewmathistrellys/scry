@@ -1236,6 +1236,36 @@ changed code. An earlier wording made agents replace a precise, current referenc
 to another module with a vague one in 3 of 3 runs on one file; the sentence about a
 reference that still matches brought that to 1 of 3.
 
+## When a session writes guidance
+
+A `PostToolUse` hook on `Edit`, `Write` and `MultiEdit` reads the lines an edit
+added to an instruction file: `AGENTS.md`, `CLAUDE.md` or `CLAUDE.local.md`
+anywhere, in a repo or not (`~/AGENTS.md` counts), and any `.md` under a
+`.claude/` directory. Every other path exits on the raw payload. When an added
+line opens with a person's name and a date, Scry quotes the line and its line
+number and says how it reads later: as one person's note from one day, which a
+later session weighs as dated and possibly drifted, not as standing guidance.
+It never tells the session what to do.
+
+The lines an edit added are those of the new text that were not lines of the
+old text. For a `Write`, they are the lines not in the file's git `HEAD`
+version when the file is tracked, otherwise all of the content, so rewriting a
+file that already held a dated line is silent. Lines inside a fenced code block
+are skipped.
+
+A line matches when, after optional list, quote, dash or emphasis markers
+(`-`, `*`, `>`, `_`, `—`, `–`, `**`), it opens with a capitalised name of one
+to three words and then a date: `2026-10-18`, `Oct 18, 2026`,
+`October 18, 2026` or `18 October 2026`. So `Matt, 2026-10-18.`,
+`— Matt, Oct 18, 2026`, `> Claude 2026-10-18:` and `- **Matt Mathis**, 2026-10-18`
+speak; `2026-10-18: released 1.40` (no name), `See the 2026-10-18 note`, `The
+Oct 18 build` and a date later in a sentence do not. Month and weekday names,
+and a few heading words such as `Updated` or `Released`, are not read as names.
+
+It runs only on the dedicated edit tools; a file changed through a shell
+command is not seen. Once per file per session, and the marker is written only
+when the note is said. `SCRY_GUIDANCE_ATTRIBUTION=0` turns it off.
+
 ## Tuning
 
 Every threshold is an environment variable. Defaults are set where the number
@@ -1273,6 +1303,7 @@ starts changing a decision.
 | `SCRY_PINS_REFRESH_BUDGET` | `45` | seconds of wall-clock the background refresh may spend; no session waits on it |
 | `SCRY_PINS_CACHE_DIR` | `${XDG_CACHE_HOME:-~/.cache}/scry` | where the pin cache lives |
 | `SCRY_PINS_OSV_URL`, `_HEX_URL`, `_NPM_URL`, `_PYPI_URL`, `_GITHUB_URL` | the public services | base URL of each source, for a mirror |
+| `SCRY_GUIDANCE_ATTRIBUTION` | `1` | `0` stops the note when an edit adds a line opening with a name and a date to `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md` or a `.md` under `.claude/` |
 | `SCRY_STATUSLINE_CHECK` | `1` | `0` (in the environment or in settings.json `env`) stops the session-start note that Scry's status bar is not set up |
 
 Raising a threshold buys silence. Lowering one buys warning. Neither changes
