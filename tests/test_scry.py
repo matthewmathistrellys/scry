@@ -3002,6 +3002,174 @@ class CodeCommentAdvisoryTests(unittest.TestCase):
                          (ROOT / "hooks/hooks.json").read_text())
 
 
+class GuidanceAttributionAdvisoryTests(unittest.TestCase):
+    """An edit to an instruction file adds a line that opens with a name and a
+    date. The note quotes the line and says how a later session weighs it."""
+
+    INSIGHT = "reads as one person's note from one day"
+
+    MATCH = ["Matt, 2026-10-18.",
+             "— Matt, Oct 18, 2026",
+             "> Claude 2026-10-18:",
+             "- **Matt Mathis**, 2026-10-18",
+             "Matt Mathis, October 18, 2026: the run moved",
+             "* Matt 18 October 2026",
+             "Matt, 2026-10-18 — moved the pins check",
+             "> Claude 2026-10-18: keep it short"]
+    NO_MATCH = ["2026-10-18: released 1.40",
+                "See the 2026-10-18 note",
+                "The Oct 18 build",
+                "Matt said on 2026-10-18 that the run moved",
+                "Updated 2026-10-18",
+                "October 18, 2026",
+                "Verified 2026-10-18 against prod",
+                "Added 2026-10-18 for the pipeline",
+                "Postgres 2026-10-18 migration rules"]
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.state = Path(td.name) / "state"
+        self.work = Path(td.name) / "work"
+        self.state.mkdir()
+        self.work.mkdir()
+
+    def _run(self, tool, tool_input, session="ga-1", env=None):
+        payload = {"session_id": session, "hook_event_name": "PostToolUse",
+                   "tool_name": tool, "tool_input": tool_input}
+        return context(run_hook("guidance_attribution_advisory.sh", "/", payload,
+                                env={"TMPDIR": str(self.state), **(env or {})}))
+
+    def _write(self, path, content, session="ga-1", env=None):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        return self._run("Write", {"file_path": str(path), "content": content}, session, env)
+
+    def _edit(self, path, old, new, session="ga-1"):
+        path = Path(path)
+        path.write_text(path.read_text().replace(old, new, 1))
+        return self._run("Edit", {"file_path": str(path), "old_string": old,
+                                  "new_string": new}, session)
+
+    def _repo(self):
+        repo = self.work / "repo"
+        repo.mkdir()
+        git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+        subprocess.run(git[:3] + ["init", "-q"], check=True)
+        return repo, git
+
+    # The pattern
+
+    def test_each_attribution_line_speaks_and_is_quoted(self):
+        for i, line in enumerate(self.MATCH):
+            note = self._write(self.work / f"m{i}" / "AGENTS.md",
+                               "# Guide\n\nRuns exit zero.\n" + line + "\n")
+            self.assertIn(self.INSIGHT, note, line)
+            self.assertIn(f'line 4 of {self.work / f"m{i}" / "AGENTS.md"} opens with', note)
+            self.assertIn(f'"{line.strip()}"', note)
+
+    def test_lines_without_a_leading_name_and_date_are_silent(self):
+        for i, line in enumerate(self.NO_MATCH):
+            self.assertEqual(self._write(self.work / f"n{i}" / "CLAUDE.md",
+                                         "# Guide\n" + line + "\n"), "", line)
+
+    def test_a_line_in_a_fenced_code_block_is_silent(self):
+        self.assertEqual(self._write(self.work / "CLAUDE.md",
+                                     "# Guide\n```\nMatt, 2026-10-18.\n```\n"), "")
+        note = self._write(self.work / "f" / "CLAUDE.md",
+                           "```\nx\n```\nMatt, 2026-10-18.\n")
+        self.assertIn("line 4 of", note)
+
+    # Which lines count
+
+    def test_an_edit_that_adds_the_line_speaks(self):
+        path = self.work / "CLAUDE.md"
+        path.write_text("# Guide\n\nRuns exit zero.\n")
+        note = self._edit(path, "Runs exit zero.\n", "Runs exit zero.\nMatt, 2026-10-18.\n")
+        self.assertIn("line 4 of", note)
+        self.assertIn(self.INSIGHT, note)
+
+    def test_an_edit_beside_an_existing_dated_line_is_silent(self):
+        path = self.work / "CLAUDE.md"
+        path.write_text("# Guide\nMatt, 2026-10-18.\nRuns exit zero.\n")
+        self.assertEqual(self._edit(path, "Matt, 2026-10-18.\nRuns exit zero.\n",
+                                    "Matt, 2026-10-18.\nRuns exit one.\n"), "")
+
+    def test_a_multiedit_whose_second_edit_adds_the_line(self):
+        path = self.work / "AGENTS.md"
+        path.write_text("a\nb\n")
+        path.write_text("a2\nb\n— Claude, Oct 18, 2026\n")
+        edits = [{"old_string": "a", "new_string": "a2"},
+                 {"old_string": "b\n", "new_string": "b\n— Claude, Oct 18, 2026\n"}]
+        self.assertIn("line 3 of", self._run("MultiEdit", {"file_path": str(path),
+                                                           "edits": edits}))
+
+    def test_a_write_to_a_tracked_file_that_already_had_the_line_is_silent(self):
+        repo, git = self._repo()
+        (repo / "AGENTS.md").write_text("# Guide\nMatt, 2026-10-18.\n")
+        subprocess.run(git + ["add", "."], check=True)
+        subprocess.run(git + ["commit", "-qm", "init"], check=True)
+        self.assertEqual(self._write(repo / "AGENTS.md",
+                                     "# Guide\nMatt, 2026-10-18.\nRuns exit zero.\n"), "")
+        self.assertIn("line 4 of", self._write(
+            repo / "AGENTS.md", "# Guide\nMatt, 2026-10-18.\nRuns exit zero.\n"
+            "Claude, 2026-10-19.\n", session="ga-2"))
+
+    def test_a_write_of_a_new_file_in_a_repo_speaks(self):
+        repo, _ = self._repo()
+        self.assertIn(self.INSIGHT, self._write(repo / "CLAUDE.md", "Matt, 2026-10-18.\n"))
+
+    def test_a_file_outside_a_repo_speaks(self):
+        self.assertIn(self.INSIGHT, self._write(self.work / "home" / "AGENTS.md",
+                                                "# Mine\nMatt, 2026-10-18.\n"))
+
+    # Which files count
+
+    def test_claude_local_and_markdown_under_dot_claude_count(self):
+        self.assertIn(self.INSIGHT, self._write(self.work / "CLAUDE.local.md",
+                                                "Matt, 2026-10-18.\n"))
+        self.assertIn(self.INSIGHT, self._write(self.work / ".claude" / "agents" / "rev.md",
+                                                "Matt, 2026-10-18.\n"))
+
+    def test_other_markdown_is_silent(self):
+        for name in ("README.md", "notes/AGENTS.md.bak", "docs/plan.md"):
+            self.assertEqual(self._write(self.work / name, "Matt, 2026-10-18.\n"), "", name)
+        self.assertEqual(self._write(self.work / ".claude" / "settings.json",
+                                     '"Matt, 2026-10-18."\n'), "")
+
+    # Once, and off
+
+    def test_once_per_file_per_session_marked_only_when_said(self):
+        path = self.work / "AGENTS.md"
+        self.assertEqual(self._write(path, "Runs exit zero.\n"), "")
+        self.assertIn(self.INSIGHT, self._write(path, "Matt, 2026-10-18.\n"))
+        self.assertEqual(self._write(path, "Claude, 2026-10-19.\n"), "")
+        self.assertIn(self.INSIGHT, self._write(self.work / "x" / "AGENTS.md",
+                                                "Claude, 2026-10-19.\n"))
+        self.assertIn(self.INSIGHT, self._write(path, "Claude, 2026-10-19.\n", session="ga-3"))
+
+    def test_the_off_switch(self):
+        self.assertEqual(self._write(self.work / "AGENTS.md", "Matt, 2026-10-18.\n",
+                                     env={"SCRY_GUIDANCE_ATTRIBUTION": "0"}), "")
+
+    def test_it_never_fails_on_a_bad_payload(self):
+        for raw in ("not json", "{}", '{"tool_name": "Edit", "x": "AGENTS.md"}',
+                    '{"tool_name": "Edit", "tool_input": null, "x": "CLAUDE.md"}', "[]"):
+            result = subprocess.run(["bash", str(ROOT / "guidance_attribution_advisory.sh")],
+                                    input=raw, text=True, capture_output=True,
+                                    env={**os.environ, "TMPDIR": str(self.state)})
+            self.assertEqual(result.returncode, 0, raw)
+            self.assertEqual(result.stdout, "", raw)
+
+    def test_registered_after_edit_write_and_multiedit(self):
+        groups = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]["PostToolUse"]
+        matchers = [g.get("matcher") for g in groups
+                    if any("guidance_attribution_advisory.sh" in h["command"]
+                           for h in g["hooks"])]
+        self.assertEqual(matchers, ["Edit|Write|MultiEdit"])
+
+
 class CacheHandoffTests(unittest.TestCase):
     """One summary request per user-work cycle, shortly before the prompt
     cache goes cold, and only a user message re-arms it (designed with Codex,
