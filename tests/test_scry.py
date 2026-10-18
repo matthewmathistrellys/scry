@@ -3285,6 +3285,10 @@ class ShellWritesTests(unittest.TestCase):
         self.assertEqual(self.named(ctx), ["c.py"])
         self.assertIn(self.PLAIN_COMMENT, ctx)
 
+    def test_a_commit_of_files_edited_before_the_command_is_silent(self):
+        (self.repo / "b.py").write_text("y = 2  # edited with the file tool\n")
+        self.assertEqual(self.note("git commit -qam x"), "")
+
     def test_a_fast_forward_to_older_work_is_not_counted(self):
         old = {"GIT_COMMITTER_DATE": "2020-01-01T00:00:00", "GIT_AUTHOR_DATE": "2020-01-01T00:00:00"}
         self.git("checkout", "-q", "-b", "older")

@@ -1287,9 +1287,11 @@ The picture: when the command's folder is in a git work tree, `HEAD` and the
 the size, mtime and a copy of `~/AGENTS.md`, `~/CLAUDE.md` and
 `~/.claude/CLAUDE.md`. Status never takes `index.lock`. A file changed when it
 is new in the list or its size or mtime moved, when a commit made during the
-command names it (commits between the two `HEAD`s dated no earlier than the
-first picture, so a checkout or fast-forward to older work is not counted), or
-when one of the home files moved. Deleted files are left out.
+command names it and the file's mtime is no earlier than the first picture
+(commits between the two `HEAD`s dated no earlier than the first picture, so a
+checkout or fast-forward to older work is not counted, and a commit of files
+edited before the command, which does not touch them on disk, is not either),
+or when one of the home files moved. Deleted files are left out.
 
 For each changed file, at most 10, Scry builds the payload a file tool would
 have sent and runs every `PostToolUse` hook whose matcher names `Edit` or

@@ -15,10 +15,12 @@
 # need. Kept under $TMPDIR by session and tool-use id.
 #
 # After: the same picture again. A file changed when it is new in the list or
-# its size or mtime moved, when a commit made during the command names it, or
-# when one of the home files moved. Commits are those between the two HEADs
-# with a commit date no earlier than the snapshot, so a checkout or pull of
-# older work is not counted. Deleted files are left out.
+# its size or mtime moved, when a commit made during the command names it and
+# the file was written during the command, or when one of the home files
+# moved. Commits are those between the two HEADs with a commit date no earlier
+# than the snapshot, so a checkout or pull of older work is not counted; the
+# mtime keeps out a commit of files edited before the command, which the
+# commit does not touch on disk. Deleted files are left out.
 #
 # For each changed file, at most 10, the payload a file tool would have sent
 # goes to every write hook in hooks/hooks.json, with that hook's timeout and
@@ -187,13 +189,15 @@ if top and os.path.isdir(top):
             names.append(rel)
     if new_head and new_head != old.get("head"):
         since = int(old.get("time", 0)) - 2
+        written_since = int(old.get("time", 0) * 1e9) - 1_000_000
         span = new_head if not old.get("head") else f"{old['head']}..{new_head}"
         revs = (git(top, "rev-list", "--max-count=20", f"--since={since}", span) or b"").split()
         for rev in revs:
             raw = git(top, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z",
                       "--root", rev.decode()) or b""
             for rel in raw.decode("utf-8", "replace").split("\0"):
-                if rel and rel not in names and stat(os.path.join(top, rel)):
+                now = stat(os.path.join(top, rel)) if rel and rel not in names else None
+                if now and now[1] >= written_since:
                     names.append(rel)
     for rel in names:
         base = head_text(old.get("head"), rel)
@@ -294,7 +298,7 @@ n = len(files)
 lead = (f"Scry: {n} file{'' if n == 1 else 's'} changed while that command ran: "
         + ", ".join(shown(p) for p, _ in files[:CAP])
         + (f", and {n - CAP} more not read" if n > CAP else "") + ". "
-        "Below, the notes a file tool's write of them gets.")
+        "Each note below is the one a file-tool write of that file gets.")
 print(json.dumps({
     "hookSpecificOutput": {
         "hookEventName": event,
