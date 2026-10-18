@@ -1256,10 +1256,15 @@ are skipped.
 A line matches when, after optional list, quote, dash or emphasis markers
 (`-`, `*`, `>`, `_`, `—`, `–`, `**`), it opens with a capitalised name of one
 to three words and then a date: `2026-10-18`, `Oct 18, 2026`,
-`October 18, 2026` or `18 October 2026`. So `Matt, 2026-10-18.`,
-`— Matt, Oct 18, 2026`, `> Claude 2026-10-18:` and `- **Matt Mathis**, 2026-10-18`
+`October 18, 2026` or `18 October 2026`. The shape is a sign-off: after the
+date the line ends (an optional `.`, `:`, `)`, `]` or closing emphasis), or goes
+on only after a colon or a dash. So `Matt, 2026-10-18.`,
+`— Matt, Oct 18, 2026`, `> Claude 2026-10-18: keep it short`,
+`Matt, 2026-10-18 — moved the pins check` and `- **Matt Mathis**, 2026-10-18`
 speak; `2026-10-18: released 1.40` (no name), `See the 2026-10-18 note`, `The
-Oct 18 build` and a date later in a sentence do not. Month and weekday names,
+Oct 18 build`, a date later in a sentence, and a capitalised word, date and
+more words (`Verified 2026-10-18 against prod`, `Postgres 2026-10-18 migration
+rules`) do not. Month and weekday names,
 and a few heading words such as `Updated` or `Released`, are not read as names.
 
 It runs only on the dedicated edit tools; a file changed through a shell

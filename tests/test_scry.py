@@ -3013,13 +3013,18 @@ class GuidanceAttributionAdvisoryTests(unittest.TestCase):
              "> Claude 2026-10-18:",
              "- **Matt Mathis**, 2026-10-18",
              "Matt Mathis, October 18, 2026: the run moved",
-             "* Matt 18 October 2026"]
+             "* Matt 18 October 2026",
+             "Matt, 2026-10-18 — moved the pins check",
+             "> Claude 2026-10-18: keep it short"]
     NO_MATCH = ["2026-10-18: released 1.40",
                 "See the 2026-10-18 note",
                 "The Oct 18 build",
                 "Matt said on 2026-10-18 that the run moved",
                 "Updated 2026-10-18",
-                "October 18, 2026"]
+                "October 18, 2026",
+                "Verified 2026-10-18 against prod",
+                "Added 2026-10-18 for the pipeline",
+                "Postgres 2026-10-18 migration rules"]
 
     def setUp(self):
         td = tempfile.TemporaryDirectory()

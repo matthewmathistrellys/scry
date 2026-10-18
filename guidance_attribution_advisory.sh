@@ -19,8 +19,10 @@
 #
 # A match opens, after optional list, quote, dash or emphasis markers, with a
 # capitalised name of one to three words, then a date: YYYY-MM-DD,
-# Mon D, YYYY, Month D, YYYY or D Month YYYY. A date later in a
-# sentence, or a date with no name before it, does not match.
+# Mon D, YYYY, Month D, YYYY or D Month YYYY, like a sign-off: after the
+# date the line ends, or goes on only after a colon or a dash. A date later
+# in a sentence, a date with no name before it, or a date followed by more
+# words ("Verified <date> against prod") does not match.
 #
 # Once per file per session; the marker is written only when the note is said.
 # SCRY_GUIDANCE_ATTRIBUTION=0 turns it off. Exits zero always and never
@@ -109,7 +111,8 @@ DATE = (r"(?:(?:19|20)\d\d-\d\d-\d\d(?![\w-])"
         r"|\d{1,2}\s+" + MONTH + r"\s+\d{4}(?!\d))")
 ATTRIBUTION = re.compile(
     r"^[\s>*_\-—–]*" + WORD + r"(?:[ ]+" + WORD + r"){0,2}[*_]*"
-    r"(?:\s*[,:]\s*|\s+)" + DATE)
+    r"(?:\s*[,:]\s*|\s+)" + DATE +
+    r"(?:[\s.:)\]*_]*$|\s*[:—–-]\s*\S)")
 
 fresh = {x.strip() for x in lines}
 hit = None
