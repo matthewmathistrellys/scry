@@ -698,8 +698,13 @@ machine is carrying. Independent checks and advisories fill that in.
   upgrade causes.
 
   `engine_guard.sh` (`PreToolUse` on Bash) denies a command that reaches the
-  engine, either typed (`fly ssh console` or `fly machine exec` naming the app)
-  or a `.sh`, `.py` or `.bash` file it runs that does, while the health check
+  engine: a `fly ssh console` or `fly machine exec` call whose `-a` or `--app`
+  is the engine (also inside `bash -c`, after `cd`, `env` or a pipe), or a
+  script file the command executes (`bash file`, `python3 file`, `./file`) that
+  contains both. Words that only mention the engine do not count: a commit
+  message, a heredoc, a `cat` or `git add` of a script, another app whose
+  name starts with the engine's. The command is read as words, and a command
+  that cannot be parsed passes. It denies while the health check
   is critical or the open connections have reached the cap (default 4, set in
   `~/.engine-guard/slots`). It denies with exit zero, as the build guard does.
   The denial states what was read and what another session would add to a

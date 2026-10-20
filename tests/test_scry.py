@@ -2530,8 +2530,18 @@ class EngineGuardTests(unittest.TestCase):
             f'cat "{self.answer}" || exit 1\n')
         self.fly.chmod(0o755)
         self.answer.write_text(self.PASSING)
+        # Real engine sessions from other tabs show up in `ps`; the shim hides
+        # every engine process except the ones these tests start (their
+        # command line ends at the app name).
+        shim = self.base / "bin"
+        shim.mkdir()
+        (shim / "ps").write_text(
+            "#!/bin/sh\n"
+            "/bin/ps \"$@\" | awk '!/trellys-engine/ || /-a trellys-engine$/'\n")
+        (shim / "ps").chmod(0o755)
         self.env = {"ENGINE_GUARD_HOME": str(self.guard),
-                    "ENGINE_GUARD_REAL_FLY": str(self.fly)}
+                    "ENGINE_GUARD_REAL_FLY": str(self.fly),
+                    "PATH": f"{shim}:{os.environ['PATH']}"}
 
     def say(self, text):
         self.answer.write_text(text)
@@ -2660,6 +2670,71 @@ class EngineGuardTests(unittest.TestCase):
                         "git log --oneline"):
             with self.subTest(command=command):
                 self.assertEqual(self.start("engine_guard.sh", self.bash(command)).stdout, "")
+
+    def test_guard_leaves_alone_text_that_only_mentions_the_engine(self):
+        self.say(self.CRITICAL)
+        (self.base / "probe.sh").write_text(f"#!/bin/sh\nfly ssh console -a {self.APP} -C ls\n")
+        for command in (
+            f"git commit -m 'fix fly ssh console -a {self.APP} retries'",
+            f"git commit -m 'one\ntwo: fly ssh console -a {self.APP}'",
+            f"cat <<'EOF' > notes.txt\nfly ssh console -a {self.APP}\nEOF",
+            f"echo fly ssh console -a {self.APP} >> notes.txt",
+            "cat probe.sh", "git add probe.sh", "less probe.sh",
+            "python3 -m unittest discover probe.sh",
+            f"fly ssh console -a {self.APP}-staging",
+            f"fly logs -a {self.APP} && ls console",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.start("engine_guard.sh", self.bash(command)).stdout, "")
+
+    def test_guard_denies_every_way_of_running_the_connection(self):
+        self.say(self.CRITICAL)
+        (self.base / "probe.sh").write_text(f"#!/bin/sh\nfly ssh console -a {self.APP} -C ls\n")
+        (self.base / "probe.sh").chmod(0o755)
+        (self.base / "probe.py").write_text(f"import subprocess\nsubprocess.run(['sh','-c','fly ssh console -a {self.APP}'])\n")
+        for command in (
+            f"fly ssh console -a {self.APP}",
+            f"fly ssh console --app {self.APP} -C ls",
+            f"fly ssh console --app={self.APP}",
+            f"flyctl machine exec -a {self.APP} abc 'ls'",
+            f"cd /tmp && FLY_X=1 env fly ssh console -a {self.APP}",
+            f"ls | fly ssh console -a {self.APP}",
+            f"bash -c \"fly ssh console -a {self.APP}\"",
+            "./probe.sh", "bash probe.sh", "sh -x probe.sh", "python3 probe.py",
+            f"echo hi; {self.CONNECT}",
+        ):
+            with self.subTest(command=command):
+                self.assertIn("health check", self.denial(self.start("engine_guard.sh", self.bash(command))))
+
+    def test_guard_reads_the_app_from_fly_toml_and_fly_app(self):
+        self.say(self.CRITICAL)
+        proj = self.base / "apps" / "engine"
+        proj.mkdir(parents=True)
+        (proj / "fly.toml").write_text(f"app = '{self.APP}'\nprimary_region = 'ord'\n")
+        other = self.base / "apps" / "web"
+        other.mkdir()
+        (other / "fly.toml").write_text("app = 'web'\n")
+        for command in ("cd apps/engine && fly ssh console", "fly ssh console -c apps/engine/fly.toml",
+                        f"FLY_APP={self.APP} fly ssh console"):
+            with self.subTest(command=command):
+                self.assertIn("health check", self.denial(self.start("engine_guard.sh", self.bash(command))))
+        for command in ("cd apps/web && fly ssh console", "fly ssh console"):
+            with self.subTest(command=command):
+                self.assertEqual(self.start("engine_guard.sh", self.bash(command)).stdout, "")
+
+    def test_guard_sees_a_script_that_builds_fly_arguments_as_a_list(self):
+        self.say(self.CRITICAL)
+        (self.base / "list.py").write_text(
+            f"import subprocess\nsubprocess.run(['fly', 'ssh', 'console', '-a', '{self.APP}'])\n")
+        self.assertIn("list.py", self.denial(self.start("engine_guard.sh", self.bash("python3 list.py"))))
+
+    def test_a_burst_of_sessions_makes_one_fly_call(self):
+        procs = [subprocess.Popen(["bash", str(ROOT / "engine_guard.sh")], stdin=subprocess.PIPE,
+                                  stdout=subprocess.DEVNULL, text=True, cwd=self.base,
+                                  env={**os.environ, **self.env}) for _ in range(6)]
+        for proc in procs:
+            proc.communicate(json.dumps(self.bash(self.CONNECT)))
+        self.assertEqual(len(self.calls.read_text().split()), 1)
 
     def test_guard_off_switch(self):
         self.say(self.CRITICAL)
