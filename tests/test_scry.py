@@ -174,7 +174,7 @@ class ScryHookTests(unittest.TestCase):
             for group in hooks["hooks"]["SessionStart"]
             for item in group["hooks"]
         ]
-        self.assertEqual(len(commands), 9)
+        self.assertEqual(len(commands), 10)
         self.assertTrue(all("PLUGIN_ROOT" in command for command in commands))
         self.assertTrue(all("CLAUDE_PLUGIN_ROOT" in command for command in commands))
         entry = marketplace["plugins"][0]
@@ -2505,6 +2505,183 @@ class ScryHookTests(unittest.TestCase):
         self.assertIsNone(self._guard({}))
         self.assertIsNone(self._pre("Agent", None))
         self.assertIsNone(self._pre("Workflow", {"name": "saved-workflow"}))
+
+
+class EngineGuardTests(unittest.TestCase):
+    """The production engine: health read through `fly checks list`, sessions
+    open from this Mac. A fake fly answers from a file; no real fly runs."""
+
+    APP = "trellys-engine"
+    PASSING = '[{"name": "status", "status": "passing"}]'
+    CRITICAL = '[{"name": "status", "status": "critical"}]'
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.base = Path(td.name)
+        self.guard = self.base / "guard"
+        (self.guard / "slots.d").mkdir(parents=True)
+        self.answer = self.base / "answer.json"
+        self.calls = self.base / "calls"
+        self.fly = self.base / "fakefly"
+        self.fly.write_text(
+            "#!/bin/sh\n"
+            f'echo x >> "{self.calls}"\n'
+            f'cat "{self.answer}" || exit 1\n')
+        self.fly.chmod(0o755)
+        self.answer.write_text(self.PASSING)
+        self.env = {"ENGINE_GUARD_HOME": str(self.guard),
+                    "ENGINE_GUARD_REAL_FLY": str(self.fly)}
+
+    def say(self, text):
+        self.answer.write_text(text)
+        (self.guard / "health").unlink(missing_ok=True)
+
+    def start(self, hook, payload):
+        return run_hook(hook, self.base, payload, self.env)
+
+    def bash(self, command):
+        return {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                "cwd": str(self.base), "tool_input": {"command": command}}
+
+    def denial(self, result):
+        if not result.stdout.strip():
+            return ""
+        out = json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        return out["permissionDecisionReason"]
+
+    def hold_slot(self, pid, desc="a test"):
+        started = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)],
+                                 capture_output=True, text=True).stdout.strip()
+        (self.guard / "slots.d" / str(pid)).write_text(f"{started}\n{int(time.time())}\n{desc}\n")
+
+    def sleeper(self):
+        proc = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(lambda: (proc.kill(), proc.wait()))
+        return proc
+
+    CONNECT = "fly ssh console -a trellys-engine -C 'ls'"
+
+    def test_session_start_is_silent_when_the_engine_is_passing_and_nothing_is_open(self):
+        self.assertEqual(self.start("engine.sh", {}).stdout, "")
+
+    def test_session_start_is_silent_without_the_guard_directory(self):
+        self.env["ENGINE_GUARD_HOME"] = str(self.base / "absent")
+        self.assertEqual(self.start("engine.sh", {}).stdout, "")
+
+    def test_session_start_says_when_the_health_check_is_critical(self):
+        self.say(self.CRITICAL)
+        text = context(self.start("engine.sh", {}))
+        self.assertIn("critical", text)
+        self.assertIn(self.APP, text)
+
+    def test_session_start_says_unknown_when_health_cannot_be_read(self):
+        self.say("not json")
+        text = context(self.start("engine.sh", {}))
+        self.assertIn("not checked", text)
+        self.assertNotIn("passing", text)
+
+    def test_session_start_counts_open_sessions(self):
+        self.hold_slot(self.sleeper().pid)
+        text = context(self.start("engine.sh", {}))
+        self.assertIn("1 of 4", text)
+
+    def test_a_slot_whose_process_is_gone_is_not_counted(self):
+        proc = self.sleeper()
+        self.hold_slot(proc.pid)
+        proc.kill()
+        proc.wait()
+        self.assertEqual(self.start("engine.sh", {}).stdout, "")
+
+    def test_a_slot_reused_by_another_process_is_not_counted(self):
+        proc = self.sleeper()
+        (self.guard / "slots.d" / str(proc.pid)).write_text("Thu Jan  1 00:00:00 1970\n0\nold\n")
+        self.assertEqual(self.start("engine.sh", {}).stdout, "")
+
+    def test_session_start_counts_a_fly_process_that_took_no_slot(self):
+        proc = subprocess.Popen(["flyctl", "ssh", "console", "-a", self.APP],
+                                executable="/usr/bin/yes", stdout=subprocess.DEVNULL)
+        self.addCleanup(lambda: (proc.kill(), proc.wait()))
+        time.sleep(0.1)
+        self.assertIn("1 of 4", context(self.start("engine.sh", {})))
+
+    def test_session_start_names_a_wrapper_that_lost_the_guard(self):
+        wrapper = self.base / "fly"
+        wrapper.write_text("#!/bin/sh\nexec flyctl \"$@\"\n")
+        (self.guard / "wrappers").write_text(f"{wrapper}\n")
+        text = context(self.start("engine.sh", {}))
+        self.assertIn(str(wrapper), text)
+        wrapper.write_text("#!/bin/sh\nexec engine-guard fly \"$@\"\n")
+        self.assertEqual(self.start("engine.sh", {}).stdout, "")
+
+    def test_session_start_off_switch(self):
+        self.say(self.CRITICAL)
+        self.env["SCRY_ENGINE_GUARD"] = "0"
+        self.assertEqual(self.start("engine.sh", {}).stdout, "")
+        del self.env["SCRY_ENGINE_GUARD"]
+        (self.guard / "OFF").write_text("")
+        self.assertEqual(self.start("engine.sh", {}).stdout, "")
+
+    def test_guard_denies_an_engine_connection_while_critical(self):
+        self.say(self.CRITICAL)
+        reason = self.denial(self.start("engine_guard.sh", self.bash(self.CONNECT)))
+        self.assertIn("failing its Fly health check", reason)
+
+    def test_guard_allows_an_engine_connection_while_passing(self):
+        self.assertEqual(self.start("engine_guard.sh", self.bash(self.CONNECT)).stdout, "")
+
+    def test_guard_allows_when_health_is_unknown(self):
+        self.say("not json")
+        self.assertEqual(self.start("engine_guard.sh", self.bash(self.CONNECT)).stdout, "")
+
+    def test_guard_denies_at_the_cap_and_lists_what_is_open(self):
+        for i in range(4):
+            self.hold_slot(self.sleeper().pid, f"session {i}")
+        reason = self.denial(self.start("engine_guard.sh", self.bash(self.CONNECT)))
+        self.assertIn("4 are already open", reason)
+        self.assertIn("session 3", reason)
+
+    def test_guard_cap_follows_the_slots_file(self):
+        (self.guard / "slots").write_text("1\n")
+        self.hold_slot(self.sleeper().pid)
+        self.assertIn("cap 1", self.denial(self.start("engine_guard.sh", self.bash(self.CONNECT))))
+
+    def test_guard_sees_a_script_that_connects(self):
+        self.say(self.CRITICAL)
+        (self.base / "probe.sh").write_text(f"#!/bin/sh\nfly ssh console -a {self.APP} -C ls\n")
+        (self.base / "other.sh").write_text("#!/bin/sh\necho hi\n")
+        self.assertIn("probe.sh", self.denial(self.start("engine_guard.sh", self.bash("bash probe.sh"))))
+        self.assertEqual(self.start("engine_guard.sh", self.bash("bash other.sh")).stdout, "")
+
+    def test_guard_ignores_commands_that_do_not_reach_the_engine(self):
+        self.say(self.CRITICAL)
+        for command in ("ls -la", "fly status -a trellys-engine", "fly ssh console -a other-app",
+                        "git log --oneline"):
+            with self.subTest(command=command):
+                self.assertEqual(self.start("engine_guard.sh", self.bash(command)).stdout, "")
+
+    def test_guard_off_switch(self):
+        self.say(self.CRITICAL)
+        self.env["SCRY_ENGINE_GUARD"] = "0"
+        self.assertEqual(self.start("engine_guard.sh", self.bash(self.CONNECT)).stdout, "")
+
+    def test_guard_denial_gives_observations_not_orders(self):
+        self.say(self.CRITICAL)
+        reason = self.denial(self.start("engine_guard.sh", self.bash(self.CONNECT))).lower()
+        for phrase in ("what to do", "you should", "do not ", "you must"):
+            self.assertNotIn(phrase, reason)
+
+    def test_one_fly_call_serves_a_minute_of_readings(self):
+        for _ in range(3):
+            self.start("engine.sh", {})
+            self.start("engine_guard.sh", self.bash(self.CONNECT))
+        self.assertEqual(len(self.calls.read_text().split()), 1)
+
+    def test_a_reading_the_wrapper_wrote_is_reused(self):
+        (self.guard / "health").write_text(f"{int(time.time())} critical critical=status\n")
+        self.assertIn("critical", context(self.start("engine.sh", {})))
+        self.assertFalse(self.calls.exists())
 
 
 if __name__ == "__main__":

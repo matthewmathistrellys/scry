@@ -20,6 +20,7 @@ machine is carrying. Independent checks and advisories fill that in.
 | **`health.sh`** | Is this repo in good shape? |
 | **`fleet.sh`** | What else is happening *right now*? |
 | **`pressure.sh`** | What shape is this machine in? |
+| **`engine.sh`**, **`engine_guard.sh`** | Is the production engine failing its health check, and how many sessions from this Mac are open on it? A line at startup when either is worth saying; a denial before a command that would open one more |
 | **`main_drift_advisory.sh`** | Is the tree this subagent was handed the current one? |
 | **`cache_handoff_monitor.sh`** | Is this session about to lose its prompt cache — and what is still unfinished, or what should be summarised first? |
 | **`roster.sh`** | What did *this* session start that has not finished — and is it what I remember? |
@@ -681,6 +682,32 @@ machine is carrying. Independent checks and advisories fill that in.
   report that said it had ended.
 - **`pressure.sh`** — load per core, swap in use, disk headroom, and which dev
   servers are already listening.
+- **`engine.sh`**, **`engine_guard.sh`** — the production engine (Fly app
+  `trellys-engine`, one machine every firm shares) and the sessions this Mac
+  has open on it. Both read `scanners/engine.py`, which reads the Fly health
+  check (`fly checks list --json`, reused for 60 seconds, 10 after a failed
+  read) and counts engine connections: the slot files the machine-level guard
+  around `fly` writes under `~/.engine-guard/slots.d`, plus any `fly` process
+  to the engine that took no slot. Both stay silent on a machine with no
+  `~/.engine-guard`.
+
+  `engine.sh` (`SessionStart`) speaks when the health check is critical, when
+  it could not be read (said as not checked, never as healthy), when any
+  connection is open (`N of cap`), and when a wrapper listed in
+  `~/.engine-guard/wrappers` no longer carries the guard, which a flyctl
+  upgrade causes.
+
+  `engine_guard.sh` (`PreToolUse` on Bash) denies a command that reaches the
+  engine, either typed (`fly ssh console` or `fly machine exec` naming the app)
+  or a `.sh`, `.py` or `.bash` file it runs that does, while the health check
+  is critical or the open connections have reached the cap (default 4, set in
+  `~/.engine-guard/slots`). It denies with exit zero, as the build guard does.
+  The denial states what was read and what another session would add to a
+  machine in that state. An unreadable health check allows the command: the
+  hook cannot say the engine is down, and the wrapper still caps the
+  connections. A hook sees the command, not the inside of a script's own loop;
+  the wrapper around `fly` is what caps those, and Scry does not install it.
+  `~/.engine-guard/OFF` or `SCRY_ENGINE_GUARD=0` turns both off.
 - **`statusline_setup.sh`** (Claude only) — says when Scry's status bar is not
   set up, and sets it up when asked. A plugin cannot set `statusLine`; it is a
   user setting. So a fresh install has hooks, a monitor and no bar, and until
@@ -1358,6 +1385,8 @@ starts changing a decision.
 | `SCRY_PINS_OSV_URL`, `_HEX_URL`, `_NPM_URL`, `_PYPI_URL`, `_GITHUB_URL` | the public services | base URL of each source, for a mirror |
 | `SCRY_GUIDANCE_ATTRIBUTION` | `1` | `0` stops the note when an edit adds a line opening with a name and a date to `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md` or a `.md` under `.claude/` |
 | `SCRY_SHELL_WRITES` | `1` | `0` stops the before-and-after picture around each Bash command, and with it the write notes for files a shell command changed |
+| `SCRY_ENGINE_GUARD` | `1` | `0` stops the startup engine line and the denial before a command that would open an engine session |
+| `SCRY_ENGINE_APP` | `trellys-engine` | the Fly app read for health and counted for open connections |
 | `SCRY_STATUSLINE_CHECK` | `1` | `0` (in the environment or in settings.json `env`) stops the session-start note that Scry's status bar is not set up |
 
 Raising a threshold buys silence. Lowering one buys warning. Neither changes
