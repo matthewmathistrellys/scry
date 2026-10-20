@@ -20,6 +20,7 @@ machine is carrying. Independent checks and advisories fill that in.
 | **`health.sh`** | Is this repo in good shape? |
 | **`fleet.sh`** | What else is happening *right now*? |
 | **`pressure.sh`** | What shape is this machine in? |
+| **`context_length_advisory.sh`** | How much is this session carrying, and what does that mean? One note each time the context first reaches a band (150k, 300k, 500k, 750k tokens by default) |
 | **`load_fanout_advisory.sh`**, **`service_distress_advisory.sh`** | Is this session about to hit something shared many times over, or already getting the answers a struggling service gives? A note before a loop, parallel or background fan-out against a remote tool; a note after repeated timeouts, 5xx, 429 or slow calls |
 | **`main_drift_advisory.sh`** | Is the tree this subagent was handed the current one? |
 | **`cache_handoff_monitor.sh`** | Is this session about to lose its prompt cache — and what is still unfinished, or what should be summarised first? |
@@ -716,6 +717,28 @@ machine is carrying. Independent checks and advisories fill that in.
   Neither sees fan-out hidden inside a script: a hook sees one Bash call, not
   the calls a script makes. Neither reads a service's health; where nothing
   reports it, the note says no reading has reached the session.
+- **`context_length_advisory.sh`** (`UserPromptSubmit`) — a session cannot see
+  how much it is carrying. The status line reports the context size and the
+  session never reads it. When the size, as the status line last reported it,
+  first reaches each band (`SCRY_CONTEXT_BANDS`, in thousands of tokens,
+  default 150, 300, 500, 750), once per band per session, it says the size, the
+  share of the window and, when the reading is more than two minutes old, its
+  age. It adds the insight: every request re-reads all of it; once the prompt
+  cache has gone cold the next request writes it again at the full rate; long
+  inputs have been measured to cost accuracy gradually, even below the window's
+  limit, more for tasks that reason over the text than for looking up a literal
+  phrase (Chroma 2025, NoLiMa 2025, both on older Claude models; none is
+  published for current ones); and work written to files can carry into a new
+  session while work held only in the context may not.
+
+  The bands are where a note is worth saying, not limits. Where a session
+  should reset depends on the work, and the note does not say it is past one.
+  The size comes from the file `cache_deadline_statusline.sh` writes for the
+  session (context tokens and window size, two numbers), so
+  it needs Scry's status-line wrapper. Without it, with a reading older than
+  `SCRY_CONTEXT_STALE_MINUTES`, or on a subagent's turn, it is silent, and that
+  silence says nothing about how big the context is. A drop below a band (after
+  a `/compact`) lets the band speak again.
 - **`statusline_setup.sh`** (Claude only) — says when Scry's status bar is not
   set up, and sets it up when asked. A plugin cannot set `statusLine`; it is a
   user setting. So a fresh install has hooks, a monitor and no bar, and until
@@ -1398,6 +1421,9 @@ starts changing a decision.
 | `SCRY_DISTRESS_NOTES` | `1` | `0` stops the note after repeated timeouts, 5xx, 429 or slow calls from remote tools |
 | `SCRY_DISTRESS_MIN` | `2` | answers of that kind within the window before the note first speaks (it then speaks each time the count doubles) |
 | `SCRY_DISTRESS_WINDOW_MINUTES` | `10` | how far back those answers are counted |
+| `SCRY_CONTEXT_NOTES` | `1` | `0` stops the note when the session's context first reaches a band |
+| `SCRY_CONTEXT_BANDS` | `150,300,500,750` | context sizes, in thousands of tokens, at which the note speaks once |
+| `SCRY_CONTEXT_STALE_MINUTES` | `120` | age of the status-line reading past which the note stays silent |
 | `SCRY_STATUSLINE_CHECK` | `1` | `0` (in the environment or in settings.json `env`) stops the session-start note that Scry's status bar is not set up |
 
 Raising a threshold buys silence. Lowering one buys warning. Neither changes

@@ -2631,6 +2631,83 @@ class SharedServiceLoadTests(unittest.TestCase):
                                    env={"SCRY_DISTRESS_NOTES": "0"}).stdout, "")
 
 
+class ContextLengthAdvisoryTests(unittest.TestCase):
+    """The context size the status line reports, said at each band once."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.base = Path(td.name)
+        self.cache = self.base / "cache"
+        self.cache.mkdir()
+        self.env = {"SCRY_CACHE_STATE_DIR": str(self.cache), "SCRY_CONTEXT_STATE_DIR": str(self.base / "state")}
+
+    def reading(self, tokens, session="s1", age=0, window=1_000_000):
+        (self.cache / f"{session}.deadline").write_text(json.dumps(
+            {"observed_at": int(time.time()) - age, "context_tokens": tokens, "context_window": window}))
+
+    def submit(self, session="s1", env=None, **extra):
+        payload = {"hook_event_name": "UserPromptSubmit", "session_id": session, "prompt": "go", **extra}
+        return run_hook("context_length_advisory.sh", self.base, payload, {**self.env, **(env or {})})
+
+    def said(self, result):
+        return context(result)
+
+    def test_silent_below_the_first_band_and_without_a_reading(self):
+        self.reading(120_000)
+        self.assertEqual(self.submit().stdout, "")
+        self.assertEqual(self.submit(session="nofile").stdout, "")
+
+    def test_speaks_at_each_band_once(self):
+        spoken = []
+        for tokens in (160_000, 170_000, 320_000, 330_000, 520_000, 800_000, 810_000):
+            self.reading(tokens)
+            spoken.append(bool(self.said(self.submit())))
+        self.assertEqual(spoken, [True, False, True, False, True, True, False])
+
+    def test_it_states_size_share_and_the_old_model_caveat_without_orders_or_absolutes(self):
+        self.reading(412_000)
+        said = self.said(self.submit())
+        self.assertIn("412k of a 1000k window (41%)", said)
+        self.assertIn("none is published for current ones", said)
+        for phrase in ("you should", "must ", "always", "never", "do not", "reset now", "past"):
+            self.assertNotIn(phrase, said.lower())
+
+    def test_a_dropped_context_lets_the_band_speak_again(self):
+        self.reading(320_000)
+        self.assertTrue(self.said(self.submit()))
+        self.reading(40_000)
+        self.assertEqual(self.submit().stdout, "")
+        self.reading(310_000)
+        self.assertTrue(self.said(self.submit()))
+
+    def test_an_old_reading_says_its_age_and_a_very_old_one_is_silent(self):
+        self.reading(320_000, age=600)
+        self.assertIn("10 minutes ago", self.said(self.submit()))
+        self.reading(520_000, age=3 * 3600)
+        self.assertEqual(self.submit().stdout, "")
+
+    def test_a_subagent_turn_and_the_off_switch_are_silent(self):
+        self.reading(320_000)
+        self.assertEqual(self.submit(agent_id="a1").stdout, "")
+        self.assertEqual(self.submit(env={"SCRY_CONTEXT_NOTES": "0"}).stdout, "")
+
+    def test_bands_can_be_set(self):
+        self.reading(120_000)
+        self.assertTrue(self.said(self.submit(env={"SCRY_CONTEXT_BANDS": "100,200"})))
+
+    def test_the_status_line_wrapper_records_the_context_size(self):
+        payload = {"session_id": "s9", "model": {"id": "claude-opus-5-5"},
+                   "context_window": {"total_input_tokens": 412345, "context_window_size": 1000000},
+                   "prompt_cache": {"warm": True, "ttl": 3600, "expires_at": int(time.time()) + 1800, "requests": 3}}
+        subprocess.run(["bash", str(ROOT / "cache_deadline_statusline.sh")], input=json.dumps(payload), text=True,
+                       capture_output=True, check=True,
+                       env={**os.environ, **self.env, "SCRY_TAB": "/bin/true"})
+        rec = json.loads((self.cache / "s9.deadline").read_text())
+        self.assertEqual((rec["context_tokens"], rec["context_window"]), (412345, 1000000))
+        self.assertNotIn("model", json.dumps(rec))
+
+
 if __name__ == "__main__":
     unittest.main()
 

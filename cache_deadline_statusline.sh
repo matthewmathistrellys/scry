@@ -17,7 +17,9 @@
 # What it stores, per session, in a file keyed on session_id under
 # SCRY_CACHE_STATE_DIR:
 #   observed_at, warm, ttl, expires_at, requests — numbers and one boolean —
-#   and tab, the colour last sent to the tab (none, yellow, red).
+#   and tab, the colour last sent to the tab (none, yellow, red). Also the
+#   context size the payload reports (context_tokens, context_window), which
+#   `context_length_advisory.sh` reads.
 # Nothing else from the payload is read or kept (AGENTS.md: metadata, not
 # conversation content). `cache_handoff_monitor.sh` reads that file; this
 # script never decides anything.
@@ -65,6 +67,12 @@ rec = {
     "expires_at": int(expires) if isinstance(expires, (int, float)) else None,
     "requests": pc.get("requests"),
 }
+cw = d.get("context_window")
+if isinstance(cw, dict):
+    used, size = cw.get("total_input_tokens"), cw.get("context_window_size")
+    if isinstance(used, (int, float)) and isinstance(size, (int, float)) and size > 0:
+        rec["context_tokens"], rec["context_window"] = int(used), int(size)
+
 path = os.path.join(os.environ["SCRY_DIR"], sid + ".deadline")
 # The tab colour (tab_colour.sh): nothing while warm, yellow in the last ten
 # minutes, red once a session that has spoken is cold. Sent on change, not
