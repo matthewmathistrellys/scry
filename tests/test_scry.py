@@ -2530,8 +2530,18 @@ class EngineGuardTests(unittest.TestCase):
             f'cat "{self.answer}" || exit 1\n')
         self.fly.chmod(0o755)
         self.answer.write_text(self.PASSING)
+        # Real engine sessions from other tabs show up in `ps`; the shim hides
+        # every engine process except the ones these tests start (their
+        # command line ends at the app name).
+        shim = self.base / "bin"
+        shim.mkdir()
+        (shim / "ps").write_text(
+            "#!/bin/sh\n"
+            "/bin/ps \"$@\" | awk '!/trellys-engine/ || /-a trellys-engine$/'\n")
+        (shim / "ps").chmod(0o755)
         self.env = {"ENGINE_GUARD_HOME": str(self.guard),
-                    "ENGINE_GUARD_REAL_FLY": str(self.fly)}
+                    "ENGINE_GUARD_REAL_FLY": str(self.fly),
+                    "PATH": f"{shim}:{os.environ['PATH']}"}
 
     def say(self, text):
         self.answer.write_text(text)
@@ -2660,6 +2670,50 @@ class EngineGuardTests(unittest.TestCase):
                         "git log --oneline"):
             with self.subTest(command=command):
                 self.assertEqual(self.start("engine_guard.sh", self.bash(command)).stdout, "")
+
+    def test_a_burst_of_sessions_makes_one_fly_call(self):
+        procs = [subprocess.Popen(["bash", str(ROOT / "engine_guard.sh")], stdin=subprocess.PIPE,
+                                  stdout=subprocess.DEVNULL, text=True, cwd=self.base,
+                                  env={**os.environ, **self.env}) for _ in range(6)]
+        for proc in procs:
+            proc.communicate(json.dumps(self.bash(self.CONNECT)))
+        self.assertEqual(len(self.calls.read_text().split()), 1)
+
+    def test_guard_leaves_alone_text_that_only_mentions_the_engine(self):
+        self.say(self.CRITICAL)
+        connect = f"fly ssh console -a {self.APP}"
+        (self.base / "probe.sh").write_text(f"#!/bin/sh\n{connect} -C ls\n")
+        for command in (
+            f"git commit -m 'fix {connect} retries'",
+            f"git commit -m 'one\ntwo; {connect}'",
+            f'git commit -m "it\'s: {connect}"',
+            f"cat <<'EOF' > notes.txt\n{connect}\nEOF",
+            f"git commit -F - <<'EOF'\nDon't run {connect}\nEOF",
+            f"echo {connect} >> notes.txt", f"grep -rn '{connect}' .",
+            f"# {connect}\nls", f"ls # see; {connect}",
+            "cat probe.sh", "git add probe.sh", "less probe.sh", "python3 -m unittest probe.sh",
+            f"fly ssh console -a {self.APP}-staging", f"fly logs -a {self.APP}", "fly ssh console -a other-app",
+            f"fly status -a {self.APP} && ls console", f"timeout 60 git diff probe.sh",
+            f"fly ssh sftp shell -a {self.APP}",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.start("engine_guard.sh", self.bash(command)).stdout, "")
+
+    def test_guard_denies_a_typed_connection_and_a_script_named_after_a_shell(self):
+        self.say(self.CRITICAL)
+        connect = f"fly ssh console -a {self.APP}"
+        (self.base / "probe.sh").write_text(f"#!/bin/sh\n{connect} -C ls\n")
+        (self.base / "list.py").write_text(
+            f"import subprocess\nsubprocess.run(['fly', 'ssh', 'console', '-a', '{self.APP}'])\n")
+        for command in (
+            connect, f"{connect} -C 'ls'", f"fly ssh console --app {self.APP}", f"fly ssh console --app={self.APP}",
+            f"flyctl machine exec -a {self.APP} abc 'ls'", f"flyctl m exec -a {self.APP} abc ls",
+            f"cd /tmp && {connect}", f"echo hi; {connect}", f"ls | {connect}", f"FLY_X=1 {connect}",
+            f"# note\n{connect}",
+            "bash probe.sh", "sh -x probe.sh", "python3 list.py", "cd /tmp && bash probe.sh",
+        ):
+            with self.subTest(command=command):
+                self.assertIn("health check", self.denial(self.start("engine_guard.sh", self.bash(command))))
 
     def test_guard_off_switch(self):
         self.say(self.CRITICAL)

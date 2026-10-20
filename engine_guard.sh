@@ -8,12 +8,15 @@
 # machine has no CPU left to answer its health check, and sessions started
 # while it is down only lengthen the outage.
 #
-# A command reaches the engine when it types `fly ssh console` or
-# `fly machine exec` with the engine's app name, or runs a .sh, .py or .bash
-# file that does. The state comes from scanners/engine.py: the health check
-# (cached 60 seconds), the open connections and the cap (default 4,
-# ~/.engine-guard/slots). Anything inside a script's own loop is out of this
-# hook's sight; the wrapper around `fly` caps those.
+# A command reaches the engine when it STARTS with a typed `fly ssh console`
+# or `fly machine exec` call naming the engine with -a, or with bash, sh or
+# python3 followed by a script file that makes such a call (after cd x &&,
+# ; or a pipe too). Text that only mentions the call is never a command
+# start: a commit message, a heredoc, an echo, a grep, a `cat` of a script.
+# The state comes from scanners/engine.py: the health check (cached 60
+# seconds), the open connections and the cap (default 4,
+# ~/.engine-guard/slots). Whatever the rule does not see (loops, functions,
+# a script's own calls) the wrapper around `fly` caps.
 #
 # Denies with exit zero, as elixir_build_guard.sh does. Unreadable health,
 # no ~/.engine-guard, a malformed payload and every other command pass
@@ -25,17 +28,12 @@ set -uo pipefail
 payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 
-# Matches every Bash call, so skip the interpreter unless the command could
-# be a fly connection or a script.
-case "$payload" in
-  *console*|*exec*|*.sh*|*.py*|*.bash*) ;;
-  *) exit 0 ;;
-esac
+# Matches every Bash call, so a machine with no engine guard pays nothing.
+[ -d "${ENGINE_GUARD_HOME:-$HOME/.engine-guard}" ] || exit 0
 
 ENGINE_PAYLOAD="$payload" SCRY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scanners" python3 - <<'PY' 2>/dev/null || true
 import json
 import os
-import re
 import sys
 
 try:
@@ -55,25 +53,7 @@ if not engine.enabled():
     sys.exit(0)
 
 app = engine.app()
-CONNECT = re.compile(r"ssh\s+console|machines?\s+exec|\bm\s+exec")
-
-bound = ""
-if app in command and CONNECT.search(command):
-    bound = "this command"
-else:
-    cwd = d.get("cwd") or os.getcwd()
-    for tok in list(dict.fromkeys(re.findall(r"[^\s;&|()<>\"'`]+\.(?:sh|py|bash)\b", command)))[:20]:
-        path = os.path.expanduser(tok)
-        if not os.path.isabs(path):
-            path = os.path.join(cwd, path)
-        try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                text = f.read(2_000_000)
-        except OSError:
-            continue
-        if app in text and CONNECT.search(text):
-            bound = tok
-            break
+bound = engine.engine_command(command, d.get("cwd") or os.getcwd())
 if not bound:
     sys.exit(0)
 

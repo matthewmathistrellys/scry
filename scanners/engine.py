@@ -19,9 +19,13 @@ engine to ask about.
 Run as a script: `engine.py status` prints one JSON object.
 """
 
+import contextlib
+import errno
+import fcntl
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -31,6 +35,7 @@ DEFAULT_SLOTS = 4
 HEALTH_TTL = 60        # a passing or critical reading is reused this long
 UNKNOWN_TTL = 10       # a failed reading, so a Fly outage costs one timeout, not one per call
 FLY_TIMEOUT = 10
+LOCK_WAIT = 25         # seconds to wait for another session's reading
 
 
 def ghome():
@@ -110,29 +115,63 @@ def _fresh_reading():
     return "passing", detail
 
 
-def read_health():
-    """(status, detail, age_seconds). status: passing | critical | unknown."""
-    cache = os.path.join(ghome(), "health")
-    now = time.time()
+def _cached_reading(cache):
     try:
         with open(cache, encoding="utf-8") as f:
             parts = f.readline().rstrip("\n").split(" ", 2)
-        ts, status = int(parts[0]), parts[1]
-        detail = parts[2] if len(parts) > 2 else ""
-        age = now - ts
-        ttl = UNKNOWN_TTL if status == "unknown" else HEALTH_TTL
+        age = time.time() - int(parts[0])
+        ttl = UNKNOWN_TTL if parts[1] == "unknown" else HEALTH_TTL
         if 0 <= age < ttl:
-            return status, detail.replace("_", " "), int(age)
+            return parts[1], (parts[2] if len(parts) > 2 else "").replace("_", " "), int(age)
     except (OSError, ValueError, IndexError):
         pass
-    status, detail = _fresh_reading()
+    return None
+
+
+@contextlib.contextmanager
+def _reading_lock():
+    """The lock the machine-level guard takes before it reads health, so a
+    burst of sessions makes one `fly checks list` call. Waits up to LOCK_WAIT
+    seconds, then goes on without it: a stuck lock never stops a command."""
+    handle = None
     try:
-        tmp = f"{cache}.scry{os.getpid()}"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(f"{int(now)} {status} {detail.replace(' ', '_')}\n")
-        os.replace(tmp, cache)
+        handle = open(os.path.join(ghome(), "lock"), "a")
+        deadline = time.time() + LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                if e.errno not in (errno.EAGAIN, errno.EACCES) or time.time() >= deadline:
+                    break
+                time.sleep(0.1)
     except OSError:
         pass
+    try:
+        yield
+    finally:
+        if handle:
+            handle.close()
+
+
+def read_health():
+    """(status, detail, age_seconds). status: passing | critical | unknown."""
+    cache = os.path.join(ghome(), "health")
+    got = _cached_reading(cache)
+    if got:
+        return got
+    with _reading_lock():
+        got = _cached_reading(cache)       # the session that held the lock wrote one
+        if got:
+            return got
+        status, detail = _fresh_reading()
+        try:
+            tmp = f"{cache}.scry{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(f"{int(time.time())} {status} {detail.replace(' ', '_')}\n")
+            os.replace(tmp, cache)
+        except OSError:
+            pass
     return status, detail, 0
 
 
@@ -213,6 +252,91 @@ def lapsed_wrappers():
         if b"engine-guard" not in text:
             lapsed.append(path)
     return lapsed
+
+
+# ── Which commands reach the engine ─────────────────────────────────────────
+# The rule is deliberately small: a command is an engine connection when it
+# STARTS with a typed fly call (`fly ssh console` / `fly machine exec` with
+# -a <the app>), or with bash, sh or python3 followed by a script file that
+# makes such a call. Text that only mentions the call (a commit message, a
+# heredoc, an echo, a grep) is never a command start. What the rule misses,
+# the wrapper around fly caps.
+_GAP = r"""[\s'",\[]+"""
+_FLY_CALL = re.compile(r"\bfly(?:ctl)?\b" + _GAP + r"(?:-\w+" + _GAP + r"[^\s'\",\[]+" + _GAP + r")*(?:ssh" + _GAP
+                       + r"console|machines?" + _GAP + r"exec|m" + _GAP + r"exec)")
+_TYPED = re.compile(r"(?:\w+=\S*\s+)*(?:fly|flyctl)\s+(?:ssh\s+console|machines?\s+exec|m\s+exec)(?=\s|$)(.*)", re.S)
+_SCRIPT = re.compile(r"(?:\w+=\S*\s+)*(?:bash|sh|zsh|python3?)\s+(?:-[A-Za-z]+\s+)*(\S+)")
+_SCRY_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+def _commands(text):
+    """The commands in `text`, split at ; & | outside quotes. Comments are
+    dropped; a newline ends a command only when nothing has started yet."""
+    out, cur, quote, i = [], [], "", 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and quote != "'" and i + 1 < len(text):
+            cur.append(text[i:i + 2])
+            i += 2
+            continue
+        if quote:
+            quote = "" if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        elif c == "#" and (i == 0 or text[i - 1] in " \t\n;&|"):
+            end = text.find("\n", i)
+            i = len(text) if end < 0 else end
+            continue
+        elif c in ";&|" or (c == "\n" and not "".join(cur).strip()):
+            out.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(c)
+        i += 1
+    out.append("".join(cur))
+    return [c.strip() for c in out if c.strip()]
+
+
+def _regular(path):
+    try:
+        return stat.S_ISREG(os.stat(path).st_mode)       # a FIFO would block the read
+    except (OSError, ValueError):
+        return False
+
+
+def _text_connects(text):
+    named = re.search(r"(?<![\w-])" + re.escape(app()) + r"(?![\w-])", text)
+    return bool(named and _FLY_CALL.search(text))
+
+
+def _script_connects(path, cwd):
+    path = os.path.expanduser(path.strip("'\""))
+    if not os.path.isabs(path):
+        path = os.path.join(cwd, path)
+    # Scry's own files describe the connection in prose and constants.
+    try:
+        if os.path.realpath(path).startswith(_SCRY_ROOT + os.sep) or not _regular(path):
+            return False
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return _text_connects(f.read(2_000_000))
+    except (OSError, ValueError):
+        return False
+
+
+def engine_command(command, cwd):
+    """"this command" for a typed engine connection, the script's name for a
+    script that makes one, "" for everything else."""
+    for cmd in _commands(command):
+        typed = _TYPED.match(cmd)
+        if typed:
+            if re.search(r"(?:^|\s)(?:-a|--app)[ =]['\"]?" + re.escape(app()) + r"['\"]?(?=\s|$)", typed.group(1)):
+                return "this command"
+            continue
+        script = _SCRIPT.match(cmd)
+        if script and _script_connects(script.group(1), cwd):
+            return script.group(1)
+    return ""
 
 
 def status():

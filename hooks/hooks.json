@@ -219,7 +219,7 @@
           {
             "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/engine_guard.sh",
-            "timeout": 15
+            "timeout": 45
           },
           {
             "type": "command",
