@@ -20,7 +20,7 @@ machine is carrying. Independent checks and advisories fill that in.
 | **`health.sh`** | Is this repo in good shape? |
 | **`fleet.sh`** | What else is happening *right now*? |
 | **`pressure.sh`** | What shape is this machine in? |
-| **`engine.sh`**, **`engine_guard.sh`** | Is the production engine failing its health check, and how many sessions from this Mac are open on it? A line at startup when either is worth saying; a denial before a command that would open one more |
+| **`load_fanout_advisory.sh`**, **`service_distress_advisory.sh`** | Is this session about to hit something shared many times over, or already getting the answers a struggling service gives? A note before a loop, parallel or background fan-out against a remote tool; a note after repeated timeouts, 5xx, 429 or slow calls |
 | **`main_drift_advisory.sh`** | Is the tree this subagent was handed the current one? |
 | **`cache_handoff_monitor.sh`** | Is this session about to lose its prompt cache — and what is still unfinished, or what should be summarised first? |
 | **`roster.sh`** | What did *this* session start that has not finished — and is it what I remember? |
@@ -682,39 +682,40 @@ machine is carrying. Independent checks and advisories fill that in.
   report that said it had ended.
 - **`pressure.sh`** — load per core, swap in use, disk headroom, and which dev
   servers are already listening.
-- **`engine.sh`**, **`engine_guard.sh`** — the production engine (Fly app
-  `trellys-engine`, one machine every firm shares) and the sessions this Mac
-  has open on it. Both read `scanners/engine.py`, which reads the Fly health
-  check (`fly checks list --json`, reused for 60 seconds, 10 after a failed
-  read) and counts engine connections: the slot files the machine-level guard
-  around `fly` writes under `~/.engine-guard/slots.d`, plus any `fly` process
-  to the engine that took no slot. Both stay silent on a machine with no
-  `~/.engine-guard`.
+- **`load_fanout_advisory.sh`**, **`service_distress_advisory.sh`** — a session
+  cannot see the load it puts on something shared, nor the health of the thing
+  on the other side. Neither note names a service: both read the command's
+  words and its results, so they work for any server, database, API or hosting
+  platform. `scanners/remote_calls.py` holds the shared reading of a command:
+  quoted text, comments and heredocs are not commands, so a commit message that
+  names `curl` never counts.
 
-  `engine.sh` (`SessionStart`) speaks when the health check is critical, when
-  it could not be read (said as not checked, never as healthy), when any
-  connection is open (`N of cap`), and when a wrapper listed in
-  `~/.engine-guard/wrappers` no longer carries the guard, which a flyctl
-  upgrade causes.
+  `load_fanout_advisory.sh` (`PreToolUse` on Bash) speaks when a command runs a
+  remote tool (`ssh`, `curl`, `psql`, `kubectl`, `aws`, `gh api`, `git fetch`
+  and the rest of the list in `remote_calls.py`) in a loop, in parallel
+  (`xargs -P`, `parallel`) or in the background. It names the shape, the tool
+  and the target when the command shows one, says that no health or load reading
+  for that service has reached the session (Scry cannot see what else is
+  watching it), and gives the insight that retries and parallel callers can
+  multiply the load a service sees. It says it again for
+  the same tool only after `SCRY_LOAD_NOTE_MINUTES`.
 
-  `engine_guard.sh` (`PreToolUse` on Bash) denies a command that reaches the
-  engine, by a deliberately small rule: the command (or one after `cd x &&`,
-  `;` or a pipe) starts with a typed `fly ssh console` or `fly machine exec`
-  naming the engine with `-a` or `--app`, or starts with `bash`, `sh` or
-  `python3` followed by a script file that makes such a call. Text that only
-  mentions the call never counts: a commit message, a heredoc, an echo, a
-  grep, a `cat` or `git add` of a script, another app whose name starts with
-  the engine's. Loops, functions, wrappers like `timeout` or `sudo`, and a
-  script's own calls are not seen; the wrapper around `fly` caps those, and
-  Scry does not install it. The hook denies while the health check
-  is critical or the open connections have reached the cap (default 4, set in
-  `~/.engine-guard/slots`). It denies with exit zero, as the build guard does.
-  The denial states what was read and what another session would add to a
-  machine in that state. An unreadable health check allows the command: the
-  hook cannot say the engine is down, and the wrapper still caps the
-  connections. A hook sees the command, not the inside of a script's own loop;
-  the wrapper around `fly` is what caps those, and Scry does not install it.
-  `~/.engine-guard/OFF` or `SCRY_ENGINE_GUARD=0` turns both off.
+  `service_distress_advisory.sh` (`PostToolUse` and `PostToolUseFailure` on
+  Bash) speaks when commands that ran a remote tool have returned two or more
+  of these answers within ten minutes: a call slow enough that the harness
+  moved it to the background, a timeout, a refused or reset connection, 502,
+  503, 504, 429 or "too many connections". It speaks again each time the count
+  in the window doubles. It states what was seen and what such answers do and
+  do not show: a 503 says the server is unable to handle the request, while a
+  timeout or a slow call does not show on its own whether the service or the
+  network is the cause. It adds that continuing to call a service that answers
+  this way, without finding out why, can add to what is wrong with it, since
+  retries can keep a backend overloaded. A file that merely contains the word "timeout" does not count; the
+  command must have run a remote tool.
+
+  Neither sees fan-out hidden inside a script: a hook sees one Bash call, not
+  the calls a script makes. Neither reads a service's health; where nothing
+  reports it, the note says no reading has reached the session.
 - **`statusline_setup.sh`** (Claude only) — says when Scry's status bar is not
   set up, and sets it up when asked. A plugin cannot set `statusLine`; it is a
   user setting. So a fresh install has hooks, a monitor and no bar, and until
@@ -1392,8 +1393,11 @@ starts changing a decision.
 | `SCRY_PINS_OSV_URL`, `_HEX_URL`, `_NPM_URL`, `_PYPI_URL`, `_GITHUB_URL` | the public services | base URL of each source, for a mirror |
 | `SCRY_GUIDANCE_ATTRIBUTION` | `1` | `0` stops the note when an edit adds a line opening with a name and a date to `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md` or a `.md` under `.claude/` |
 | `SCRY_SHELL_WRITES` | `1` | `0` stops the before-and-after picture around each Bash command, and with it the write notes for files a shell command changed |
-| `SCRY_ENGINE_GUARD` | `1` | `0` stops the startup engine line and the denial before a command that would open an engine session |
-| `SCRY_ENGINE_APP` | `trellys-engine` | the Fly app read for health and counted for open connections |
+| `SCRY_LOAD_NOTES` | `1` | `0` stops the note before a loop, parallel or background run of a remote tool |
+| `SCRY_LOAD_NOTE_MINUTES` | `30` | minutes before the fan-out note is said again for the same tool in the same session |
+| `SCRY_DISTRESS_NOTES` | `1` | `0` stops the note after repeated timeouts, 5xx, 429 or slow calls from remote tools |
+| `SCRY_DISTRESS_MIN` | `2` | answers of that kind within the window before the note first speaks (it then speaks each time the count doubles) |
+| `SCRY_DISTRESS_WINDOW_MINUTES` | `10` | how far back those answers are counted |
 | `SCRY_STATUSLINE_CHECK` | `1` | `0` (in the environment or in settings.json `env`) stops the session-start note that Scry's status bar is not set up |
 
 Raising a threshold buys silence. Lowering one buys warning. Neither changes

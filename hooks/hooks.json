@@ -35,12 +35,6 @@
           },
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/engine.sh",
-            "statusMessage": "Checking the engine...",
-            "timeout": 30
-          },
-          {
-            "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/provenance.sh",
             "statusMessage": "Counting doc artifacts...",
             "timeout": 30
@@ -169,6 +163,11 @@
         "hooks": [
           {
             "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/service_distress_advisory.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/shell_writes.sh",
             "timeout": 60
           }
@@ -188,6 +187,11 @@
       {
         "matcher": "Bash",
         "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/service_distress_advisory.sh",
+            "timeout": 10
+          },
           {
             "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/shell_writes.sh",
@@ -218,12 +222,12 @@
           },
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/engine_guard.sh",
-            "timeout": 45
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/agent_model_guard.sh",
+            "timeout": 10
           },
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/agent_model_guard.sh",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/load_fanout_advisory.sh",
             "timeout": 10
           },
           {
