@@ -8,14 +8,15 @@
 # machine has no CPU left to answer its health check, and sessions started
 # while it is down only lengthen the outage.
 #
-# A command reaches the engine when its own words are a `fly ssh console` or
-# `fly machine exec` call with -a <the engine's app>, or when it executes a
-# script file (bash file, python3 file, ./file) that contains both. Quoted
-# text, heredocs, a `cat` or `git add` of a script, and other apps whose name
-# starts with the engine's do not count. The state comes from
-# scanners/engine.py: the health check (cached 60 seconds), the open
-# connections and the cap (default 4, ~/.engine-guard/slots). Anything inside a script's own loop is out of this
-# hook's sight; the wrapper around `fly` caps those.
+# A command reaches the engine when it STARTS with a typed `fly ssh console`
+# or `fly machine exec` call naming the engine with -a, or with bash, sh or
+# python3 followed by a script file that makes such a call (after cd x &&,
+# ; or a pipe too). Text that only mentions the call is never a command
+# start: a commit message, a heredoc, an echo, a grep, a `cat` of a script.
+# The state comes from scanners/engine.py: the health check (cached 60
+# seconds), the open connections and the cap (default 4,
+# ~/.engine-guard/slots). Whatever the rule does not see (loops, functions,
+# a script's own calls) the wrapper around `fly` caps.
 #
 # Denies with exit zero, as elixir_build_guard.sh does. Unreadable health,
 # no ~/.engine-guard, a malformed payload and every other command pass
