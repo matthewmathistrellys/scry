@@ -2840,6 +2840,32 @@ class EngineGuardTests(unittest.TestCase):
         engine._text_connects(text)
         self.assertLess(time.time() - started, 1)
 
+    def test_guard_leaves_alone_quoted_substitutions_and_data_heredocs(self):
+        self.say(self.CRITICAL)
+        connect = f"fly ssh console -a {self.APP}"
+        for command in (
+            f"git commit -m 'guard: reads $({connect}) too'",
+            f"rg -F '$({connect}' .",
+            f"echo 'out=$({connect} -C uptime)' >> runbook.md",
+            f'git commit -m "$(echo "It\'s: {connect}")"',
+            f"echo $'don\\'t {connect}'",
+            f"git commit -F - <<\\EOF\nDon't run {connect}\nEOF",
+            f"python3 scripts/post_note.py <<'EOF'\nIncident: do not run {connect}\nEOF",
+            f"node scripts/slack.js <<EOF\nDo not {connect}\nEOF",
+            f"bash ./post.sh <<'EOF'\nDon't run {connect}\nEOF",
+            f"python3 -m json.tool <<EOF\n{connect}\nEOF",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.start("engine_guard.sh", self.bash(command)).stdout, "")
+
+    def test_guard_still_denies_a_substitution_the_shell_runs(self):
+        self.say(self.CRITICAL)
+        connect = f"fly ssh console -a {self.APP}"
+        for command in (f'echo "$({connect})"', f"x=$({connect} -C ls)", f'echo "a $(echo hi) $({connect})"',
+                        f"python3 - <<'PY'\nsubprocess.run(['fly','ssh','console','-a','{self.APP}'])\nPY"):
+            with self.subTest(command=command):
+                self.assertIn("health check", self.denial(self.start("engine_guard.sh", self.bash(command))))
+
     def test_guard_off_switch(self):
         self.say(self.CRITICAL)
         self.env["SCRY_ENGINE_GUARD"] = "0"

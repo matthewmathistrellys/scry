@@ -342,13 +342,15 @@ def _segments(command):
     return [seg for seg in segments if seg]
 
 
-_HEREDOC = re.compile(r"<<-?\s*(['\"]?)([^\s'\"<>;&|()]+)\1([^\n]*)\n(.*?)(?:\n[ \t]*\2[ \t]*(?=\n|$))", re.S)
+_HEREDOC = re.compile(r"<<-?\s*(['\"]?)\\?([^\s'\"<>;&|()]+)\1([^\n]*)\n(.*?)(?:\n[ \t]*\2[ \t]*(?=\n|$))", re.S)
 
 
 def _strip_heredocs(command, cwd, depth):
     """(command without heredoc bodies, what an interpreter reading one runs).
     The body of `cat <<EOF` is text; the body of `bash <<EOF` is a program."""
     found = []
+    if len(command) > MAX_PARSED or command.count("<<") > 20:
+        return command, ""             # the pattern is quadratic in unclosed heredocs
 
     def take(m):
         before = command[:m.start()].rsplit("\n", 1)[-1]
@@ -356,7 +358,13 @@ def _strip_heredocs(command, cwd, depth):
         words = parts[-1] if parts else []
         while words and (re.fullmatch(r"\w+=.*", words[0]) or words[0] in _WRAPPERS):
             words = words[1:]
-        if words and os.path.basename(words[0]) in _INTERPRETERS and not found:
+        # `python3 file <<EOF` hands the body to the file as data; only an
+        # interpreter reading its program from stdin runs it.
+        reads_program = (len(words) > 1 and _code_string(words[1:], "c") == "" and
+                         (_script_word(words[1:]) in ("", "-")) and words[1:2] != ["-m"])
+        if len(words) == 1:
+            reads_program = True
+        if words and os.path.basename(words[0]) in _INTERPRETERS and not found and reads_program:
             if os.path.basename(words[0]) in _SHELLS:
                 got = engine_command(m.group(4), cwd, depth + 1)
                 if got:
@@ -366,6 +374,14 @@ def _strip_heredocs(command, cwd, depth):
         return m.group(3)
 
     return _HEREDOC.sub(take, command), (found[0] if found else "")
+
+
+_COMMAND_POSITION_FLY = re.compile(r"(?:^|[;&|(`]|\$\()[ \t]*(?:\w+=\S+[ \t]+)*fly(?:ctl)?[ \t]", re.M)
+
+
+def _text_connects_at_command(text):
+    """The fallback for text shlex cannot split: a fly call must start a command."""
+    return bool(_COMMAND_POSITION_FLY.search(text) and _text_connects(text))
 
 
 def _text_connects(text):
@@ -451,6 +467,33 @@ def _script_connects(path, cwd):
         return False
 
 
+def _substitutions(command):
+    """The commands inside `$( ... )` that the shell would run: outside single
+    quotes, parentheses balanced."""
+    out, quote, i = [], "", 0
+    while i < len(command):
+        c = command[i]
+        if c == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote == "'":
+            quote = "" if c == "'" else quote
+        elif c == "'" and quote == "":
+            quote = "'"
+        elif c == '"':
+            quote = "" if quote == '"' else '"'
+        elif command.startswith("$(", i) and not command.startswith("$((", i):
+            depth, j = 1, i + 2
+            while j < len(command) and depth:
+                depth += (command[j] == "(") - (command[j] == ")")
+                j += 1
+            out.append(command[i + 2:j - 1 if depth == 0 else j])
+            i = j
+            continue
+        i += 1
+    return out
+
+
 def _script_word(rest):
     """The file an interpreter runs: the first word that is not a flag or the
     value of -o."""
@@ -486,16 +529,14 @@ def engine_command(command, cwd, depth=0):
         return heredoc
     if len(command) <= MAX_PARSED and _tokens(command) is None:
         # Unbalanced quotes that are not a comment or a heredoc: read it as text.
-        return "this command" if _text_connects(command) else ""
+        return "this command" if _text_connects_at_command(command) else ""
+    if depth < 2:
+        for inner in _substitutions(command):
+            found = engine_command(inner, cwd, depth + 1)
+            if found:
+                return found
     shell_app, shell_vars = "", {}
     for words in _segments(command):
-        if depth < 2:
-            for w in words:
-                start = w.find("$(")
-                if start >= 0:
-                    found = engine_command(w[start + 2:w.rfind(")") if ")" in w else len(w)], cwd, depth + 1)
-                    if found:
-                        return found
         env_app = ""
         while words and (re.fullmatch(r"\w+=.*", words[0]) or os.path.basename(words[0]) in _WRAPPERS
                          or words[0] == "export"):
