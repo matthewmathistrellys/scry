@@ -2631,6 +2631,122 @@ class SharedServiceLoadTests(unittest.TestCase):
                                    env={"SCRY_DISTRESS_NOTES": "0"}).stdout, "")
 
 
+class ContextLengthAdvisoryTests(unittest.TestCase):
+    """The ladder: each rung adds a work type and updates the earlier ones."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.base = Path(td.name)
+        self.cache = self.base / "cache"
+        self.cache.mkdir()
+        self.env = {"SCRY_CACHE_STATE_DIR": str(self.cache), "SCRY_CONTEXT_STATE_DIR": str(self.base / "state")}
+
+    def reading(self, tokens, session="s1", age=0, window=1_000_000):
+        (self.cache / f"{session}.deadline").write_text(json.dumps(
+            {"observed_at": int(time.time()) - age, "context_tokens": tokens, "context_window": window}))
+
+    def submit(self, tokens=None, session="s1", env=None, age=0, **extra):
+        if tokens is not None:
+            self.reading(tokens, session=session, age=age)
+        payload = {"hook_event_name": "UserPromptSubmit", "session_id": session, "prompt": "go", **extra}
+        return run_hook("context_length_advisory.sh", self.base, payload, {**self.env, **(env or {})})
+
+    def said(self, tokens, **kw):
+        return context(self.submit(tokens, **kw))
+
+    def test_a_fresh_session_at_its_usual_starting_size_is_silent(self):
+        self.assertEqual(self.submit(40_000).stdout, "")
+        self.assertEqual(self.submit(55_000).stdout, "")
+        self.assertEqual(self.submit(session="nofile").stdout, "")
+
+    def test_the_ladder_adds_a_work_type_at_each_rung_and_updates_the_earlier_ones(self):
+        at60 = self.said(65_000)
+        self.assertIn("Reading and classifying", at60)
+        self.assertNotIn("Review:", at60)
+        at80 = self.said(85_000)
+        self.assertTrue(at80.index("Review:") < at80.index("Reading and classifying"))
+        self.assertIn("NoLiMa", at80)                              # the read line is the updated one
+        self.assertNotIn("focused 300-token prompt", at80)
+        at100 = self.said(130_000)
+        self.assertTrue(at100.index("Build and coding") < at100.index("Review:") < at100.index("Reading and classifying"))
+        self.assertNotIn("Orchestration", at100)
+        at200 = self.said(210_000)
+        self.assertTrue(at200.index("Orchestration") < at200.index("Build and coding"))
+        self.assertIn("a commit or a pull request puts the work on disk", at200)
+        self.assertIn("worth carrying word for word", at200)
+
+    def test_each_rung_speaks_once_then_every_hundred_thousand(self):
+        spoken = [bool(self.said(n)) for n in (65_000, 70_000, 85_000, 105_000, 210_000, 250_000,
+                                              320_000, 390_000, 410_000, 520_000, 890_000, 910_000, 950_000)]
+        self.assertEqual(spoken, [True, False, True, True, True, False, True, False, True, True, True, True, False])
+
+    def test_the_range_caveat_comes_at_500k_and_the_hardest_rung_at_900k(self):
+        self.assertNotIn("128k (RULER)", self.said(420_000))
+        self.assertIn("128k (RULER)", self.said(520_000))
+        at900 = self.said(910_000)
+        self.assertIn("Beyond every measured length", at900)
+        self.assertIn("About 90k tokens remain before the window ends", at900)
+        self.assertIn("Work not yet written to files or handed off by then can be lost", at900)
+        self.assertIn("910k of a 1000k window (91%), as of its last reply", at900)
+
+    def test_a_session_that_begins_large_gets_the_whole_ladder_once(self):
+        said = self.said(310_000)
+        for name in ("Reading and classifying", "Review:", "Build and coding", "Orchestration"):
+            self.assertIn(name, said)
+        self.assertEqual(self.submit(315_000).stdout, "")
+
+    def test_a_dropped_context_lets_a_rung_speak_again(self):
+        self.assertTrue(self.said(130_000))
+        self.assertEqual(self.submit(45_000).stdout, "")
+        self.assertTrue(self.said(135_000))
+
+    def test_the_notes_give_observations_and_insights_without_orders_or_absolutes(self):
+        for tokens in (65_000, 85_000, 130_000, 210_000, 520_000, 910_000):
+            said = self.said(tokens).lower()
+            for phrase in ("you should", "must ", "always", "never", "do not", "reset now", "past the"):
+                self.assertNotIn(phrase, said)
+            self.assertRegex(said, r"\[(measured|prior)")
+
+    def test_an_old_reading_says_its_age_and_a_very_old_one_is_silent(self):
+        self.assertIn("10 minutes ago", self.said(130_000, age=600))
+        self.assertEqual(self.submit(520_000, age=3 * 3600).stdout, "")
+
+    def test_a_subagent_turn_and_the_off_switch_are_silent(self):
+        self.reading(310_000)
+        self.assertEqual(self.submit(agent_id="a1").stdout, "")
+        self.assertEqual(self.submit(env={"SCRY_CONTEXT_NOTES": "0"}).stdout, "")
+
+    def _record(self, context_window):
+        payload = {"session_id": "s8", "context_window": context_window,
+                   "prompt_cache": {"warm": True, "ttl": 3600, "expires_at": int(time.time()) + 1800, "requests": 3}}
+        subprocess.run(["bash", str(ROOT / "cache_deadline_statusline.sh")], input=json.dumps(payload), text=True,
+                       capture_output=True, check=True, env={**os.environ, **self.env, "SCRY_TAB": "/bin/true"})
+        return json.loads((self.cache / "s8.deadline").read_text())
+
+    def test_the_recorded_size_is_the_current_context_not_a_running_total(self):
+        rec = self._record({"context_window_size": 1000000, "total_input_tokens": 9000000,
+                            "used_percentage": 40,
+                            "current_usage": {"input_tokens": 4, "cache_creation_input_tokens": 1000,
+                                              "cache_read_input_tokens": 409000}})
+        self.assertEqual(rec["context_tokens"], 410004)
+        rec = self._record({"context_window_size": 1000000, "total_input_tokens": 9000000, "used_percentage": 40})
+        self.assertEqual(rec["context_tokens"], 400000)
+        rec = self._record({"context_window_size": 200000, "total_input_tokens": 52000})
+        self.assertEqual(rec["context_tokens"], 52000)
+
+    def test_the_status_line_wrapper_records_the_context_size(self):
+        payload = {"session_id": "s9", "model": {"id": "claude-opus-5-5"},
+                   "context_window": {"total_input_tokens": 412345, "context_window_size": 1000000},
+                   "prompt_cache": {"warm": True, "ttl": 3600, "expires_at": int(time.time()) + 1800, "requests": 3}}
+        subprocess.run(["bash", str(ROOT / "cache_deadline_statusline.sh")], input=json.dumps(payload), text=True,
+                       capture_output=True, check=True,
+                       env={**os.environ, **self.env, "SCRY_TAB": "/bin/true"})
+        rec = json.loads((self.cache / "s9.deadline").read_text())
+        self.assertEqual((rec["context_tokens"], rec["context_window"]), (412345, 1000000))
+        self.assertNotIn("model", json.dumps(rec))
+
+
 if __name__ == "__main__":
     unittest.main()
 
