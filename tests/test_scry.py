@@ -2801,6 +2801,45 @@ class EngineGuardTests(unittest.TestCase):
             with self.subTest(command=command[:40]):
                 self.assertEqual(self.start("engine_guard.sh", self.bash(command)).stdout, "")
 
+    def test_guard_denies_the_shapes_third_review_found(self):
+        self.say(self.CRITICAL)
+        connect = f"fly ssh console -a {self.APP}"
+        (self.base / "run.exs").write_text(f'System.cmd("fly", ["ssh","console","-a","{self.APP}"])\n')
+        (self.base / "run.py").write_text(f"subprocess.run(['fly','ssh','console','-a','{self.APP}'])\n")
+        (self.base / "c.sh").write_text(f"{connect}\n")
+        for command in (
+            f'out="$({connect} -C ls)"', f'echo "$({connect})"',
+            "mix run run.exs", "elixir run.exs", "uv run run.py", "uv run python run.py",
+            "bash -euo pipefail c.sh",
+        ):
+            with self.subTest(command=command):
+                self.assertIn("health check", self.denial(self.start("engine_guard.sh", self.bash(command))))
+
+    def test_guard_leaves_alone_apostrophes_comments_and_wrapped_reads(self):
+        self.say(self.CRITICAL)
+        (self.base / "c.sh").write_text(f"fly ssh console -a {self.APP}\n")
+        body = f"It doesn't block fly logs; fly ssh console -a {self.APP} is separate."
+        for command in (
+            f"git commit -F - <<'EOF'\n{body}\nEOF",
+            f"cat > notes.md <<'EOF'\n{body}\nEOF",
+            f'gh pr create --title x --body "$(cat <<\'EOF\'\nUse fly ssh console -a {self.APP} (12\" wide)\nEOF\n)"',
+            f"# Check what's calling the engine\nrg -n 'fly ssh console' scripts/ | grep {self.APP}",
+            f"# Engine is down; fly ssh console -a {self.APP} would add load\nfly status -a {self.APP}",
+            f"# restart path (fly ssh console -a {self.APP}) is off-limits\nfly status -a {self.APP}",
+            "timeout 60 git diff c.sh", "time git log -p -- c.sh", "sudo cat c.sh",
+            "nice -n 10 git log -p c.sh", "xargs grep -l ssh c.sh", "timeout 300 mix test c.sh",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.start("engine_guard.sh", self.bash(command)).stdout, "")
+
+    def test_the_fly_call_pattern_does_not_backtrack_on_many_flags(self):
+        sys.path.insert(0, str(ROOT / "scanners"))
+        import engine
+        text = "# it's trellys-engine\nfly " + '-a "x" ' * 30 + "status"
+        started = time.time()
+        engine._text_connects(text)
+        self.assertLess(time.time() - started, 1)
+
     def test_guard_off_switch(self):
         self.say(self.CRITICAL)
         self.env["SCRY_ENGINE_GUARD"] = "0"

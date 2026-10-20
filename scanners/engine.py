@@ -259,14 +259,18 @@ def lapsed_wrappers():
 _GAP = r"""[\s'",\[]+"""
 _CONNECT = re.compile(r"ssh" + _GAP + r"console|machines?" + _GAP + r"exec|\bm" + _GAP + r"exec")
 # A file or code string connects when it calls fly that way and names the app.
-_FLY_CALL = re.compile(r"\bfly(?:ctl)?\b" + _GAP + r"(?:-\w+" + _GAP + r"\S+" + _GAP + r")*(?:ssh" + _GAP
+_FLY_CALL = re.compile(r"\bfly(?:ctl)?\b" + _GAP + r"(?:-\w+" + _GAP + r"[^\s'\",\[]+" + _GAP + r")*(?:ssh" + _GAP
                        + r"console|machines?" + _GAP + r"exec|m" + _GAP + r"exec)")
 _SEPARATORS = {";", "&&", "||", "|", "|&", "&", "(", ")"}
 _WRAPPERS = {"env", "command", "exec", "time", "nohup", "builtin", "sudo", "xargs", "timeout", "nice",
              "caffeinate", "eval",
              "do", "then", "if", "elif", "else", "while", "until", "!", "{", "}"}
+_WRAPPER_VALUE_FLAGS = {"sudo": {"-u", "-g", "-C", "-h", "-p", "-U", "-D"}, "nice": {"-n"},
+                        "timeout": {"-s", "-k", "--signal", "--kill-after"},
+                        "xargs": {"-I", "-n", "-P", "-L", "-s", "-d", "-a", "-E"},
+                        "env": {"-u", "-C", "-S"}, "caffeinate": {"-t", "-w"}}
 _SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
-_INTERPRETERS = _SHELLS | {"python", "python3", "ruby", "node", "perl"}
+_INTERPRETERS = _SHELLS | {"python", "python3", "ruby", "node", "perl", "elixir"}
 _FLY_VALUE_FLAGS = {"-t", "--access-token", "-o", "--org", "-r", "--region", "-m", "--machine", "-C",
                     "--command", "--config"}
 _SCRY_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -286,6 +290,10 @@ def _split_lines(command):
                 quote = ""
         elif c in "'\"":
             quote = c
+        elif c == "#" and (i == 0 or command[i - 1] in " \t\n;&|()"):
+            end = command.find("\n", i)         # a comment runs to the end of its line
+            i = len(command) if end < 0 else end
+            continue
         elif c == "\n":
             c = " ; "
         out.append(c)
@@ -303,7 +311,7 @@ def _tokens(command):
         return []
     lex = shlex.shlex(_split_lines(command.replace("\\\n", " ")), posix=True, punctuation_chars=True)
     lex.whitespace_split = True
-    lex.commenters = ""                 # a `#` never hides the commands after it
+    lex.commenters = ""                 # comments were dropped by _split_lines, which knows the quotes
     try:
         return list(lex)
     except ValueError:
@@ -443,6 +451,18 @@ def _script_connects(path, cwd):
         return False
 
 
+def _script_word(rest):
+    """The file an interpreter runs: the first word that is not a flag or the
+    value of -o."""
+    for i, w in enumerate(rest):
+        if w.startswith("-"):
+            continue
+        if i and re.fullmatch(r"-[a-zA-Z]*o", rest[i - 1]):
+            continue
+        return w
+    return ""
+
+
 def _code_string(rest, letters="c"):
     """The argument after the flag that takes code, however it is grouped
     (-c, -lc, -e -u -c, -euo pipefail -c)."""
@@ -461,14 +481,21 @@ def engine_command(command, cwd, depth=0):
     fly call, the script file or code it runs, "" when nothing does. Reads
     the command's words, so a commit message, a heredoc fed to `cat`, a `cat`
     of a script or another app's name never counts."""
-    if len(command) <= MAX_PARSED and _tokens(command) is None:
-        # Unparseable (an apostrophe in a comment): read it as text instead.
-        return "this command" if _text_connects(command) else ""
     command, heredoc = _strip_heredocs(command, cwd, depth)
     if heredoc:
         return heredoc
+    if len(command) <= MAX_PARSED and _tokens(command) is None:
+        # Unbalanced quotes that are not a comment or a heredoc: read it as text.
+        return "this command" if _text_connects(command) else ""
     shell_app, shell_vars = "", {}
     for words in _segments(command):
+        if depth < 2:
+            for w in words:
+                start = w.find("$(")
+                if start >= 0:
+                    found = engine_command(w[start + 2:w.rfind(")") if ")" in w else len(w)], cwd, depth + 1)
+                    if found:
+                        return found
         env_app = ""
         while words and (re.fullmatch(r"\w+=.*", words[0]) or os.path.basename(words[0]) in _WRAPPERS
                          or words[0] == "export"):
@@ -485,13 +512,15 @@ def engine_command(command, cwd, depth=0):
             else:
                 if words[0] == "eval":
                     return engine_command(" ".join(words[1:]), cwd, depth + 1) if depth < 2 else ""
-                # skip the wrapper's own flags and values up to the command it runs
+                # skip the wrapper's own flags (and their values) to the command it runs
+                wrapper = os.path.basename(words[0])
                 words = words[1:]
-                while words and not (os.path.basename(words[0]) in _INTERPRETERS | {"fly", "flyctl"}
-                                     or (words[0][:1] not in "-0123456789" and "/" in words[0])):
-                    if re.fullmatch(r"\w+=.*", words[0]):
-                        break
+                takes = _WRAPPER_VALUE_FLAGS.get(wrapper, set())
+                while words and (words[0].startswith("-") or re.fullmatch(r"[\d.]+[smhd]?", words[0])):
+                    flag = words[0]
                     words = words[1:]
+                    if flag in takes and words:
+                        words = words[1:]
         if not words:
             continue
         first = os.path.basename(words[0])
@@ -517,9 +546,16 @@ def engine_command(command, cwd, depth=0):
                 elif first not in _SHELLS and _text_connects(code):
                     return "the code given to " + first
             elif rest and rest[0] != "-m":
-                script = next((w for w in rest if not w.startswith("-")), "")
+                script = _script_word(rest)
                 if script and _script_connects(script, cwd):
                     return script
+        elif first in ("mix", "uv") and rest[:1] == ["run"]:
+            tail = rest[1:]
+            if first == "uv" and tail and os.path.basename(tail[0]).startswith("python"):
+                tail = tail[1:]
+            script = _script_word(tail)
+            if script and _script_connects(script, cwd):
+                return script
         elif "/" in words[0] and _script_connects(words[0], cwd):
             return words[0]
     return ""
