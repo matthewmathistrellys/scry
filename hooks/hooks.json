@@ -35,6 +35,12 @@
           },
           {
             "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/engine.sh",
+            "statusMessage": "Checking the engine...",
+            "timeout": 30
+          },
+          {
+            "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/provenance.sh",
             "statusMessage": "Counting doc artifacts...",
             "timeout": 30
@@ -209,6 +215,11 @@
             "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/elixir_build_guard.sh",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/engine_guard.sh",
+            "timeout": 15
           },
           {
             "type": "command",
