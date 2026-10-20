@@ -118,8 +118,9 @@ try:
     said = state.get("said", -1)
     speak = reached > said
     if speak or reached < said or "base" not in state:
-        with open(path, "w", encoding="utf-8") as f:
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
             json.dump({"base": base, "said": reached}, f)
+        os.replace(path + ".tmp", path)
 except OSError:
     sys.exit(0)
 if not speak:
@@ -133,7 +134,8 @@ for t in reversed(ORDER):                # newest work type first
 age = int(now - seen)
 size = f"{tokens // 1000}k" + (f" of a {window // 1000}k window ({round(100 * tokens / window)}%)"
                               if isinstance(window, int) and window > 0 else "")
-when = f", as of the last status-line refresh {age // 60} minutes ago" if age >= 120 else ""
+when = (f", as of the last status-line refresh {age // 60} minutes ago" if age >= 120
+        else ", as of its last reply")
 extra = []
 if tokens >= 500_000:
     extra.append(BEYOND)

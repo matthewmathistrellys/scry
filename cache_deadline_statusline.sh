@@ -69,7 +69,20 @@ rec = {
 }
 cw = d.get("context_window")
 if isinstance(cw, dict):
-    used, size = cw.get("total_input_tokens"), cw.get("context_window_size")
+    # The context as it stands, not a running total: the current call
+    # token counts when the payload gives them, else the used percentage of
+    # the window, else total_input_tokens as the last resort.
+    size = cw.get("context_window_size")
+    cur = cw.get("current_usage")
+    used = None
+    if isinstance(cur, dict):
+        parts = [cur.get(k) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
+        if any(isinstance(x, (int, float)) for x in parts):
+            used = sum(x for x in parts if isinstance(x, (int, float)))
+    if used is None and isinstance(size, (int, float)) and isinstance(cw.get("used_percentage"), (int, float)):
+        used = size * cw["used_percentage"] / 100.0
+    if used is None:
+        used = cw.get("total_input_tokens")
     if isinstance(used, (int, float)) and isinstance(size, (int, float)) and size > 0:
         rec["context_tokens"], rec["context_window"] = int(used), int(size)
 

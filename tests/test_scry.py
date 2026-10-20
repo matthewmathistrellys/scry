@@ -2688,7 +2688,7 @@ class ContextLengthAdvisoryTests(unittest.TestCase):
         self.assertIn("128k (RULER)", self.said(520_000))
         at900 = self.said(910_000)
         self.assertIn("Beyond every measured length", at900)
-        self.assertIn("910k of a 1000k window (91%)", at900)
+        self.assertIn("910k of a 1000k window (91%), as of its last reply", at900)
 
     def test_a_session_that_begins_large_gets_the_whole_ladder_once(self):
         said = self.said(310_000)
@@ -2720,6 +2720,24 @@ class ContextLengthAdvisoryTests(unittest.TestCase):
         self.reading(310_000)
         self.assertEqual(self.submit(agent_id="a1").stdout, "")
         self.assertEqual(self.submit(env={"SCRY_CONTEXT_NOTES": "0"}).stdout, "")
+
+    def _record(self, context_window):
+        payload = {"session_id": "s8", "context_window": context_window,
+                   "prompt_cache": {"warm": True, "ttl": 3600, "expires_at": int(time.time()) + 1800, "requests": 3}}
+        subprocess.run(["bash", str(ROOT / "cache_deadline_statusline.sh")], input=json.dumps(payload), text=True,
+                       capture_output=True, check=True, env={**os.environ, **self.env, "SCRY_TAB": "/bin/true"})
+        return json.loads((self.cache / "s8.deadline").read_text())
+
+    def test_the_recorded_size_is_the_current_context_not_a_running_total(self):
+        rec = self._record({"context_window_size": 1000000, "total_input_tokens": 9000000,
+                            "used_percentage": 40,
+                            "current_usage": {"input_tokens": 4, "cache_creation_input_tokens": 1000,
+                                              "cache_read_input_tokens": 409000}})
+        self.assertEqual(rec["context_tokens"], 410004)
+        rec = self._record({"context_window_size": 1000000, "total_input_tokens": 9000000, "used_percentage": 40})
+        self.assertEqual(rec["context_tokens"], 400000)
+        rec = self._record({"context_window_size": 200000, "total_input_tokens": 52000})
+        self.assertEqual(rec["context_tokens"], 52000)
 
     def test_the_status_line_wrapper_records_the_context_size(self):
         payload = {"session_id": "s9", "model": {"id": "claude-opus-5-5"},

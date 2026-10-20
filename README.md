@@ -739,7 +739,7 @@ machine is carrying. Independent checks and advisories fill that in.
   so a new measurement changes it in one place.
 
   The size comes from the file `cache_deadline_statusline.sh` writes for the
-  session (context tokens and window size, two numbers), so it needs Scry's
+  session (context tokens and window size, two numbers; the current call's token counts when Claude Code's status-line payload gives them, else the used percentage of the window, else the session total as the last resort), so it needs Scry's
   status-line wrapper. Without it, with a reading older than
   `SCRY_CONTEXT_STALE_MINUTES`, or on a subagent's turn, it is silent, and that
   silence says nothing about how big the context is.
