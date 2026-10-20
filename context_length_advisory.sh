@@ -2,26 +2,32 @@
 # context_length_advisory.sh — UserPromptSubmit
 #
 # A session cannot see how much it is carrying. The status line reports the
-# context size; the session never reads it. Every request re-reads the whole
-# context, once the prompt cache has gone cold the next request writes it again
-# at the full rate, and long inputs have been measured to cost accuracy
-# gradually, below the window's limit, more for tasks that reason over the
-# text than for looking up a literal phrase (Chroma "Context Rot", 2025;
-# NoLiMa, 2025), on older Claude models; no measurement is published for
-# current ones.
+# context size; the session never reads it. What a long context costs depends
+# on the work: matching by meaning has been measured to lose accuracy earliest,
+# review next, build and coding later, orchestration later still, and none of
+# it has been measured on current Claude models. So the note is a ladder. Each
+# rung adds the work type that matters from that size and updates the earlier
+# ones, newest first:
 #
-# So this speaks when the context size, as the status line last reported it,
-# first reaches each of SCRY_CONTEXT_BANDS (tokens in thousands, default
-# 150,300,500,750), once per band per session. It says the size, the share of
-# the window, and how old the reading is. The bands are where a note is
-# worth saying, not limits: where a session should reset depends on the work,
-# and nothing here says it is past one.
+#   +30k   reading and classifying by meaning   (growth since the session began)
+#   +50k   review                               (growth since the session began)
+#   100k   build and coding
+#   200k   orchestration
+#   300k to 800k, every 100k   the types above, restated for the size
+#   900k   all of it at once, beyond every measured length, near the window
+#
+# The first two count growth, because a new session already starts near 40k
+# with Claude Code's own prompt and tools; the rest are absolute sizes, since
+# what a long input costs follows its length. Each rung speaks once per
+# session. Dropping below one (after a /compact) lets it speak again. Every
+# line says whether it rests on a measurement (older models, other tasks) or is
+# a prior; the ladder is the one table below, so new measurements change it in
+# one place.
 #
 # The size comes from the file cache_deadline_statusline.sh writes for the
-# session. With no status-line wrapper installed, no file, a reading older
-# than SCRY_CONTEXT_STALE_MINUTES (default 120), or a subagent's turn, it is
-# silent; silence here is not a statement that the context is small.
-# Dropping below a band (after a /compact) lets that band speak again.
+# session. With no status-line wrapper installed, no file, a reading older than
+# SCRY_CONTEXT_STALE_MINUTES (default 120), or a subagent's turn, it is silent;
+# silence is not a statement that the context is small.
 # SCRY_CONTEXT_NOTES=0 turns it off. Exits zero always.
 set -uo pipefail
 
@@ -33,10 +39,44 @@ payload="$(cat 2>/dev/null || true)"
 CTX_PAYLOAD="$payload" \
 SCRY_CACHE_DIR="${SCRY_CACHE_STATE_DIR:-${TMPDIR:-/tmp}/scry-cache-deadline}" \
 SCRY_STATE="${SCRY_CONTEXT_STATE_DIR:-${TMPDIR:-/tmp}/scry-context-length}" \
-SCRY_BANDS="${SCRY_CONTEXT_BANDS:-150,300,500,750}" \
 SCRY_STALE="${SCRY_CONTEXT_STALE_MINUTES:-120}" \
 python3 - <<'PY' 2>/dev/null || true
 import json, os, re, sys, time
+
+# ── The ladder ──────────────────────────────────────────────────────────────
+# (size in tokens, "growth" or "abs", work type introduced at this rung)
+RUNGS = [(30_000, "growth", "read"), (50_000, "growth", "review"), (100_000, "abs", "build"),
+         (200_000, "abs", "orch")] + [(k * 1000, "abs", None) for k in range(300, 900, 100)] + [(900_000, "abs", "hard")]
+
+# For each work type: the line when its rung is reached, and the line after.
+# [measured] = a published measurement, on older models or other tasks;
+# [prior] = reasoning from that evidence, not a measurement.
+LINES = {
+    "read": (
+        "Reading and classifying by meaning: this kind of work has been measured to lose accuracy earliest as input grows. "
+        "In Chroma's tests every model did better on a focused 300-token prompt than on the same question inside about 113k tokens, "
+        "Claude models included, on older generations [measured].",
+        "Reading and classifying by meaning: the measured losses (NoLiMa: 11 of 13 models below half their short-context score at 32k tokens) "
+        "were taken at far shorter lengths than this; none exists for current Claude models [measured, other models]."),
+    "review": (
+        "Review: reasoning over text has been measured to lose accuracy earlier than looking up a phrase. "
+        "A reviewer in a fresh context, holding the artifact and its criteria, is not anchored on the author's context [prior].",
+        "Review: the context that wrote the work is the one now judging it; a reader in a fresh context is the arrangement the evidence favours [prior]."),
+    "build": (
+        "Build and coding: in one bug-fixing study (small non-Claude models), runs that passed averaged about 8-9k tokens and runs that failed about 16-18k; "
+        "that is a correlation, since harder tasks also run longer [measured]. Work is often split by task, with state in files and commits [prior].",
+        "Build and coding: a commit or a pull request puts the work on disk, and a new session can begin from it [prior]."),
+    "orch": (
+        "Orchestration: no study isolates it. Models have been measured losing about 39% on average in long multi-turn exchanges, mostly in reliability, "
+        "and committing early to assumptions they often fail to recover from (Laban et al., 2025) [measured, other tasks]. "
+        "Anthropic's long-running-agent guidance keeps the plan in files outside the context [prior].",
+        "Orchestration: a plan and statuses held in files can be read by the next session; ones held only here may not be [prior]."),
+}
+ORDER = ["read", "review", "build", "orch"]
+COST = ("Every request re-reads all of it, and once the prompt cache has gone cold the next request writes it again at the full rate.")
+BEYOND = ("The long-input studies cited reach 32k tokens (NoLiMa) and 128k (RULER); what holds beyond that has not been measured [measured].")
+HARD = ("Beyond every measured length, with the context near the window's limit, the earlier lines apply together; "
+        "summaries written at compaction can lose instructions (Anthropic's long-running-agent post) [measured].")
 
 try:
     d = json.loads(os.environ["CTX_PAYLOAD"])
@@ -59,34 +99,47 @@ stale = os.environ["SCRY_STALE"]
 if now - seen > (int(stale) if stale.isdigit() and int(stale) > 0 else 120) * 60:
     sys.exit(0)
 
-bands = sorted({int(b) * 1000 for b in re.findall(r"\d+", os.environ["SCRY_BANDS"]) if int(b) > 0})
-reached = max([b for b in bands if tokens >= b], default=0)
-
-path = os.path.join(os.environ["SCRY_STATE"], sid + ".said")
+path = os.path.join(os.environ["SCRY_STATE"], sid + ".json")
 try:
     os.makedirs(os.environ["SCRY_STATE"], exist_ok=True)
     try:
-        said = int(open(path, encoding="utf-8").read().strip() or 0)
+        with open(path, encoding="utf-8") as f:
+            state = json.load(f)
     except (OSError, ValueError):
-        said = 0
+        state = {}
+    base = state.get("base")
+    if not isinstance(base, int):
+        base = tokens                    # the first size this session was seen at
+    growth = max(0, tokens - base)
+    reached = -1
+    for i, (size, kind, _) in enumerate(RUNGS):
+        if (growth if kind == "growth" else tokens) >= size:
+            reached = i
+    said = state.get("said", -1)
     speak = reached > said
-    if speak or reached < said:
+    if speak or reached < said or "base" not in state:
         with open(path, "w", encoding="utf-8") as f:
-            f.write(str(reached))
+            json.dump({"base": base, "said": reached}, f)
 except OSError:
     sys.exit(0)
 if not speak:
     sys.exit(0)
 
+introduced = {RUNGS[i][2]: i for i in range(reached + 1) if RUNGS[i][2]}
+lines = []
+for t in reversed(ORDER):                # newest work type first
+    if t in introduced:
+        lines.append(LINES[t][0] if introduced[t] > said else LINES[t][1])
 age = int(now - seen)
 size = f"{tokens // 1000}k" + (f" of a {window // 1000}k window ({round(100 * tokens / window)}%)"
                               if isinstance(window, int) and window > 0 else "")
 when = f", as of the last status-line refresh {age // 60} minutes ago" if age >= 120 else ""
-text = (f"SCRY: this session's context is {size}{when}.\n"
-        "Every request re-reads all of it, and once the prompt cache has gone cold the next request writes it again at the full rate. "
-        "Long inputs have been measured to cost accuracy gradually, even below the window's limit, more for tasks that reason over the text than for looking up a literal phrase "
-        "(Chroma 2025, NoLiMa 2025, on older Claude models; none is published for current ones). "
-        "Work written to files can carry into a new session; work held only in this context may not.")
+extra = []
+if tokens >= 500_000:
+    extra.append(BEYOND)
+if "hard" in introduced:
+    extra.append(HARD)
+text = "\n".join([f"SCRY: this session's context is {size}{when} (growth since it began: {growth // 1000}k).", *lines, COST, *extra])
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text},
                   "suppressOutput": True}))
 PY
