@@ -2772,6 +2772,35 @@ class EngineGuardTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(self.start("engine_guard.sh", self.bash(command)).stdout, "")
 
+    def test_guard_denies_the_shapes_second_review_found(self):
+        self.say(self.CRITICAL)
+        connect = f"fly ssh console -a {self.APP}"
+        (self.base / "probe.sh").write_text(f"#!/bin/sh\n{connect}\n")
+        for command in (
+            f"{connect} # it's done",
+            f"# we can't wait\n{connect}",
+            f"cd apps/engine && bash <<'X'\n{connect}\nX",
+            f"echo hi; python3 - <<'PY'\nsubprocess.run(['fly','ssh','console','-a','{self.APP}'])\nPY",
+            f"fly \\\n  ssh console -a {self.APP}", f"fly ssh \\\n  console -a {self.APP}",
+            f"out=`{connect}`", f"echo `{connect}`",
+            f"node -e \"require('child_process').execSync('{connect}')\"",
+            f"sh -euo pipefail -c '{connect}'",
+            f"sudo -u matt {connect}", f"sudo -E {connect}", f"nice -n 10 {connect}",
+            f"env -i PATH=/bin {connect}", f"ls | xargs -n1 {connect}", f"timeout -s KILL 30 {connect}",
+            f"caffeinate -i {connect}", f"eval {connect}", f"eval '{connect}'",
+            "/usr/bin/env bash probe.sh",
+            f"APP={self.APP}; fly ssh console -a \"$APP\"", f"APP={self.APP}; fly ssh console --app ${{APP}}",
+        ):
+            with self.subTest(command=command):
+                self.assertIn("health check", self.denial(self.start("engine_guard.sh", self.bash(command))))
+
+    def test_guard_leaves_alone_a_hyphenated_heredoc_and_a_huge_word(self):
+        self.say(self.CRITICAL)
+        for command in (f"cat <<'END-OF' > notes.txt\nfly ssh console -a {self.APP}\nEND-OF",
+                        "echo '" + "x" * 300_000 + "'"):
+            with self.subTest(command=command[:40]):
+                self.assertEqual(self.start("engine_guard.sh", self.bash(command)).stdout, "")
+
     def test_guard_off_switch(self):
         self.say(self.CRITICAL)
         self.env["SCRY_ENGINE_GUARD"] = "0"
