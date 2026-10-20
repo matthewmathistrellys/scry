@@ -12,9 +12,9 @@
 # `fly machine exec` call with -a <the engine's app>, or when it executes a
 # script file (bash file, python3 file, ./file) that contains both. Quoted
 # text, heredocs, a `cat` or `git add` of a script, and other apps whose name
-# starts with the engine's do not count (scanners/engine.py). The state comes from scanners/engine.py: the health check
-# (cached 60 seconds), the open connections and the cap (default 4,
-# ~/.engine-guard/slots). Anything inside a script's own loop is out of this
+# starts with the engine's do not count. The state comes from
+# scanners/engine.py: the health check (cached 60 seconds), the open
+# connections and the cap (default 4, ~/.engine-guard/slots). Anything inside a script's own loop is out of this
 # hook's sight; the wrapper around `fly` caps those.
 #
 # Denies with exit zero, as elixir_build_guard.sh does. Unreadable health,
@@ -27,12 +27,8 @@ set -uo pipefail
 payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 
-# Matches every Bash call, so skip the interpreter unless the command could
-# be a fly connection or a script.
-case "$payload" in
-  *console*|*exec*|*.sh*|*.py*|*.bash*) ;;
-  *) exit 0 ;;
-esac
+# Matches every Bash call, so a machine with no engine guard pays nothing.
+[ -d "${ENGINE_GUARD_HOME:-$HOME/.engine-guard}" ] || exit 0
 
 ENGINE_PAYLOAD="$payload" SCRY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scanners" python3 - <<'PY' 2>/dev/null || true
 import json

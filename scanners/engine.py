@@ -20,11 +20,13 @@ Run as a script: `engine.py status` prints one JSON object.
 """
 
 import contextlib
+import errno
 import fcntl
 import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -140,8 +142,8 @@ def _reading_lock():
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
-            except OSError:
-                if time.time() >= deadline:
+            except OSError as e:
+                if e.errno not in (errno.EAGAIN, errno.EACCES) or time.time() >= deadline:
                     break
                 time.sleep(0.1)
     except OSError:
@@ -254,10 +256,19 @@ def lapsed_wrappers():
 
 
 # ── Which commands reach the engine ─────────────────────────────────────────
-_CONNECT = re.compile(r"ssh[\s'\",\[]+console|machines?[\s'\",\[]+exec|\bm[\s'\",\[]+exec")
+_GAP = r"""[\s'",\[]+"""
+_CONNECT = re.compile(r"ssh" + _GAP + r"console|machines?" + _GAP + r"exec|\bm" + _GAP + r"exec")
+# A file or code string connects when it calls fly that way and names the app.
+_FLY_CALL = re.compile(r"\bfly(?:ctl)?\b" + _GAP + r"(?:-\w+" + _GAP + r"\S+" + _GAP + r")*(?:ssh" + _GAP
+                       + r"console|machines?" + _GAP + r"exec|m" + _GAP + r"exec)")
 _SEPARATORS = {";", "&&", "||", "|", "|&", "&", "(", ")"}
-_WRAPPERS = {"env", "command", "exec", "time", "nohup", "builtin"}
-_INTERPRETERS = {"bash", "sh", "zsh", "dash", "ksh", "python", "python3", "ruby", "node", "perl"}
+_WRAPPERS = {"env", "command", "exec", "time", "nohup", "builtin", "sudo", "xargs", "timeout", "nice",
+             "do", "then", "if", "elif", "else", "while", "until", "!", "{", "}"}
+_SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+_INTERPRETERS = _SHELLS | {"python", "python3", "ruby", "node", "perl"}
+_FLY_VALUE_FLAGS = {"-t", "--access-token", "-o", "--org", "-r", "--region", "-m", "--machine", "-C",
+                    "--command", "--config"}
+_SCRY_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 
 def _split_lines(command):
@@ -281,31 +292,67 @@ def _split_lines(command):
     return "".join(out)
 
 
-def _segments(command):
-    command = re.sub(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?\n\s*\2\s*(?:\n|$)", " ", command, flags=re.S)
+def _tokens(command):
     lex = shlex.shlex(_split_lines(command), posix=True, punctuation_chars=True)
     lex.whitespace_split = True
+    lex.commenters = ""                 # a `#` never hides the commands after it
     try:
-        tokens = list(lex)
+        return list(lex)
     except ValueError:
         return []
+
+
+def _segments(command):
     segments, current, skip = [], [], False
-    for tok in tokens:
+    for tok in _tokens(command):
         if skip:
             skip = False
-            continue
-        if tok in _SEPARATORS:
+        elif tok in _SEPARATORS:
             segments.append(current)
             current = []
         elif re.fullmatch(r"[<>]+", tok):
             skip = True                 # a redirection and its target
         else:
-            current.append(tok)
+            if re.match(r"\w+=[^`]*`", tok):
+                tok = tok.split("`", 1)[1]      # out=`fly ...`: the command inside the backticks
+            current.append(tok.lstrip("`"))
     segments.append(current)
     return [seg for seg in segments if seg]
 
 
+_HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1([^\n]*)\n(.*?)(?:\n[ \t]*\2[ \t]*(?=\n|$))", re.S)
+
+
+def _strip_heredocs(command, cwd, depth):
+    """(command without heredoc bodies, what an interpreter reading one runs).
+    The body of `cat <<EOF` is text; the body of `bash <<EOF` is a program."""
+    found = []
+
+    def take(m):
+        before = command[:m.start()].rsplit("\n", 1)[-1]
+        words = _tokens(before)
+        while words and (re.fullmatch(r"\w+=.*", words[0]) or words[0] in _WRAPPERS):
+            words = words[1:]
+        if words and os.path.basename(words[0]) in _INTERPRETERS and not found:
+            if os.path.basename(words[0]) in _SHELLS:
+                got = engine_command(m.group(4), cwd, depth + 1)
+                if got:
+                    found.append("heredoc")
+            elif _text_connects(m.group(4)):
+                found.append("heredoc")
+        return m.group(3)
+
+    return _HEREDOC.sub(take, command), (found[0] if found else "")
+
+
+def _text_connects(text):
+    named = re.search(r"(?<![\w-])" + re.escape(app()) + r"(?![\w-])", text)
+    return bool(named and _FLY_CALL.search(text))
+
+
 def _toml_app(path):
+    if not _regular(path):
+        return ""
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -315,6 +362,13 @@ def _toml_app(path):
     except OSError:
         pass
     return ""
+
+
+def _regular(path):
+    try:
+        return stat.S_ISREG(os.stat(path).st_mode)       # a FIFO would block the read
+    except OSError:
+        return False
 
 
 def _fly_targets_engine(words, cwd, env_app=""):
@@ -337,7 +391,7 @@ def _fly_targets_engine(words, cwd, env_app=""):
             config = w[9:]
         elif w.startswith("-a=") or (w.startswith("-a") and len(w) > 2 and not w.startswith("--")):
             target = w[3:] if w.startswith("-a=") else w[2:]
-        elif w in ("-C", "--command") and i + 1 < len(words):
+        elif w in _FLY_VALUE_FLAGS and i + 1 < len(words):
             i += 2
             continue
         elif not w.startswith("-"):
@@ -357,44 +411,75 @@ def _script_connects(path, cwd):
     path = os.path.expanduser(path)
     if not os.path.isabs(path):
         path = os.path.join(cwd, path)
+    # Scry's own files describe the connection in prose and constants.
+    if os.path.realpath(path).startswith(_SCRY_ROOT + os.sep) or not _regular(path):
+        return False
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
-            text = f.read(2_000_000)
+            return _text_connects(f.read(2_000_000))
     except OSError:
         return False
-    named = re.search(r"(?<![\w-])" + re.escape(app()) + r"(?![\w-])", text)
-    return bool(named and _CONNECT.search(text))
+
+
+def _code_string(rest):
+    """The argument after a `-c` flag, however it is grouped (-c, -lc, -e -u -c)."""
+    for i, w in enumerate(rest):
+        if not w.startswith("-"):
+            return ""
+        if not w.startswith("--") and "c" in w[1:] and i + 1 < len(rest):
+            return rest[i + 1]
+    return ""
 
 
 def engine_command(command, cwd, depth=0):
-    """What in `command` opens an engine session: the text `fly ssh console`
-    (or the typed fly call itself), or the script file it runs. "" when
-    nothing does. Reads the command's words, so a commit message, a heredoc,
-    a `cat` of a script or another app's name never counts."""
+    """What in `command` opens an engine session: "this command" for a typed
+    fly call, the script file or code it runs, "" when nothing does. Reads
+    the command's words, so a commit message, a heredoc fed to `cat`, a `cat`
+    of a script or another app's name never counts."""
+    command, heredoc = _strip_heredocs(command, cwd, depth)
+    if heredoc:
+        return heredoc
+    shell_app = ""
     for words in _segments(command):
         env_app = ""
-        while words and (re.fullmatch(r"\w+=.*", words[0]) or words[0] in _WRAPPERS):
+        while words and (re.fullmatch(r"\w+=.*", words[0]) or words[0] in _WRAPPERS or words[0] == "export"):
+            if words[0] == "timeout":
+                words = words[1:]
+                while words and words[0].startswith("-"):
+                    words = words[1:]
+                words = words[1:]           # the duration
+                continue
+            if words[0] == "export":
+                words = words[1:]
+                continue
             if words[0].startswith("FLY_APP="):
                 env_app = words[0][8:]
+                if len(words) == 1:
+                    shell_app = env_app     # `FLY_APP=x` alone holds for the commands after it
             words = words[1:]
         if not words:
             continue
         first = os.path.basename(words[0])
         rest = words[1:]
-        if first == "cd":
+        if first in ("cd", "pushd"):
             if rest:
                 target = os.path.expanduser(rest[0])
                 cwd = target if os.path.isabs(target) else os.path.join(cwd, target)
         elif first in ("fly", "flyctl"):
-            if _fly_targets_engine(rest, cwd, env_app):
+            if _fly_targets_engine(rest, cwd, env_app or shell_app):
                 return "this command"
+        elif first in ("source", ".") and rest:
+            if _script_connects(rest[0], cwd):
+                return rest[0]
         elif first in _INTERPRETERS:
-            if "-c" in rest[:2] and depth < 2:
-                at = rest.index("-c")
-                if at + 1 < len(rest):
-                    found = engine_command(rest[at + 1], cwd, depth + 1)
+            code = _code_string(rest)
+            if code:
+                if first in _SHELLS and depth < 2:
+                    found = engine_command(code, cwd, depth + 1)
                     if found:
                         return found
+                elif first not in _SHELLS and _text_connects(code):
+                    return "the code given to " + first
             elif rest and rest[0] != "-m":
                 script = next((w for w in rest if not w.startswith("-")), "")
                 if script and _script_connects(script, cwd):

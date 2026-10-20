@@ -2736,6 +2736,42 @@ class EngineGuardTests(unittest.TestCase):
             proc.communicate(json.dumps(self.bash(self.CONNECT)))
         self.assertEqual(len(self.calls.read_text().split()), 1)
 
+    def test_guard_denies_the_shapes_review_found(self):
+        self.say(self.CRITICAL)
+        connect = f"fly ssh console -a {self.APP} -C ls"
+        (self.base / "connect").write_text(f"#!/bin/sh\n{connect}\n")
+        (self.base / "connect").chmod(0o755)
+        (self.base / "connect.js").write_text(f"require('child_process').execSync('{connect}')\n")
+        (self.base / "probe.sh").write_text(f"#!/bin/sh\n{connect}\n")
+        for command in (
+            f"# open a console\n{connect}",
+            f"echo a#b && {connect}",
+            f"cat <<EOF > notes.txt\nhello\nEOF\n{connect}",
+            f"bash <<'EOF'\n{connect}\nEOF",
+            f"python3 - <<'PY'\nimport subprocess\nsubprocess.run(['fly','ssh','console','-a','{self.APP}'])\nPY",
+            "./connect", "bash connect", "node connect.js",
+            f"for i in 1 2; do {connect}; done",
+            f"if {connect}; then echo ok; fi",
+            f"{{ {connect}; }} 2>&1",
+            f"timeout 30 {connect}", f"sudo {connect}", f"echo x | xargs {connect}",
+            "source ./probe.sh", ". ./probe.sh",
+            f"export FLY_APP={self.APP}; fly ssh console",
+            f"FLY_APP={self.APP}; fly ssh console",
+            f"bash -lc '{connect}'", f"bash -e -u -c '{connect}'", f"sh -ec '{connect}'",
+            f"fly -t TOKEN ssh console -a {self.APP}",
+            f"out=`{connect}`",
+            f"python3 -c \"import subprocess; subprocess.run(['fly','ssh','console','-a','{self.APP}'])\"",
+        ):
+            with self.subTest(command=command):
+                self.assertIn("health check", self.denial(self.start("engine_guard.sh", self.bash(command))))
+
+    def test_guard_leaves_alone_files_that_only_describe_the_connection(self):
+        self.say(self.CRITICAL)
+        for command in (f"python3 {ROOT}/scanners/engine.py status",
+                        "mkfifo pipe.sh && timeout 2 bash pipe.sh"):
+            with self.subTest(command=command):
+                self.assertEqual(self.start("engine_guard.sh", self.bash(command)).stdout, "")
+
     def test_guard_off_switch(self):
         self.say(self.CRITICAL)
         self.env["SCRY_ENGINE_GUARD"] = "0"
