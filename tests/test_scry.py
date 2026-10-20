@@ -174,7 +174,7 @@ class ScryHookTests(unittest.TestCase):
             for group in hooks["hooks"]["SessionStart"]
             for item in group["hooks"]
         ]
-        self.assertEqual(len(commands), 10)
+        self.assertEqual(len(commands), 9)
         self.assertTrue(all("PLUGIN_ROOT" in command for command in commands))
         self.assertTrue(all("CLAUDE_PLUGIN_ROOT" in command for command in commands))
         entry = marketplace["plugins"][0]
@@ -2507,235 +2507,124 @@ class ScryHookTests(unittest.TestCase):
         self.assertIsNone(self._pre("Workflow", {"name": "saved-workflow"}))
 
 
-class EngineGuardTests(unittest.TestCase):
-    """The production engine: health read through `fly checks list`, sessions
-    open from this Mac. A fake fly answers from a file; no real fly runs."""
-
-    APP = "trellys-engine"
-    PASSING = '[{"name": "status", "status": "passing"}]'
-    CRITICAL = '[{"name": "status", "status": "critical"}]'
+class SharedServiceLoadTests(unittest.TestCase):
+    """A command that repeats calls to a remote tool, and the answers a
+    service gives when it has fallen behind."""
 
     def setUp(self):
         td = tempfile.TemporaryDirectory()
         self.addCleanup(td.cleanup)
         self.base = Path(td.name)
-        self.guard = self.base / "guard"
-        (self.guard / "slots.d").mkdir(parents=True)
-        self.answer = self.base / "answer.json"
-        self.calls = self.base / "calls"
-        self.fly = self.base / "fakefly"
-        self.fly.write_text(
-            "#!/bin/sh\n"
-            f'echo x >> "{self.calls}"\n'
-            f'cat "{self.answer}" || exit 1\n')
-        self.fly.chmod(0o755)
-        self.answer.write_text(self.PASSING)
-        # Real engine sessions from other tabs show up in `ps`; the shim hides
-        # every engine process except the ones these tests start (their
-        # command line ends at the app name).
-        shim = self.base / "bin"
-        shim.mkdir()
-        (shim / "ps").write_text(
-            "#!/bin/sh\n"
-            "/bin/ps \"$@\" | awk '!/trellys-engine/ || /-a trellys-engine$/'\n")
-        (shim / "ps").chmod(0o755)
-        self.env = {"ENGINE_GUARD_HOME": str(self.guard),
-                    "ENGINE_GUARD_REAL_FLY": str(self.fly),
-                    "PATH": f"{shim}:{os.environ['PATH']}"}
+        self.env = {"SCRY_LOAD_STATE_DIR": str(self.base / "load"),
+                    "SCRY_DISTRESS_STATE_DIR": str(self.base / "distress")}
+        self.n = 0
 
-    def say(self, text):
-        self.answer.write_text(text)
-        (self.guard / "health").unlink(missing_ok=True)
+    def pre(self, command, session="s1", env=None):
+        return run_hook("load_fanout_advisory.sh", self.base,
+                        {"hook_event_name": "PreToolUse", "tool_name": "Bash", "session_id": session,
+                         "cwd": str(self.base), "tool_input": {"command": command}}, {**self.env, **(env or {})})
 
-    def start(self, hook, payload):
-        return run_hook(hook, self.base, payload, self.env)
+    def post(self, command, output, session="s1", failure=False, env=None):
+        payload = {"hook_event_name": "PostToolUseFailure" if failure else "PostToolUse", "tool_name": "Bash",
+                   "session_id": session, "cwd": str(self.base), "tool_input": {"command": command}}
+        payload["error" if failure else "tool_response"] = output if failure else {"stdout": output, "stderr": ""}
+        return run_hook("service_distress_advisory.sh", self.base, payload, {**self.env, **(env or {})})
 
-    def bash(self, command):
-        return {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                "cwd": str(self.base), "tool_input": {"command": command}}
-
-    def denial(self, result):
+    def note(self, result):
         if not result.stdout.strip():
             return ""
-        out = json.loads(result.stdout)["hookSpecificOutput"]
-        self.assertEqual(out["permissionDecision"], "deny")
-        return out["permissionDecisionReason"]
+        return json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
 
-    def hold_slot(self, pid, desc="a test"):
-        started = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)],
-                                 capture_output=True, text=True).stdout.strip()
-        (self.guard / "slots.d" / str(pid)).write_text(f"{started}\n{int(time.time())}\n{desc}\n")
+    def test_loop_parallel_and_background_calls_to_a_remote_tool_speak(self):
+        cases = {
+            "loop": "for i in $(seq 1 50); do curl -s https://api.example.com/x/$i; done",
+            "parallel": "seq 1 100 | xargs -P 8 -I{} curl https://a.example.com/{}",
+            "background": "for h in a b; do ssh $h uptime & done; wait",
+            "psql loop": "while read u; do psql -c 'select 1'; done < urls.txt",
+            "gh parallel": "ls | xargs -n1 -P0 gh api repos/x/y",
+        }
+        for name, command in cases.items():
+            with self.subTest(name=name):
+                said = self.note(self.pre(command, session=f"s-{name}"))
+                self.assertIn("no reading of that service", said)
 
-    def sleeper(self):
-        proc = subprocess.Popen(["sleep", "60"])
-        self.addCleanup(lambda: (proc.kill(), proc.wait()))
-        return proc
+    def test_the_note_names_the_shape_and_target_without_giving_orders(self):
+        said = self.note(self.pre("for i in 1 2 3; do curl -s https://api.example.com/x/$i; done"))
+        self.assertIn("`curl` in a loop against api.example.com", said)
+        for phrase in ("you should", "do not", "stop ", "must ", "what to do"):
+            self.assertNotIn(phrase, said.lower())
 
-    CONNECT = "fly ssh console -a trellys-engine -C 'ls'"
-
-    def test_session_start_is_silent_when_the_engine_is_passing_and_nothing_is_open(self):
-        self.assertEqual(self.start("engine.sh", {}).stdout, "")
-
-    def test_session_start_is_silent_without_the_guard_directory(self):
-        self.env["ENGINE_GUARD_HOME"] = str(self.base / "absent")
-        self.assertEqual(self.start("engine.sh", {}).stdout, "")
-
-    def test_session_start_says_when_the_health_check_is_critical(self):
-        self.say(self.CRITICAL)
-        text = context(self.start("engine.sh", {}))
-        self.assertIn("critical", text)
-        self.assertIn(self.APP, text)
-
-    def test_session_start_says_unknown_when_health_cannot_be_read(self):
-        self.say("not json")
-        text = context(self.start("engine.sh", {}))
-        self.assertIn("not checked", text)
-        self.assertNotIn("passing", text)
-
-    def test_session_start_counts_open_sessions(self):
-        self.hold_slot(self.sleeper().pid)
-        text = context(self.start("engine.sh", {}))
-        self.assertIn("1 of 4", text)
-
-    def test_a_slot_whose_process_is_gone_is_not_counted(self):
-        proc = self.sleeper()
-        self.hold_slot(proc.pid)
-        proc.kill()
-        proc.wait()
-        self.assertEqual(self.start("engine.sh", {}).stdout, "")
-
-    def test_a_slot_reused_by_another_process_is_not_counted(self):
-        proc = self.sleeper()
-        (self.guard / "slots.d" / str(proc.pid)).write_text("Thu Jan  1 00:00:00 1970\n0\nold\n")
-        self.assertEqual(self.start("engine.sh", {}).stdout, "")
-
-    def test_session_start_counts_a_fly_process_that_took_no_slot(self):
-        proc = subprocess.Popen(["flyctl", "ssh", "console", "-a", self.APP],
-                                executable="/usr/bin/yes", stdout=subprocess.DEVNULL)
-        self.addCleanup(lambda: (proc.kill(), proc.wait()))
-        time.sleep(0.1)
-        self.assertIn("1 of 4", context(self.start("engine.sh", {})))
-
-    def test_session_start_names_a_wrapper_that_lost_the_guard(self):
-        wrapper = self.base / "fly"
-        wrapper.write_text("#!/bin/sh\nexec flyctl \"$@\"\n")
-        (self.guard / "wrappers").write_text(f"{wrapper}\n")
-        text = context(self.start("engine.sh", {}))
-        self.assertIn(str(wrapper), text)
-        wrapper.write_text("#!/bin/sh\nexec engine-guard fly \"$@\"\n")
-        self.assertEqual(self.start("engine.sh", {}).stdout, "")
-
-    def test_session_start_off_switch(self):
-        self.say(self.CRITICAL)
-        self.env["SCRY_ENGINE_GUARD"] = "0"
-        self.assertEqual(self.start("engine.sh", {}).stdout, "")
-        del self.env["SCRY_ENGINE_GUARD"]
-        (self.guard / "OFF").write_text("")
-        self.assertEqual(self.start("engine.sh", {}).stdout, "")
-
-    def test_guard_denies_an_engine_connection_while_critical(self):
-        self.say(self.CRITICAL)
-        reason = self.denial(self.start("engine_guard.sh", self.bash(self.CONNECT)))
-        self.assertIn("failing its Fly health check", reason)
-
-    def test_guard_allows_an_engine_connection_while_passing(self):
-        self.assertEqual(self.start("engine_guard.sh", self.bash(self.CONNECT)).stdout, "")
-
-    def test_guard_allows_when_health_is_unknown(self):
-        self.say("not json")
-        self.assertEqual(self.start("engine_guard.sh", self.bash(self.CONNECT)).stdout, "")
-
-    def test_guard_denies_at_the_cap_and_lists_what_is_open(self):
-        for i in range(4):
-            self.hold_slot(self.sleeper().pid, f"session {i}")
-        reason = self.denial(self.start("engine_guard.sh", self.bash(self.CONNECT)))
-        self.assertIn("4 are already open", reason)
-        self.assertIn("session 3", reason)
-
-    def test_guard_cap_follows_the_slots_file(self):
-        (self.guard / "slots").write_text("1\n")
-        self.hold_slot(self.sleeper().pid)
-        self.assertIn("cap 1", self.denial(self.start("engine_guard.sh", self.bash(self.CONNECT))))
-
-    def test_guard_sees_a_script_that_connects(self):
-        self.say(self.CRITICAL)
-        (self.base / "probe.sh").write_text(f"#!/bin/sh\nfly ssh console -a {self.APP} -C ls\n")
-        (self.base / "other.sh").write_text("#!/bin/sh\necho hi\n")
-        self.assertIn("probe.sh", self.denial(self.start("engine_guard.sh", self.bash("bash probe.sh"))))
-        self.assertEqual(self.start("engine_guard.sh", self.bash("bash other.sh")).stdout, "")
-
-    def test_guard_ignores_commands_that_do_not_reach_the_engine(self):
-        self.say(self.CRITICAL)
-        for command in ("ls -la", "fly status -a trellys-engine", "fly ssh console -a other-app",
-                        "git log --oneline"):
-            with self.subTest(command=command):
-                self.assertEqual(self.start("engine_guard.sh", self.bash(command)).stdout, "")
-
-    def test_a_burst_of_sessions_makes_one_fly_call(self):
-        procs = [subprocess.Popen(["bash", str(ROOT / "engine_guard.sh")], stdin=subprocess.PIPE,
-                                  stdout=subprocess.DEVNULL, text=True, cwd=self.base,
-                                  env={**os.environ, **self.env}) for _ in range(6)]
-        for proc in procs:
-            proc.communicate(json.dumps(self.bash(self.CONNECT)))
-        self.assertEqual(len(self.calls.read_text().split()), 1)
-
-    def test_guard_leaves_alone_text_that_only_mentions_the_engine(self):
-        self.say(self.CRITICAL)
-        connect = f"fly ssh console -a {self.APP}"
-        (self.base / "probe.sh").write_text(f"#!/bin/sh\n{connect} -C ls\n")
+    def test_commands_that_only_mention_a_loop_or_a_tool_stay_silent(self):
         for command in (
-            f"git commit -m 'fix {connect} retries'",
-            f"git commit -m 'one\ntwo; {connect}'",
-            f'git commit -m "it\'s: {connect}"',
-            f"cat <<'EOF' > notes.txt\n{connect}\nEOF",
-            f"git commit -F - <<'EOF'\nDon't run {connect}\nEOF",
-            f"echo {connect} >> notes.txt", f"grep -rn '{connect}' .",
-            f"# {connect}\nls", f"ls # see; {connect}",
-            "cat probe.sh", "git add probe.sh", "less probe.sh", "python3 -m unittest probe.sh",
-            f"fly ssh console -a {self.APP}-staging", f"fly logs -a {self.APP}", "fly ssh console -a other-app",
-            f"fly status -a {self.APP} && ls console", f"timeout 60 git diff probe.sh",
-            f"fly ssh sftp shell -a {self.APP}",
+            "curl https://x.example.com/health", "ssh host uptime", "psql -c 'select 1'",
+            "for i in 1 2 3; do echo $i; done", "xargs -P 8 -n1 echo < list.txt", "ls | xargs -P 4 wc -l",
+            "git commit -m 'for i in 1 2; do curl x; done'",
+            "# for i in 1 2; do curl x; done\nls",
+            "cat <<'EOF' > notes.txt\nfor i in 1 2; do curl x; done\nEOF",
+            "echo 'xargs -P 8 curl' | tee notes", "git log --oneline", "mix test",
         ):
             with self.subTest(command=command):
-                self.assertEqual(self.start("engine_guard.sh", self.bash(command)).stdout, "")
+                self.assertEqual(self.pre(command).stdout, "")
 
-    def test_guard_denies_a_typed_connection_and_a_script_named_after_a_shell(self):
-        self.say(self.CRITICAL)
-        connect = f"fly ssh console -a {self.APP}"
-        (self.base / "probe.sh").write_text(f"#!/bin/sh\n{connect} -C ls\n")
-        (self.base / "list.py").write_text(
-            f"import subprocess\nsubprocess.run(['fly', 'ssh', 'console', '-a', '{self.APP}'])\n")
-        for command in (
-            connect, f"{connect} -C 'ls'", f"fly ssh console --app {self.APP}", f"fly ssh console --app={self.APP}",
-            f"flyctl machine exec -a {self.APP} abc 'ls'", f"flyctl m exec -a {self.APP} abc ls",
-            f"cd /tmp && {connect}", f"echo hi; {connect}", f"ls | {connect}", f"FLY_X=1 {connect}",
-            f"# note\n{connect}",
-            "bash probe.sh", "sh -x probe.sh", "python3 list.py", "cd /tmp && bash probe.sh",
-        ):
-            with self.subTest(command=command):
-                self.assertIn("health check", self.denial(self.start("engine_guard.sh", self.bash(command))))
+    def test_the_fanout_note_is_not_repeated_inside_its_window_and_speaks_for_another_tool(self):
+        loop = "for i in 1 2; do curl -s https://x.example.com/$i; done"
+        self.assertTrue(self.note(self.pre(loop)))
+        self.assertEqual(self.pre(loop).stdout, "")
+        self.assertTrue(self.note(self.pre("for i in 1 2; do ssh h$i uptime; done")))
+        self.assertTrue(self.note(self.pre(loop, session="other")))
 
-    def test_guard_off_switch(self):
-        self.say(self.CRITICAL)
-        self.env["SCRY_ENGINE_GUARD"] = "0"
-        self.assertEqual(self.start("engine_guard.sh", self.bash(self.CONNECT)).stdout, "")
+    def test_the_fanout_off_switch(self):
+        self.assertEqual(self.pre("for i in 1 2; do curl -s https://x.example.com/$i; done",
+                                  env={"SCRY_LOAD_NOTES": "0"}).stdout, "")
 
-    def test_guard_denial_gives_observations_not_orders(self):
-        self.say(self.CRITICAL)
-        reason = self.denial(self.start("engine_guard.sh", self.bash(self.CONNECT))).lower()
-        for phrase in ("what to do", "you should", "do not ", "you must"):
-            self.assertNotIn(phrase, reason)
+    def test_distress_speaks_at_two_answers_then_when_the_count_doubles(self):
+        fail = "curl: (28) Operation timed out after 30000 milliseconds"
+        spoken = []
+        for i in range(1, 6):
+            spoken.append(bool(self.note(self.post("curl -s https://api.example.com/x", fail))))
+        self.assertEqual(spoken, [False, True, False, True, False])
 
-    def test_one_fly_call_serves_a_minute_of_readings(self):
+    def test_distress_names_the_answers_the_tool_and_the_target(self):
+        self.post("curl -s https://api.example.com/x", "curl: (28) Operation timed out")
+        said = self.note(self.post("curl -s https://api.example.com/y", "HTTP/1.1 503 Service Unavailable"))
+        self.assertIn("timeouts", said)
+        self.assertIn("502/503/504", said)
+        self.assertIn("`curl` to api.example.com", said)
+        self.assertIn("does not show on its own whether the service or the network is the cause", said)
+
+    def test_one_answer_or_a_command_that_is_not_a_remote_call_stays_silent(self):
+        self.assertEqual(self.post("curl https://x.example.com", "Operation timed out").stdout, "")
+        for _ in range(4):
+            self.assertEqual(self.post("cat notes.txt", "the request timed out; 503 Service Unavailable").stdout, "")
+            self.assertEqual(self.post("grep -rn timeout lib", "lib/a.ex: timeout: 5000 connection refused").stdout, "")
+
+    def test_a_remote_call_the_harness_moved_to_the_background_counts_as_a_slow_answer(self):
+        slow = "Command did not complete within its 600s timeout and was moved to the background (ID: abc)."
+        self.assertEqual(self.post("fly ssh console -a some-app -C 'bin/x rpc 1'", slow).stdout, "")
+        said = self.note(self.post("fly ssh console -a some-app -C 'bin/x rpc 2'", slow))
+        self.assertIn("calls slow enough to be moved to the background", said)
+        self.assertEqual(self.post("sleep 700", slow, session="n").stdout, "")
+        self.assertEqual(self.post("sleep 700", slow, session="n").stdout, "")
+
+    def test_distress_reads_a_failed_command_too(self):
+        self.post("psql -h db.example.com -c 'select 1'", "psql: error: connection to server failed: Connection refused",
+                  failure=True)
+        said = self.note(self.post("psql -h db.example.com -c 'select 2'",
+                                   "FATAL: sorry, too many connections", failure=True))
+        self.assertIn("refused or reset connections", said)
+        self.assertIn("too many connections", said)
+
+    def test_ordinary_output_stays_silent(self):
         for _ in range(3):
-            self.start("engine.sh", {})
-            self.start("engine_guard.sh", self.bash(self.CONNECT))
-        self.assertEqual(len(self.calls.read_text().split()), 1)
+            self.assertEqual(self.post("curl -s https://x.example.com/health", '{"status":"ok"}').stdout, "")
 
-    def test_a_reading_the_wrapper_wrote_is_reused(self):
-        (self.guard / "health").write_text(f"{int(time.time())} critical critical=status\n")
-        self.assertIn("critical", context(self.start("engine.sh", {})))
-        self.assertFalse(self.calls.exists())
+    def test_distress_is_kept_per_session_and_has_an_off_switch(self):
+        fail = "Connection reset by peer"
+        self.post("curl https://x.example.com", fail, session="a")
+        self.assertEqual(self.post("curl https://x.example.com", fail, session="b").stdout, "")
+        self.assertTrue(self.note(self.post("curl https://x.example.com", fail, session="a")))
+        self.assertEqual(self.post("curl https://x.example.com", fail, session="a",
+                                   env={"SCRY_DISTRESS_NOTES": "0"}).stdout, "")
 
 
 if __name__ == "__main__":

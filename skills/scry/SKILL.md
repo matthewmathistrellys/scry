@@ -34,7 +34,6 @@ echo "$PAYLOAD" | bash "$SCRY_ROOT/architecture.sh" 2>/dev/null
 echo "$PAYLOAD" | bash "$SCRY_ROOT/health.sh" 2>/dev/null
 echo "$PAYLOAD" | bash "$SCRY_ROOT/fleet.sh" 2>/dev/null
 echo "$PAYLOAD" | bash "$SCRY_ROOT/pressure.sh" 2>/dev/null
-echo "$PAYLOAD" | bash "$SCRY_ROOT/engine.sh" 2>/dev/null
 bash "$SCRY_ROOT/roster.sh" 2>/dev/null
 ```
 
