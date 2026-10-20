@@ -9,17 +9,17 @@
 # rung adds the work type that matters from that size and updates the earlier
 # ones, newest first:
 #
-#   +30k   reading and classifying by meaning   (growth since the session began)
-#   +50k   review                               (growth since the session began)
+#    60k   reading and classifying by meaning
+#    80k   review
 #   100k   build and coding
 #   200k   orchestration
 #   300k to 800k, every 100k   the types above, restated for the size
 #   900k   all of it at once, beyond every measured length, near the window
 #
-# The first two count growth, because a new session already starts near 40k
-# with Claude Code's own prompt and tools; the rest are absolute sizes, since
-# what a long input costs follows its length. Each rung speaks once per
-# session. Dropping below one (after a /compact) lets it speak again. Every
+# The marks sit on the context itself, since what a long input costs follows
+# its length. The first two are set above the 40k or so a new session already
+# starts with (Claude Code's own prompt and tools), so they do not fire at the
+# first message. Each rung speaks once per session. Dropping below one (after a /compact) lets it speak again. Every
 # line says whether it rests on a measurement (older models, other tasks) or is
 # a prior; the ladder is the one table below, so new measurements change it in
 # one place.
@@ -44,9 +44,9 @@ python3 - <<'PY' 2>/dev/null || true
 import json, os, re, sys, time
 
 # ── The ladder ──────────────────────────────────────────────────────────────
-# (size in tokens, "growth" or "abs", work type introduced at this rung)
-RUNGS = [(30_000, "growth", "read"), (50_000, "growth", "review"), (100_000, "abs", "build"),
-         (200_000, "abs", "orch")] + [(k * 1000, "abs", None) for k in range(300, 900, 100)] + [(900_000, "abs", "hard")]
+# (size in tokens, work type introduced at this rung)
+RUNGS = [(60_000, "read"), (80_000, "review"), (100_000, "build"), (200_000, "orch")] + \
+        [(k * 1000, None) for k in range(300, 900, 100)] + [(900_000, "hard")]
 
 # For each work type: the line when its rung is reached, and the line after.
 # [measured] = a published measurement, on older models or other tasks;
@@ -107,26 +107,19 @@ try:
             state = json.load(f)
     except (OSError, ValueError):
         state = {}
-    base = state.get("base")
-    if not isinstance(base, int):
-        base = tokens                    # the first size this session was seen at
-    growth = max(0, tokens - base)
-    reached = -1
-    for i, (size, kind, _) in enumerate(RUNGS):
-        if (growth if kind == "growth" else tokens) >= size:
-            reached = i
+    reached = max([i for i, (size, _) in enumerate(RUNGS) if tokens >= size], default=-1)
     said = state.get("said", -1)
     speak = reached > said
-    if speak or reached < said or "base" not in state:
+    if speak or reached < said:
         with open(path + ".tmp", "w", encoding="utf-8") as f:
-            json.dump({"base": base, "said": reached}, f)
+            json.dump({"said": reached}, f)
         os.replace(path + ".tmp", path)
 except OSError:
     sys.exit(0)
 if not speak:
     sys.exit(0)
 
-introduced = {RUNGS[i][2]: i for i in range(reached + 1) if RUNGS[i][2]}
+introduced = {RUNGS[i][1]: i for i in range(reached + 1) if RUNGS[i][1]}
 lines = []
 for t in reversed(ORDER):                # newest work type first
     if t in introduced:
@@ -141,7 +134,7 @@ if tokens >= 500_000:
     extra.append(BEYOND)
 if "hard" in introduced:
     extra.append(HARD)
-text = "\n".join([f"SCRY: this session's context is {size}{when} (growth since it began: {growth // 1000}k).", *lines, COST, *extra])
+text = "\n".join([f"SCRY: this session's context is {size}{when}.", *lines, COST, *extra])
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text},
                   "suppressOutput": True}))
 PY

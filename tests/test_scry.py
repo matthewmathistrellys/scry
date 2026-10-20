@@ -2657,18 +2657,17 @@ class ContextLengthAdvisoryTests(unittest.TestCase):
 
     def test_a_fresh_session_at_its_usual_starting_size_is_silent(self):
         self.assertEqual(self.submit(40_000).stdout, "")
-        self.assertEqual(self.submit(55_000).stdout, "")          # +15k
+        self.assertEqual(self.submit(55_000).stdout, "")
         self.assertEqual(self.submit(session="nofile").stdout, "")
 
     def test_the_ladder_adds_a_work_type_at_each_rung_and_updates_the_earlier_ones(self):
-        self.assertEqual(self.submit(40_000).stdout, "")
-        at30 = self.said(75_000)                                   # +35k
-        self.assertIn("Reading and classifying", at30)
-        self.assertNotIn("Review:", at30)
-        at50 = self.said(95_000)                                   # +55k
-        self.assertTrue(at50.index("Review:") < at50.index("Reading and classifying"))
-        self.assertIn("NoLiMa", at50)                              # the read line is the updated one
-        self.assertNotIn("focused 300-token prompt", at50)
+        at60 = self.said(65_000)
+        self.assertIn("Reading and classifying", at60)
+        self.assertNotIn("Review:", at60)
+        at80 = self.said(85_000)
+        self.assertTrue(at80.index("Review:") < at80.index("Reading and classifying"))
+        self.assertIn("NoLiMa", at80)                              # the read line is the updated one
+        self.assertNotIn("focused 300-token prompt", at80)
         at100 = self.said(130_000)
         self.assertTrue(at100.index("Build and coding") < at100.index("Review:") < at100.index("Reading and classifying"))
         self.assertNotIn("Orchestration", at100)
@@ -2677,13 +2676,11 @@ class ContextLengthAdvisoryTests(unittest.TestCase):
         self.assertIn("a commit or a pull request puts the work on disk", at200)
 
     def test_each_rung_speaks_once_then_every_hundred_thousand(self):
-        self.submit(40_000)
-        spoken = [bool(self.said(n)) for n in (75_000, 80_000, 95_000, 130_000, 210_000, 250_000,
+        spoken = [bool(self.said(n)) for n in (65_000, 70_000, 85_000, 105_000, 210_000, 250_000,
                                               320_000, 390_000, 410_000, 520_000, 890_000, 910_000, 950_000)]
         self.assertEqual(spoken, [True, False, True, True, True, False, True, False, True, True, True, True, False])
 
     def test_the_range_caveat_comes_at_500k_and_the_hardest_rung_at_900k(self):
-        self.submit(40_000)
         self.assertNotIn("128k (RULER)", self.said(420_000))
         self.assertIn("128k (RULER)", self.said(520_000))
         at900 = self.said(910_000)
@@ -2697,26 +2694,22 @@ class ContextLengthAdvisoryTests(unittest.TestCase):
         self.assertEqual(self.submit(315_000).stdout, "")
 
     def test_a_dropped_context_lets_a_rung_speak_again(self):
-        self.submit(40_000)
         self.assertTrue(self.said(130_000))
         self.assertEqual(self.submit(45_000).stdout, "")
         self.assertTrue(self.said(135_000))
 
     def test_the_notes_give_observations_and_insights_without_orders_or_absolutes(self):
-        self.submit(40_000)
-        for tokens in (75_000, 95_000, 130_000, 210_000, 520_000, 910_000):
+        for tokens in (65_000, 85_000, 130_000, 210_000, 520_000, 910_000):
             said = self.said(tokens).lower()
             for phrase in ("you should", "must ", "always", "never", "do not", "reset now", "past the"):
                 self.assertNotIn(phrase, said)
             self.assertRegex(said, r"\[(measured|prior)")
 
     def test_an_old_reading_says_its_age_and_a_very_old_one_is_silent(self):
-        self.submit(40_000)
         self.assertIn("10 minutes ago", self.said(130_000, age=600))
         self.assertEqual(self.submit(520_000, age=3 * 3600).stdout, "")
 
     def test_a_subagent_turn_and_the_off_switch_are_silent(self):
-        self.submit(40_000)
         self.reading(310_000)
         self.assertEqual(self.submit(agent_id="a1").stdout, "")
         self.assertEqual(self.submit(env={"SCRY_CONTEXT_NOTES": "0"}).stdout, "")

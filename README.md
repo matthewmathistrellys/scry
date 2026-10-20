@@ -20,7 +20,7 @@ machine is carrying. Independent checks and advisories fill that in.
 | **`health.sh`** | Is this repo in good shape? |
 | **`fleet.sh`** | What else is happening *right now*? |
 | **`pressure.sh`** | What shape is this machine in? |
-| **`context_length_advisory.sh`** | How much is this session carrying, and what does that mean? A ladder of notes as the context grows (+30k, +50k, 100k, 200k, then every 100k), each adding a work type and updating the earlier ones |
+| **`context_length_advisory.sh`** | How much is this session carrying, and what does that mean? A ladder of notes as the context grows (60k, 80k, 100k, 200k, then every 100k), each adding a work type and updating the earlier ones |
 | **`load_fanout_advisory.sh`**, **`service_distress_advisory.sh`** | Is this session about to hit something shared many times over, or already getting the answers a struggling service gives? A note before a loop, parallel or background fan-out against a remote tool; a note after repeated timeouts, 5xx, 429 or slow calls |
 | **`main_drift_advisory.sh`** | Is the tree this subagent was handed the current one? |
 | **`cache_handoff_monitor.sh`** | Is this session about to lose its prompt cache — and what is still unfinished, or what should be summarised first? |
@@ -721,12 +721,12 @@ machine is carrying. Independent checks and advisories fill that in.
   how much it is carrying. The status line reports the context size and the
   session never reads it. What a long context costs depends on the work, so the
   note is a ladder, each rung adding a work type and updating the earlier ones,
-  newest first: +30k reading and classifying by meaning, +50k review, 100k build
+  newest first: 60k reading and classifying by meaning, 80k review, 100k build
   and coding, 200k orchestration, every 100k from 300k to 800k, and 900k all of
-  it at once. The first two count growth since the session began, because a new
-  session already starts near 40k with Claude Code's own prompt and tools; the
-  rest are absolute sizes. Each rung speaks once per session; a drop below one
-  (after a `/compact`) lets it speak again.
+  it at once. The marks sit on the context itself, and the first two are set
+  above the 40k or so a new session already starts with (Claude Code's own
+  prompt and tools), so they do not fire at the first message. Each rung speaks
+  once per session; a drop below one (after a `/compact`) lets it speak again.
 
   Every line is an observation or an insight and says whether it rests on a
   published measurement (older Claude models or other tasks) or is a prior
