@@ -694,9 +694,10 @@ machine is carrying. Independent checks and advisories fill that in.
   remote tool (`ssh`, `curl`, `psql`, `kubectl`, `aws`, `gh api`, `git fetch`
   and the rest of the list in `remote_calls.py`) in a loop, in parallel
   (`xargs -P`, `parallel`) or in the background. It names the shape, the tool
-  and the target when the command shows one, says that this session has no
-  reading of that service's health or load, and gives the fact that retries
-  and parallel callers multiply the load a service sees. It says it again for
+  and the target when the command shows one, says that no health or load reading
+  for that service has reached the session (Scry cannot see what else is
+  watching it), and gives the insight that retries and parallel callers can
+  multiply the load a service sees. It says it again for
   the same tool only after `SCRY_LOAD_NOTE_MINUTES`.
 
   `service_distress_advisory.sh` (`PostToolUse` and `PostToolUseFailure` on
@@ -705,15 +706,16 @@ machine is carrying. Independent checks and advisories fill that in.
   moved it to the background, a timeout, a refused or reset connection, 502,
   503, 504, 429 or "too many connections". It speaks again each time the count
   in the window doubles. It states what was seen and what such answers do and
-  do not show: a 503 says the server is unable to handle the request and
-  retries add load to a service already struggling, while a timeout or a slow
-  call does not show on its own whether the service or the network is the
-  cause. A file that merely contains the word "timeout" does not count; the
+  do not show: a 503 says the server is unable to handle the request, while a
+  timeout or a slow call does not show on its own whether the service or the
+  network is the cause. It adds that continuing to call a service that answers
+  this way, without finding out why, can add to what is wrong with it, since
+  retries can keep a backend overloaded. A file that merely contains the word "timeout" does not count; the
   command must have run a remote tool.
 
   Neither sees fan-out hidden inside a script: a hook sees one Bash call, not
   the calls a script makes. Neither reads a service's health; where nothing
-  reports it, the note says the session has no reading.
+  reports it, the note says no reading has reached the session.
 - **`statusline_setup.sh`** (Claude only) — says when Scry's status bar is not
   set up, and sets it up when asked. A plugin cannot set `statusLine`; it is a
   user setting. So a fresh install has hooks, a monitor and no bar, and until

@@ -13,8 +13,9 @@
 # Speaks when a command's own words repeat a call to a remote tool (ssh, curl,
 # psql, kubectl, aws, gh api, git fetch and the rest of scanners/remote_calls.py)
 # in one of those three shapes. It names the shape, the tool and the target when
-# the command shows one, and says plainly that this session has no reading of
-# the target. Quoted text, comments and heredocs never count.
+# the command shows one, and says what it observed: no load reading for the
+# target has reached the session. Scry cannot see what else is watching, so it
+# states the observation and the insight in terms of what can happen. Quoted text, comments and heredocs never count.
 #
 # Once per session per tool per SCRY_LOAD_NOTE_MINUTES (default 30), so a
 # loop repeated by a retry does not repeat the note. Silent otherwise.
@@ -81,9 +82,10 @@ for shape, tool, detail in spoken:
     parts.append(f"`{tool}` {how[shape]}" + (f" ({detail})" if detail and shape == "parallel" else "") +
                  (f" against {detail}" if detail and shape != "parallel" else ""))
 text = (f"SCRY: this command runs {'; '.join(dict.fromkeys(parts))}. Each repeat is another call to something other "
-        "sessions and people may be using, and this session has no reading of that service's health or load.\n"
-        "Retries and parallel callers multiply the load a service sees: in one published example (AWS Builders' Library), retries at each of "
-        "several layers raised the load on the database 243-fold, and a service whose latency passes its callers' timeouts starts failing requests, which brings more retries.")
+        "sessions and people may be using, and no health or load reading for that service has reached this session. "
+        "If nothing else is watching it, the load from the repeats arrives unmeasured.\n"
+        "Retries and parallel callers can multiply the load a service sees: in one published example (AWS Builders' Library), retries at each of "
+        "several layers raised the load on the database 243-fold. A service whose latency passes its callers' timeouts can start failing requests, which can bring more retries.")
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": text},
                   "suppressOutput": True}))
 PY

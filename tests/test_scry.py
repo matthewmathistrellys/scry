@@ -2546,13 +2546,14 @@ class SharedServiceLoadTests(unittest.TestCase):
         for name, command in cases.items():
             with self.subTest(name=name):
                 said = self.note(self.pre(command, session=f"s-{name}"))
-                self.assertIn("no reading of that service", said)
+                self.assertIn("no health or load reading for that service has reached this session", said)
 
     def test_the_note_names_the_shape_and_target_without_giving_orders(self):
         said = self.note(self.pre("for i in 1 2 3; do curl -s https://api.example.com/x/$i; done"))
         self.assertIn("`curl` in a loop against api.example.com", said)
-        for phrase in ("you should", "do not", "stop ", "must ", "what to do"):
+        for phrase in ("you should", "do not", "stop ", "must ", "what to do", "always", "never", "will "):
             self.assertNotIn(phrase, said.lower())
+        self.assertIn("can multiply", said)
 
     def test_commands_that_only_mention_a_loop_or_a_tool_stay_silent(self):
         for command in (
@@ -2591,6 +2592,9 @@ class SharedServiceLoadTests(unittest.TestCase):
         self.assertIn("502/503/504", said)
         self.assertIn("`curl` to api.example.com", said)
         self.assertIn("does not show on its own whether the service or the network is the cause", said)
+        self.assertIn("without finding out why, can add to what is wrong with it", said)
+        for phrase in ("you should", "do not", "stop ", "must ", "always", "never"):
+            self.assertNotIn(phrase, said.lower())
 
     def test_one_answer_or_a_command_that_is_not_a_remote_call_stays_silent(self):
         self.assertEqual(self.post("curl https://x.example.com", "Operation timed out").stdout, "")

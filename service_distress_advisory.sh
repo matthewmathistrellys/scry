@@ -6,8 +6,9 @@
 # background and says so), timeouts, refused or reset connections,
 # 502/503/504, 429 and "too many connections". A 503 says the server cannot
 # handle the request, and a call slower than its caller's timeout fails; the
-# results alone do not say whether the service or the network is the cause. A
-# retry or a parallel caller adds load to a service that is already behind.
+# results alone do not say whether the service or the network is the cause.
+# Continuing to call a service that answers this way, without finding out why,
+# can add to what is wrong with it, since retries can keep a backend overloaded.
 #
 # Speaks when the commands this session ran against remote tools (ssh, curl,
 # psql, kubectl, aws, gh api, git fetch and the rest of scanners/remote_calls.py)
@@ -117,8 +118,10 @@ host = remote_calls.target(command)
 latest = time.strftime("%H:%M", time.localtime(now))
 text = (f"SCRY: {count} remote calls in the last {window // 60} minutes came back with {', '.join(names)} "
         f"(latest `{tool}`{' to ' + host if host else ''} at {latest}).\n"
-        "A 503 says the server is unable to handle the request, and a call slower than its caller's timeout fails; retries then add load to a service that is already struggling "
-        "(Google's SRE book notes retries can keep a backend in an overloaded state). A timeout, a refused connection or a slow call does not show on its own whether the service or the network is the cause.")
+        "A 503 says the server is unable to handle the request, and a call slower than its caller's timeout fails. "
+        "A timeout, a refused connection or a slow call does not show on its own whether the service or the network is the cause.\n"
+        "Continuing to call a service that answers this way, without finding out why, can add to what is wrong with it: retries can keep a backend overloaded "
+        "(Google's SRE book), and in published cases of overloaded systems the retries kept the service down after the original cause had passed (Brooker on metastable failures).")
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text},
                   "suppressOutput": True}))
 PY
