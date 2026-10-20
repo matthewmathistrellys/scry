@@ -2674,6 +2674,7 @@ class ContextLengthAdvisoryTests(unittest.TestCase):
         at200 = self.said(210_000)
         self.assertTrue(at200.index("Orchestration") < at200.index("Build and coding"))
         self.assertIn("a commit or a pull request puts the work on disk", at200)
+        self.assertIn("worth carrying word for word", at200)
 
     def test_each_rung_speaks_once_then_every_hundred_thousand(self):
         spoken = [bool(self.said(n)) for n in (65_000, 70_000, 85_000, 105_000, 210_000, 250_000,
@@ -2685,6 +2686,8 @@ class ContextLengthAdvisoryTests(unittest.TestCase):
         self.assertIn("128k (RULER)", self.said(520_000))
         at900 = self.said(910_000)
         self.assertIn("Beyond every measured length", at900)
+        self.assertIn("About 90k tokens remain before the window ends", at900)
+        self.assertIn("Work not yet written to files or handed off by then can be lost", at900)
         self.assertIn("910k of a 1000k window (91%), as of its last reply", at900)
 
     def test_a_session_that_begins_large_gets_the_whole_ladder_once(self):

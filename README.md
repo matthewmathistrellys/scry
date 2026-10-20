@@ -736,7 +736,7 @@ machine is carrying. Independent checks and advisories fill that in.
   multi-turn exchanges lose reliability (Laban et al. 2025); and work kept in
   files can carry into a new session. None of it has been measured on current
   Claude models, and the note says so. The ladder is one table in the script,
-  so a new measurement changes it in one place.
+  so a new measurement changes it in one place. The `handoff` skill writes the baton that carries work into a new session: goal, done, half-done, decisions and why, constraints word for word, sources, what to verify first and the next step.
 
   The size comes from the file `cache_deadline_statusline.sh` writes for the
   session (context tokens and window size, two numbers; the current call's token counts when Claude Code's status-line payload gives them, else the used percentage of the window, else the session total as the last resort), so it needs Scry's

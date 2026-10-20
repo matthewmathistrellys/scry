@@ -65,7 +65,8 @@ LINES = {
     "build": (
         "Build and coding: in one bug-fixing study (small non-Claude models), runs that passed averaged about 8-9k tokens and runs that failed about 16-18k; "
         "that is a correlation, since harder tasks also run longer [measured]. Work is often split by task, with state in files and commits [prior].",
-        "Build and coding: a commit or a pull request puts the work on disk, and a new session can begin from it [prior]."),
+        "Build and coding: a commit or a pull request puts the work on disk, and a new session can begin from it. "
+        "Compaction and summaries tend to keep the story and drop the exceptions and exact values, so constraints and links back to sources are the part worth carrying word for word [prior]."),
     "orch": (
         "Orchestration: no study isolates it. Models have been measured losing about 39% on average in long multi-turn exchanges, mostly in reliability, "
         "and committing early to assumptions they often fail to recover from (Laban et al., 2025) [measured, other tasks]. "
@@ -75,8 +76,17 @@ LINES = {
 ORDER = ["read", "review", "build", "orch"]
 COST = ("Every request re-reads all of it, and once the prompt cache has gone cold the next request writes it again at the full rate.")
 BEYOND = ("The long-input studies cited reach 32k tokens (NoLiMa) and 128k (RULER); what holds beyond that has not been measured [measured].")
-HARD = ("Beyond every measured length, with the context near the window's limit, the earlier lines apply together; "
-        "summaries written at compaction can lose instructions (Anthropic's long-running-agent post) [measured].")
+HARD = ("Beyond every measured length, with the context near the window's limit, the earlier lines apply together.")
+
+
+def room(tokens, window):
+    if isinstance(window, int) and window > tokens:
+        return (f"About {(window - tokens) // 1000}k tokens remain before the window ends. "
+                "Work not yet written to files or handed off by then can be lost, or reduced to a summary that may drop exceptions and exact values; "
+                "Anthropic's long-running-agent post names running out of context in the middle of a task as a failure mode [measured].")
+    return ("Work not yet written to files or handed off before the window ends can be lost, or reduced to a summary that may drop exceptions and exact values "
+            "[measured: Anthropic's long-running-agent post names running out of context in the middle of a task as a failure mode].")
+
 
 try:
     d = json.loads(os.environ["CTX_PAYLOAD"])
@@ -134,6 +144,7 @@ if tokens >= 500_000:
     extra.append(BEYOND)
 if "hard" in introduced:
     extra.append(HARD)
+    extra.append(room(tokens, window))
 text = "\n".join([f"SCRY: this session's context is {size}{when}.", *lines, COST, *extra])
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text},
                   "suppressOutput": True}))
