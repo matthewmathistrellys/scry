@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -4548,50 +4549,929 @@ class RosterTests(unittest.TestCase):
             self.assertNotIn("WORK THIS SESSION STARTED", report)
 
 
-class SubagentColdAdvisoryTests(unittest.TestCase):
-    """subagent_cold_advisory.sh (PostToolUse): the cold-cache note rides a
-    tool result the main agent is about to read anyway — awake, this; idle,
-    the keep-alive line — never a wake of its own (Matt, 2026-09-22)."""
-    SID = "sess-cold-0001"
+def _iso(ts):
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(ts))
 
-    def _stage(self, td, age, aid="a1b2c3", description="build:opus"):
-        proj = Path(td) / "projects" / "-Users-someone-repo"
-        sub = proj / self.SID / "subagents"
-        sub.mkdir(parents=True, exist_ok=True)
-        j = sub / f"agent-{aid}.jsonl"
-        j.write_text('{"type":"assistant","message":"SECRET AGENT TEXT"}\n')
-        (sub / f"agent-{aid}.meta.json").write_text(json.dumps({"description": description}))
-        t = time.time() - age
-        os.utime(j, (t, t))
-        return str(proj / f"{self.SID}.jsonl")
 
-    def _run(self, td, tp, agent_id=""):
-        payload = {"session_id": self.SID, "transcript_path": tp, "tool_name": "Bash",
-                   "tool_input": {"command": "SECRET"}, "tool_response": "SECRET"}
-        if agent_id:
-            payload["agent_id"] = agent_id
-        return context(run_hook("subagent_cold_advisory.sh", td, payload,
-                                {"SCRY_SUBAGENT_COLD_STATE_DIR": str(Path(td) / "cold")}))
+def _asst(ts, blocks, stop="tool_use", ctx=120_000):
+    return {"type": "assistant", "timestamp": _iso(ts), "isSidechain": True,
+            "message": {"stop_reason": stop, "content": blocks,
+                        "usage": {"input_tokens": 10, "cache_read_input_tokens": ctx - 10,
+                                  "cache_creation_input_tokens": 0}}}
 
-    def test_it_speaks_once_in_the_last_quarter_of_the_ttl_and_not_inside_a_subagent(self):
+
+def _use(tid, name="Bash", **inp):
+    return {"type": "tool_use", "id": tid, "name": name, "input": inp}
+
+
+def _result(ts, tid, text="ok", **tur):
+    d = {"type": "user", "timestamp": _iso(ts), "isSidechain": True,
+         "message": {"content": [{"type": "tool_result", "tool_use_id": tid, "content": text}]}}
+    if tur:
+        d["toolUseResult"] = tur
+    return d
+
+
+def _notice(ts, bid):
+    return {"type": "attachment", "timestamp": _iso(ts), "isSidechain": True,
+            "attachment": {"type": "queued_command", "prompt": f"<task-notification><task-id>{bid}</task-id></task-notification>"}}
+
+
+FAKE_CLAUDE = """#!/bin/sh
+cat > "$FAKE_CLAUDE_STDIN"
+printf '%s' '{"result":"HAIKU NOTE: it is mid-build"}'
+"""
+
+
+class PeekFactsTests(unittest.TestCase):
+    """peek.facts_line: the status, open background commands, size and local
+    times are worked out by script from the record, not by a model."""
+
+    def setUp(self):
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        sys.path.insert(0, str(ROOT))
+        import peek
+        self.peek = peek
+        self.t0 = 1_792_000_000  # 2026-10-14 ~17:46 UTC
+
+    def facts(self, recs):
+        return self.peek.facts_line(recs, "build:opus")
+
+    def test_finished_when_it_handed_back(self):
+        t = self.t0
+        line = self.facts([_asst(t, [_use("h1", "SubagentHandback")], stop="tool_use")])
+        self.assertIn("finished: it handed back its report at Oct 14", line)
+        self.assertIn("Context 120k tokens: a message to it after its cache goes cold re-reads all 120k; "
+                      "a background notice wakes it the same way.", line)
+
+    def test_finished_when_the_turn_ended_with_no_call(self):
+        line = self.facts([_asst(self.t0, [{"type": "text", "text": "done"}], stop="end_turn")])
+        self.assertIn("finished: its last reply ended its turn with no tool call.", line)
+
+    def test_open_background_command_is_named_and_closed_by_a_notice(self):
+        t = self.t0
+        base = [_asst(t, [_use("b1", description="wait for the deploy", command="sleep 9999", run_in_background=True)]),
+                _result(t + 1, "b1", "started", backgroundTaskId="bg7"),
+                _asst(t + 2, [{"type": "text", "text": "waiting"}], stop="end_turn")]
+        line = self.facts(base)
+        self.assertIn("ended its turn with background commands still running", line)
+        self.assertIn('"wait for the deploy" (from Oct 14', line)
+        closed = self.facts(base[:2] + [_notice(t + 3, "bg7")] + base[2:])
+        self.assertIn("finished: its last reply ended its turn", closed)
+        self.assertNotIn("Background commands started", closed)
+
+    def test_a_finished_agent_still_names_an_open_background_wait(self):
+        t = self.t0
+        recs = [_asst(t, [_use("b1", description="poll", command="x", run_in_background=True)]),
+                _result(t + 1, "b1", "started", backgroundTaskId="bg1"),
+                _asst(t + 2, [_use("h", "SubagentHandback")])]
+        line = self.facts(recs)
+        self.assertIn("finished: it handed back", line)
+        self.assertIn('"poll"', line)
+        self.assertIn("its notice wakes it, and it re-reads its whole context", line)
+
+    def test_waiting_on_a_call_has_its_name_and_local_start_time(self):
+        os.environ["TZ"] = "America/New_York"
+        time.tzset()
+        line = self.facts([_asst(self.t0, [_use("c1", command="mix test --slow")])])
+        self.assertIn("waiting on a Bash call started Oct 14 1:46 PM: mix test --slow", line)
+
+    def test_session_limit_with_reset_time(self):
+        t = self.t0
+        recs = [_asst(t, [_use("c1", command="x")]),
+                _result(t + 1, "c1", "ok"),
+                {"type": "assistant", "timestamp": _iso(t + 2), "message": {
+                    "stop_reason": "stop_sequence", "content": [{"type": "text",
+                    "text": "You've hit your session limit · resets 9pm (America/New_York)"}]}}]
+        line = self.facts(recs)
+        self.assertIn("stopped at Oct 14", line)
+        self.assertIn("hit the session limit (resets 9pm (America/New_York))", line)
+        self.assertIn("a message restarts it", line)
+
+    def test_interrupted_or_turned_down(self):
+        t = self.t0
+        recs = [_asst(t, [_use("c1", command="x")]),
+                _result(t + 1, "c1", "The user doesn't want to proceed with this tool use.")]
+        self.assertIn("interrupted by the user (or a tool call was turned down)", self.facts(recs))
+
+    def test_working_when_the_last_call_returned_and_no_reply_came(self):
+        t = self.t0
+        recs = [_asst(t, [_use("c1", command="x")]), _result(t + 1, "c1", "ok")]
+        self.assertIn("working: its last tool call returned at Oct 14", self.facts(recs))
+
+    def test_a_subagent_record_is_read_whole_and_sidechain_is_not_skipped(self):
         with tempfile.TemporaryDirectory() as td:
-            tp = self._stage(td, age=1300)
-            self.assertEqual(self._run(td, tp), "")
-            tp = self._stage(td, age=2800)
-            self.assertEqual(self._run(td, tp, agent_id="a1b2c3"), "")
-            said = self._run(td, tp)
-            self.assertIn('Scry — a subagent this session started is going quiet: subagent '
-                          'a1b2c3 "build:opus": silent 46m — its own cache goes cold at 1h00m '
-                          "of silence: finished, nothing happens; still working, its next step "
-                          "re-reads its context once at the full rate; stuck, stop it now "
-                          "rather than after that read", said)
-            self.assertIn("ListAgents", said)
-            self.assertNotIn("SECRET", said)
-            self.assertEqual(self._run(td, tp), "")
-            # Past the TTL it is left alone: cold already, and Scry cannot
-            # tell a finished subagent from a quiet one.
-            tp = self._stage(td, age=3700, aid="d4e5f6")
-            self.assertEqual(self._run(td, tp), "")
+            j = Path(td) / "agent-a1.jsonl"
+            first = {"type": "user", "timestamp": _iso(self.t0), "isSidechain": True,
+                     "message": {"content": "BRIEF: build the thing"}}
+            filler = _asst(self.t0 + 1, [{"type": "text", "text": "x" * 2000}], stop="end_turn")
+            j.write_text("\n".join([json.dumps(first)] + [json.dumps(filler)] * 1600) + "\n")
+            self.assertGreater(j.stat().st_size, self.peek.TAIL_BYTES)
+            f = self.peek.transcript_facts(str(j), 0, subagent=True)
+            self.assertTrue(any("BRIEF: build the thing" in x for _, x in f["inputs"]))
+            main = self.peek.transcript_facts(str(j), 0)
+            self.assertFalse(any("BRIEF" in x for _, x in main["inputs"]))
+
+
+class PeekHookBase(unittest.TestCase):
+    """The peek on a quiet subagent: started by subagent_cold_advisory.sh,
+    delivered once by peek_deliver.sh, and the cold-wake guard."""
+    SID = "sess-peek-0001"
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.td, True)
+        td = Path(self.td)
+        self.bin = td / "bin"
+        self.bin.mkdir()
+        fake = self.bin / "claude"
+        fake.write_text(FAKE_CLAUDE)
+        fake.chmod(0o755)
+        self.env = {"PATH": f"{self.bin}:{os.environ['PATH']}",
+                    "SCRY_PEEK_STATE_DIR": str(td / "peek"),
+                    "SCRY_SUBAGENT_COLD_STATE_DIR": str(td / "cold"),
+                    "FAKE_CLAUDE_STDIN": str(td / "stdin.txt"),
+                    "SCRY_SESSIONS_DIR": str(td / "sessions")}
+        (td / "sessions").mkdir()
+        proj = td / "projects" / "-Users-someone-repo"
+        self.sub = proj / self.SID / "subagents"
+        self.sub.mkdir(parents=True)
+        self.tp = str(proj / f"{self.SID}.jsonl")
+
+    def stage(self, age, aid="a1b2c3", description="build:opus", big=False, name=None):
+        j = self.sub / f"agent-{aid}.jsonl"
+        t = time.time() - age
+        recs = [{"type": "user", "timestamp": _iso(t - 60), "isSidechain": True,
+                 "message": {"content": "BRIEF: build the widget"}},
+                _asst(t, [_use("c1", command="mix test")], ctx=900_000 if big else 120_000)]
+        j.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+        meta = {"description": description}
+        if name:
+            meta["name"] = name
+        (self.sub / f"agent-{aid}.meta.json").write_text(json.dumps(meta))
+        os.utime(j, (t, t))
+        return j
+
+    def payload(self, **kw):
+        p = {"session_id": self.SID, "transcript_path": self.tp, "tool_name": "Bash",
+             "tool_input": {"command": "ls"}, "hook_event_name": "PostToolUse"}
+        p.update(kw)
+        return p
+
+    def hook(self, name, **kw):
+        return run_hook(name, self.td, self.payload(**kw), self.env)
+
+    def wait_for_note(self, aid="a1b2c3"):
+        p = Path(self.td) / "peek" / self.SID / f"{aid}.json"
+        for _ in range(100):
+            if p.exists():
+                return json.loads(p.read_text())
+            time.sleep(0.1)
+        self.fail("the peek stored no note")
+
+
+
+class PeekHookTests(PeekHookBase):
+    def test_the_cold_hook_says_nothing_itself_and_starts_one_peek_per_subagent(self):
+        self.stage(age=2800)
+        self.assertEqual(context(self.hook("subagent_cold_advisory.sh")), "")
+        note = self.wait_for_note()
+        self.assertIn("HAIKU NOTE", note["note"])
+        self.assertIn("Context 120k tokens", note["facts"])
+        evidence = Path(self.env["FAKE_CLAUDE_STDIN"]).read_text()
+        self.assertTrue(evidence.startswith("FACTS: "))
+        self.assertIn("BRIEF: build the widget", evidence)
+        # Once per subagent: a second tool call starts nothing.
+        Path(self.env["FAKE_CLAUDE_STDIN"]).unlink()
+        self.hook("subagent_cold_advisory.sh")
+        time.sleep(0.5)
+        self.assertFalse(Path(self.env["FAKE_CLAUDE_STDIN"]).exists())
+
+    def test_every_size_gets_the_note_with_its_size_and_no_threshold_alert(self):
+        self.stage(age=2800, big=True)
+        self.hook("subagent_cold_advisory.sh")
+        note = self.wait_for_note()
+        self.assertIn("Context 900k tokens", note["facts"])
+        said = context(self.hook("peek_deliver.sh"))
+        self.assertNotIn("DO NOT WAKE", said)
+
+    def test_the_cold_hook_is_quiet_before_the_last_quarter_and_inside_a_subagent(self):
+        self.stage(age=1300)
+        self.hook("subagent_cold_advisory.sh")
+        self.stage(age=2800, aid="d4e5f6")
+        self.hook("subagent_cold_advisory.sh", agent_id="d4e5f6")
+        time.sleep(0.5)
+        self.assertFalse((Path(self.td) / "peek" / self.SID).exists())
+
+    def test_delivery_is_once_per_subagent_as_additional_context_and_not_inside_a_subagent(self):
+        self.stage(age=2800)
+        self.hook("subagent_cold_advisory.sh")
+        self.wait_for_note()
+        self.assertEqual(context(self.hook("peek_deliver.sh", agent_id="a1b2c3")), "")
+        said = context(self.hook("peek_deliver.sh"))
+        self.assertIn('subagent a1b2c3 "build:opus" has been silent 46m', said)
+        self.assertIn("Status: waiting on a Bash call", said)
+        self.assertIn("HAIKU NOTE: it is mid-build", said)
+        self.assertEqual(context(self.hook("peek_deliver.sh")), "")
+        # The same note rides a UserPromptSubmit when that comes first.
+        self.stage(age=2800, aid="zz9")
+        self.hook("subagent_cold_advisory.sh")
+        self.wait_for_note("zz9")
+        out = self.hook("peek_deliver.sh", hook_event_name="UserPromptSubmit")
+        self.assertEqual(json.loads(out.stdout)["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
+
+    def test_without_claude_the_facts_line_goes_alone(self):
+        j = self.stage(age=2800)
+        empty = Path(self.td) / "nobin"
+        empty.mkdir()
+        env = {**self.env, "PATH": f"{empty}:/usr/bin:/bin"}
+        py = shutil.which("python3")
+        subprocess.run([py, str(ROOT / "peek.py"), "run", self.SID, "a1b2c3", str(j), "2800"],
+                       env=env, check=True)
+        said = context(self.hook("peek_deliver.sh"))
+        self.assertIn("Status: waiting on a Bash call", said)
+        self.assertNotIn("small model", said)
+
+    def test_the_guard_turns_down_the_first_send_to_a_cold_subagent_then_lets_one_through(self):
+        self.stage(age=7200)
+        send = lambda **kw: self.hook("send_cold_guard.sh", tool_name="SendMessage",
+                                      tool_input={"to": "a1b2c3", "message": "status?"}, **kw)
+        out = json.loads(send().stdout)["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("silent 2h00m, past its 1h00m cache", out["permissionDecisionReason"])
+        self.assertIn("re-reads all 120k", out["permissionDecisionReason"])
+        self.assertEqual(send().stdout.strip(), "")
+        self.assertEqual(send(agent_id="x").stdout.strip(), "")
+
+    def test_the_guard_carries_the_latest_note_when_one_exists(self):
+        j = self.stage(age=7200, name="builder")
+        self.peek_note = subprocess.run(
+            [shutil.which("python3"), str(ROOT / "peek.py"), "run", self.SID, "a1b2c3", str(j), "2800"],
+            env={**os.environ, **self.env}, check=True)
+        out = json.loads(self.hook("send_cold_guard.sh", tool_name="SendMessage",
+                                   tool_input={"to": "builder", "message": "hi"}).stdout)
+        self.assertIn("HAIKU NOTE", out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_the_guard_leaves_a_warm_agent_and_an_unknown_target_alone(self):
+        self.stage(age=100)
+        for to in ("a1b2c3", "nobody"):
+            out = self.hook("send_cold_guard.sh", tool_name="SendMessage",
+                            tool_input={"to": to, "message": "hi"})
+            self.assertEqual(out.stdout.strip(), "")
+
+    def test_the_guard_covers_a_session_in_the_registry(self):
+        sid = "other-sess-1"
+        rec = Path(self.td) / "home" / ".claude" / "projects" / "-x" / f"{sid}.jsonl"
+        rec.parent.mkdir(parents=True)
+        t = time.time() - 7200
+        rec.write_text(json.dumps({"type": "assistant", "timestamp": _iso(t), "message": {
+            "stop_reason": "end_turn", "content": [{"type": "text", "text": "done"}],
+            "usage": {"input_tokens": 1, "cache_read_input_tokens": 199_999}}}) + "\n")
+        os.utime(rec, (t, t))
+        (Path(self.td) / "sessions" / "1.json").write_text(json.dumps({"sessionId": sid, "name": "orch", "pid": 1}))
+        env = {**self.env, "HOME": str(Path(self.td) / "home")}
+        out = json.loads(run_hook("send_cold_guard.sh", self.td, self.payload(
+            tool_name="SendMessage", tool_input={"to": "orch", "message": "hi"}), env).stdout)
+        self.assertIn("Context 200k tokens", out["hookSpecificOutput"]["permissionDecisionReason"])
+
+
+
+class RoundOneFixTests(PeekHookBase):
+    """Fixes from the first review of the peek: memory, fan-out, the guard's
+    target and cost, the facts line's edge cases, the marker, crashes, sweep."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        sys.path.insert(0, str(ROOT))
+        import peek
+        self.peek = peek
+        self.t0 = 1_792_000_000
+
+    # 1. one pass, line by line
+    def test_a_record_is_streamed_and_read_once_per_peek(self):
+        import tracemalloc
+        j = Path(self.td) / "big.jsonl"
+        rec = json.dumps(_asst(self.t0, [{"type": "text", "text": "x" * 4000}], stop="end_turn")) + "\n"
+        with open(j, "w") as fh:
+            for _ in range(5000):  # 20 MB
+                fh.write(rec)
+        tracemalloc.start()
+        n = sum(1 for _ in self.peek.tail_records(str(j), None))
+        peak = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+        self.assertEqual(n, 5000)
+        self.assertLess(peak, 3_000_000)
+        calls = []
+        real = self.peek.tail_records
+        self.peek.tail_records = lambda *a, **k: (calls.append(1), real(*a, **k))[1]
+        try:
+            f, acc = self.peek.scan(str(j), 0, subagent=True)
+        finally:
+            self.peek.tail_records = real
+        self.assertEqual(len(calls), 1)
+
+    # 2. one peek at a time
+    def test_peeks_run_one_at_a_time(self):
+        log = Path(self.td) / "log.txt"
+        slow = self.bin / "claude"
+        slow.write_text(f"""#!/bin/sh
+cat > /dev/null
+echo "start $$" >> {log}
+sleep 1
+echo "end $$" >> {log}
+printf '%s' '{{"result":"n"}}'
+""")
+        j1, j2 = self.stage(age=2800), self.stage(age=2800, aid="b2")
+        env = {**os.environ, **self.env}
+        procs = [subprocess.Popen([sys.executable, str(ROOT / "peek.py"), "run", self.SID, a, str(j), "1"], env=env)
+                 for a, j in (("a1b2c3", j1), ("b2", j2))]
+        for p in procs:
+            p.wait(timeout=60)
+        lines = log.read_text().split()
+        kinds = lines[0::2]
+        self.assertEqual(kinds, ["start", "end", "start", "end"])
+
+    # 3. a warm send reads nothing; a cold one streams
+    def test_the_guard_does_not_read_a_warm_record(self):
+        j = self.stage(age=100)
+        rec = json.dumps(_asst(time.time() - 100, [{"type": "text", "text": "x" * 4000}], stop="end_turn")) + "\n"
+        with open(j, "a") as fh:
+            for _ in range(15000):  # 60 MB
+                fh.write(rec)
+        t = time.time() - 100
+        os.utime(j, (t, t))
+        payload = json.dumps(self.payload(tool_name="SendMessage", tool_input={"to": "a1b2c3", "message": "hi"}))
+        code = ("import resource,subprocess,sys;"
+                f"subprocess.run(['bash',{str(ROOT / 'send_cold_guard.sh')!r}],input={payload!r},text=True,capture_output=True);"
+                "print(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)")
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             env={**os.environ, **self.env}).stdout.strip()
+        rss = int(out) / (1 if sys.platform == "darwin" else 1024)
+        self.assertLess(rss, 120_000_000)
+
+    # 4. target resolved as SendMessage does
+    def test_the_guard_matches_an_id_or_a_name_newest_first_and_not_a_description(self):
+        self.stage(age=7200, aid="old1", name="builder", description="alpha")
+        self.stage(age=7300, aid="old2", name="builder", description="beta")
+        self.stage(age=7100, aid="new3", name="builder", description="gamma")
+        send = lambda to: self.hook("send_cold_guard.sh", tool_name="SendMessage",
+                                    tool_input={"to": to, "message": "hi"}).stdout
+        self.assertEqual(send("alpha").strip(), "")  # a description is not an address
+        r = json.loads(send("builder"))["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn('Subagent "gamma"', r)  # newest of the three named builder
+        r = json.loads(send("old2"))["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn('"beta"', r)  # an id wins outright
+
+    # 5. subscribing is free
+    def test_a_send_that_only_subscribes_goes_through(self):
+        self.stage(age=7200)
+        out = self.hook("send_cold_guard.sh", tool_name="SendMessage",
+                        tool_input={"to": "a1b2c3", "notify_when_idle": True})
+        self.assertEqual(out.stdout.strip(), "")
+        out = self.hook("send_cold_guard.sh", tool_name="SendMessage",
+                        tool_input={"to": "a1b2c3", "message": "", "notify_when_idle": True})
+        self.assertEqual(out.stdout.strip(), "")
+
+    # 6. a hand-back stands only while nothing came in after it
+    def test_a_handback_followed_by_a_new_message_and_call_reads_as_waiting(self):
+        t = self.t0
+        recs = [_asst(t, [_use("h", "SubagentHandback")]),
+                _result(t + 1, "h", "handed back"),
+                {"type": "user", "timestamp": _iso(t + 100), "isSidechain": True,
+                 "message": {"content": "one more thing: run the tests"}},
+                _asst(t + 101, [_use("c2", command="mix test")])]
+        line = self.peek.facts_line(recs, "x")
+        self.assertIn("waiting on a Bash call", line)
+        self.assertNotIn("handed back", line)
+        self.assertIn("handed back", self.peek.facts_line(recs[:2], "x"))
+
+    # 7. only the real limit message
+    def test_a_phrase_in_a_tool_result_is_not_a_session_limit(self):
+        t = self.t0
+        recs = [_asst(t, [_use("g", "Grep", pattern="usage limit")]),
+                _result(t + 1, "g", "src/a.py: raise Error('You hit your usage limit and session limit')"),
+                _asst(t + 2, [{"type": "text", "text": "I searched for the usage limit message."}], stop="end_turn")]
+        line = self.peek.facts_line(recs, "x")
+        self.assertNotIn("stopped", line)
+        self.assertIn("finished", line)
+
+    # 8. TaskStop closes a command; Monitor opens one
+    def test_taskstop_closes_a_background_command_and_a_monitor_is_tracked(self):
+        t = self.t0
+        recs = [_asst(t, [_use("b1", description="long build", command="x", run_in_background=True)]),
+                _result(t + 1, "b1", "started", backgroundTaskId="bg1"),
+                _asst(t + 2, [_use("m1", "Monitor", description="watch the log", command="tail -f x")]),
+                _result(t + 3, "m1", "Monitor started", taskId="mon1"),
+                _asst(t + 4, [{"type": "text", "text": "waiting"}], stop="end_turn")]
+        line = self.peek.facts_line(recs, "x")
+        self.assertIn('"long build"', line)
+        self.assertIn('"watch the log"', line)
+        stopped = recs[:4] + [_asst(t + 4, [_use("s1", "TaskStop", task_id="bg1")]), _result(t + 5, "s1", "stopped"),
+                              _asst(t + 6, [{"type": "text", "text": "waiting"}], stop="end_turn")]
+        line = self.peek.facts_line(stopped, "x")
+        self.assertNotIn('"long build"', line)
+        self.assertIn('"watch the log"', line)
+
+    # 9. each silence gets its own peek and its own delivery
+    def test_a_subagent_that_wakes_and_goes_quiet_again_is_peeked_again(self):
+        j = self.stage(age=2800)
+        self.hook("subagent_cold_advisory.sh")
+        first = self.wait_for_note()
+        self.assertIn("a1b2c3", context(self.hook("peek_deliver.sh")))
+        self.assertEqual(context(self.hook("peek_deliver.sh")), "")
+        self.stage(age=2900)  # it worked in between and went quiet again, later
+        t = time.time() - 2750
+        os.utime(j, (t, t))
+        self.hook("subagent_cold_advisory.sh")
+        for _ in range(100):
+            n = json.loads((Path(self.td) / "peek" / self.SID / "a1b2c3.json").read_text())
+            if n["at"] != first["at"]:
+                break
+            time.sleep(0.1)
+        self.assertNotEqual(n["at"], first["at"])
+        self.assertIn("a1b2c3", context(self.hook("peek_deliver.sh")))
+
+    # 10. a crash still says the facts line
+    def test_a_failed_peek_stores_the_facts_line_alone(self):
+        j = self.stage(age=2800)
+        bad = self.bin / "claude"
+        bad.write_text("#!/bin/sh\nexit 3\n")
+        subprocess.run([sys.executable, str(ROOT / "peek.py"), "run", self.SID, "a1b2c3", str(j), "2800"],
+                       env={**os.environ, **self.env}, check=True)
+        said = context(self.hook("peek_deliver.sh"))
+        self.assertIn("Status: waiting on a Bash call", said)
+        self.assertNotIn("small model", said)
+        gone = Path(self.td) / "nope" / "agent-zz.jsonl"
+        subprocess.run([sys.executable, str(ROOT / "peek.py"), "run", self.SID, "zz", str(gone), "5"],
+                       env={**os.environ, **self.env}, check=True)
+        self.assertIn("could not be read", context(self.hook("peek_deliver.sh")))
+
+    # 11. notes are swept after a week
+    def test_notes_older_than_a_week_are_removed(self):
+        root = Path(self.td) / "peek"
+        old = root / "old-sess" / "x.json"
+        old.parent.mkdir(parents=True)
+        old.write_text("{}")
+        t = time.time() - 8 * 86400
+        os.utime(old, (t, t))
+        fresh = root / "fresh-sess" / "y.json"
+        fresh.parent.mkdir(parents=True)
+        fresh.write_text("{}")
+        with mock.patch.dict(os.environ, {"SCRY_PEEK_STATE_DIR": str(root)}):
+            self.peek.store_note("s", "a", "d", "facts", "", 0)
+        self.assertFalse(old.exists())
+        self.assertFalse(old.parent.exists())
+        self.assertTrue(fresh.exists())
+
+    # 12. no usage data
+    def test_no_usage_data_says_the_size_is_not_in_the_record(self):
+        rec = {"type": "assistant", "timestamp": _iso(self.t0),
+               "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "done"}]}}
+        line = self.peek.facts_line([rec], "x")
+        self.assertIn("no context size", line)
+        self.assertNotIn("0k", line)
+
+    # 13. the written exception covers what the code reads
+    def test_agents_md_names_everything_that_reads_a_record(self):
+        text = (ROOT / "AGENTS.md").read_text()
+        for word in ("peek.py", "send_cold_guard", "check-sessions"):
+            self.assertIn(word, text)
+
+
+
+
+class RoundTwoTests(PeekHookBase):
+    """A subagent that handed back with nothing running gets the facts line
+    alone; every other status gets the Haiku note as well."""
+
+    def write(self, recs, aid="a1b2c3"):
+        j = self.sub / f"agent-{aid}.jsonl"
+        j.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+        (self.sub / f"agent-{aid}.meta.json").write_text(json.dumps({"description": "r2"}))
+        return j
+
+    def peek(self, recs):
+        j = self.write(recs)
+        stdin = Path(self.env["FAKE_CLAUDE_STDIN"])
+        if stdin.exists():
+            stdin.unlink()
+        subprocess.run([sys.executable, str(ROOT / "peek.py"), "run", self.SID, "a1b2c3", str(j), "2800"],
+                       env={**os.environ, **self.env}, check=True)
+        note = json.loads((Path(self.td) / "peek" / self.SID / "a1b2c3.json").read_text())
+        return note, stdin.exists()
+
+    def test_a_handed_off_agent_gets_the_facts_line_alone_and_no_model_call(self):
+        t = time.time() - 3000
+        note, called = self.peek([_asst(t, [_use("h", "SubagentHandback")]), _result(t + 1, "h", "ok")])
+        self.assertFalse(called)
+        self.assertEqual(note["note"], "")
+        self.assertIn("finished: it handed back its report", note["facts"])
+        said = context(self.hook("peek_deliver.sh"))
+        self.assertIn("finished: it handed back", said)
+        self.assertNotIn("small model", said)
+
+    def test_a_handback_followed_by_a_new_message_gets_the_full_note(self):
+        t = time.time() - 3000
+        note, called = self.peek([
+            _asst(t, [_use("h", "SubagentHandback")]), _result(t + 1, "h", "ok"),
+            {"type": "user", "timestamp": _iso(t + 50), "isSidechain": True, "message": {"content": "also run the tests"}},
+            _asst(t + 51, [_use("c", command="mix test")])])
+        self.assertTrue(called)
+        self.assertIn("HAIKU NOTE", note["note"])
+        self.assertIn("waiting on a Bash call", note["facts"])
+
+    def test_a_handback_with_a_background_command_still_open_gets_the_full_note(self):
+        t = time.time() - 3000
+        note, called = self.peek([
+            _asst(t, [_use("b", description="poll", command="x", run_in_background=True)]),
+            _result(t + 1, "b", "started", backgroundTaskId="bg1"),
+            _asst(t + 2, [_use("h", "SubagentHandback")])])
+        self.assertTrue(called)
+        self.assertIn('"poll"', note["facts"])
+        self.assertIn("HAIKU NOTE", note["note"])
+
+    def test_a_handback_with_a_monitor_open_gets_the_full_note_and_a_closed_one_does_not(self):
+        t = time.time() - 3000
+        base = [_asst(t, [_use("m", "Monitor", description="watch", command="tail -f x")]),
+                _result(t + 1, "m", "started", taskId="mon1"),
+                _asst(t + 2, [_use("h", "SubagentHandback")])]
+        self.assertTrue(self.peek(base)[1])
+        closed = base[:2] + [_notice(t + 3, "mon1")] + base[2:]
+        self.assertFalse(self.peek(closed)[1])
+
+    def test_every_other_status_gets_the_full_note(self):
+        t = time.time() - 3000
+        cases = {
+            "ended its turn, nothing running": [_asst(t, [{"type": "text", "text": "done"}], stop="end_turn")],
+            "waiting": [_asst(t, [_use("c", command="x")])],
+            "working": [_asst(t, [_use("c", command="x")]), _result(t + 1, "c", "ok")],
+            "stopped": [_asst(t, [{"type": "text", "text": "You've hit your session limit \u00b7 resets 9pm"}], stop="stop_sequence")],
+        }
+        for name, recs in cases.items():
+            with self.subTest(name):
+                note, called = self.peek(recs)
+                self.assertTrue(called)
+                self.assertIn("HAIKU NOTE", note["note"])
+
+    def test_a_limit_after_a_handback_is_not_handed_off(self):
+        t = time.time() - 3000
+        note, called = self.peek([_asst(t, [_use("h", "SubagentHandback")]),
+                                  _asst(t + 5, [{"type": "text", "text": "You've hit your session limit \u00b7 resets 9pm"}])])
+        self.assertTrue(called)
+
+    def test_the_guard_still_shows_the_facts_line_alone_when_no_note_exists(self):
+        t = time.time() - 7200
+        self.write([_asst(t, [_use("h", "SubagentHandback")]), _result(t + 1, "h", "ok")])
+        j = self.sub / "agent-a1b2c3.jsonl"
+        os.utime(j, (t, t))
+        out = json.loads(self.hook("send_cold_guard.sh", tool_name="SendMessage",
+                                   tool_input={"to": "a1b2c3", "message": "hi"}).stdout)
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("finished: it handed back", reason)
+        self.assertNotIn("peek note", reason)
+
+
+
+class RoundThreeTests(PeekHookBase):
+    """Fixes from the voices' review: queue limit, a killed peek, sweeps, the
+    guard's marker, sender and address, its wording, the off file, the log."""
+
+    def setUp(self):
+        super().setUp()
+        sys.path.insert(0, str(ROOT))
+        import peek
+        self.peek = peek
+        self.off = Path(self.td) / "off"
+        self.env["SCRY_PEEK_OFF_FILE"] = str(self.off)
+
+    def run_peek(self, j, aid="a1b2c3", quiet="2800", extra=None, wait=True):
+        env = {**os.environ, **self.env, **(extra or {})}
+        p = subprocess.Popen([sys.executable, str(ROOT / "peek.py"), "run", self.SID, aid, str(j), quiet], env=env)
+        if wait:
+            p.wait(timeout=120)
+        return p
+
+    def log(self):
+        p = Path(self.td) / "peek" / "events.log"
+        return p.read_text() if p.exists() else ""
+
+    # 1. the queue has a limit, and the silence is counted at delivery
+    def test_a_peek_that_cannot_get_its_turn_says_the_facts_line_alone(self):
+        import fcntl
+        j = self.stage(age=2800)
+        os.makedirs(Path(self.td) / "peek", exist_ok=True)
+        with open(Path(self.td) / "peek" / "peek.lock", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            self.run_peek(j, extra={"SCRY_PEEK_LOCK_WAIT": "1"})
+        self.assertFalse(Path(self.env["FAKE_CLAUDE_STDIN"]).exists())
+        said = context(self.hook("peek_deliver.sh"))
+        self.assertIn("Status: waiting on a Bash call", said)
+        self.assertNotIn("small model", said)
+        self.assertIn("timed out waiting its turn", self.log())
+
+    def test_the_silence_is_counted_when_the_note_is_delivered(self):
+        with mock.patch.dict(os.environ, {"SCRY_PEEK_STATE_DIR": str(Path(self.td) / "peek")}):
+            self.peek.store_note(self.SID, "a1b2c3", "d", "FACTS", "", 60, quiet_at=time.time() - 7200)
+        self.assertIn("has been silent 2h00m", context(self.hook("peek_deliver.sh")))
+
+    # 2. a killed peek
+    def test_a_killed_peek_still_delivers_its_facts_line_and_its_leftovers_are_swept(self):
+        j = self.stage(age=2800)
+        pidfile = Path(self.td) / "child.pid"
+        slow = self.bin / "claude"
+        slow.write_text(f"#!/bin/sh\ncat > {self.env['FAKE_CLAUDE_STDIN']}\necho $$ > {pidfile}\nsleep 300\n")
+        leftover = Path(self.td) / "scry-peek-leftover"
+        leftover.mkdir()
+        (leftover / "evidence.txt").write_text("record text")
+        t = time.time() - 7200
+        os.utime(leftover, (t, t))
+        p = self.run_peek(j, extra={"TMPDIR": self.td}, wait=False)
+        for _ in range(100):
+            if pidfile.exists():
+                break
+            time.sleep(0.1)
+        self.assertTrue(pidfile.exists())
+        child = int(pidfile.read_text())
+        self.addCleanup(lambda: subprocess.run(["kill", "-9", str(child)], capture_output=True))
+        p.kill()
+        p.wait()
+        said = context(self.hook("peek_deliver.sh"))
+        self.assertIn("Status: waiting on a Bash call", said)
+        self.assertFalse(leftover.exists())
+
+    def test_haiku_is_killed_with_its_children_on_a_timeout(self):
+        j = self.stage(age=2800)
+        pidfile = Path(self.td) / "grand.pid"
+        slow = self.bin / "claude"
+        slow.write_text(f"#!/bin/sh\ncat > /dev/null\nsleep 300 &\necho $! > {pidfile}\nwait\n")
+        self.run_peek(j, extra={"SCRY_PEEK_HAIKU_TIMEOUT": "1"})
+        grand = int(pidfile.read_text())
+        time.sleep(0.3)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(grand, 0)
+        self.assertIn("facts only (no note)", self.log())
+
+    # 3. the marker folders are swept too
+    def test_old_markers_and_delivered_claims_are_swept_on_a_hook_run(self):
+        self.stage(age=100)
+        cold = Path(self.td) / "cold"
+        cold.mkdir()
+        old = cold / "x-y-1"
+        old.write_text("")
+        deliv = Path(self.td) / "peek" / "s" / "a.1.delivered"
+        deliv.parent.mkdir(parents=True)
+        deliv.write_text("")
+        t = time.time() - 8 * 86400
+        for f in (old, deliv):
+            os.utime(f, (t, t))
+        self.hook("subagent_cold_advisory.sh")
+        self.assertFalse(old.exists())
+        self.assertFalse(deliv.exists())
+
+    # 4. the refusal is spent only when the guard denies
+    def test_a_guard_that_cannot_finish_lets_the_send_through_and_keeps_its_refusal(self):
+        j = self.stage(age=7200)
+        send = lambda: self.hook("send_cold_guard.sh", tool_name="SendMessage",
+                                 tool_input={"to": "a1b2c3", "message": "hi"}).stdout
+        os.chmod(j, 0)
+        try:
+            self.assertEqual(send().strip(), "")
+        finally:
+            os.chmod(j, 0o644)
+        self.assertEqual(json.loads(send())["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(send().strip(), "")
+
+    # 5 and 6. sender in the marker; the address as SendMessage reads it
+    def session(self, name, sid, pid, text="done"):
+        rec = Path(self.td) / "home" / ".claude" / "projects" / "-x" / f"{sid}.jsonl"
+        rec.parent.mkdir(parents=True, exist_ok=True)
+        t = time.time() - 7200
+        rec.write_text(json.dumps({"type": "assistant", "timestamp": _iso(t), "message": {
+            "stop_reason": "end_turn", "content": [{"type": "text", "text": text}],
+            "usage": {"input_tokens": 1, "cache_read_input_tokens": 99_999}}}) + "\n")
+        os.utime(rec, (t, t))
+        (Path(self.td) / "sessions" / f"{pid}.json").write_text(json.dumps(
+            {"sessionId": sid, "name": name, "pid": pid, "updatedAt": 1}))
+
+    def send(self, to, sender="sender-1"):
+        env = {**self.env, "HOME": str(Path(self.td) / "home")}
+        out = run_hook("send_cold_guard.sh", self.td, self.payload(
+            session_id=sender, tool_name="SendMessage", tool_input={"to": to, "message": "hi"}), env)
+        return out.stdout.strip()
+
+    def test_one_senders_turned_down_send_does_not_let_another_sender_through(self):
+        self.session("orch", "target-sess", os.getpid())
+        self.assertIn("deny", self.send("orch", "sender-1"))
+        self.assertEqual(self.send("orch", "sender-1"), "")
+        self.assertIn("deny", self.send("orch", "sender-2"))
+
+    def test_an_ambiguous_address_is_not_judged_and_a_ref_or_a_dead_twin_resolves_it(self):
+        self.session("twin", "twin-aaaa1111", os.getpid())
+        self.session("twin", "twin-bbbb2222", os.getppid())
+        self.assertEqual(self.send("twin"), "")
+        self.assertIn("deny", self.send("twin [twin-bbbb]", "sender-2"))
+        (Path(self.td) / "sessions" / f"{os.getppid()}.json").unlink()
+        self.session("twin", "twin-cccc3333", 999_999)  # not running
+        self.assertIn("deny", self.send("twin", "sender-3"))
+
+    # 7. wording
+    def test_the_deny_says_it_is_a_one_time_pause_and_that_the_record_can_be_read(self):
+        self.stage(age=7200)
+        out = json.loads(self.hook("send_cold_guard.sh", tool_name="SendMessage",
+                                   tool_input={"to": "a1b2c3", "message": "hi"}).stdout)
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("one-time pause, not a failure", reason)
+        self.assertIn("the same send again goes through", reason)
+        self.assertIn("record and output files can be read without waking it", reason)
+
+    # 8. the off file
+    def test_the_off_file_stops_the_peek_the_delivery_and_the_guard_in_a_running_session(self):
+        j = self.stage(age=2800)
+        self.off.write_text("")
+        self.hook("subagent_cold_advisory.sh")
+        self.run_peek(j)
+        time.sleep(0.3)
+        self.assertFalse((Path(self.td) / "peek" / self.SID).exists())
+        with mock.patch.dict(os.environ, {"SCRY_PEEK_STATE_DIR": str(Path(self.td) / "peek")}):
+            self.peek.store_note(self.SID, "a1b2c3", "d", "FACTS", "", 60, quiet_at=time.time())
+        self.assertEqual(context(self.hook("peek_deliver.sh")), "")
+        self.stage(age=7200)
+        self.assertEqual(self.hook("send_cold_guard.sh", tool_name="SendMessage",
+                                   tool_input={"to": "a1b2c3", "message": "hi"}).stdout.strip(), "")
+        self.off.unlink()
+        self.assertIn("FACTS", context(self.hook("peek_deliver.sh")))
+        self.assertIn("deny", self.hook("send_cold_guard.sh", tool_name="SendMessage",
+                                        tool_input={"to": "a1b2c3", "message": "hi"}).stdout)
+
+    # 9. the log
+    def test_every_event_is_logged_without_record_text_and_old_lines_are_trimmed(self):
+        j = self.stage(age=2800)
+        p = Path(self.td) / "peek"
+        p.mkdir(exist_ok=True)
+        (p / "events.log").write_text("2020-01-01T00:00:00+00:00\told\told\tpeek stored with note\n")
+        self.hook("subagent_cold_advisory.sh")
+        self.wait_for_note()
+        self.hook("peek_deliver.sh")
+        self.stage(age=7200)
+        send = lambda: self.hook("send_cold_guard.sh", tool_name="SendMessage",
+                                 tool_input={"to": "a1b2c3", "message": "SECRET TEXT"})
+        send()
+        send()
+        log = self.log()
+        for event in ("peek started", "peek stored with note", "delivered",
+                      "send turned down once", "send let through inside the window"):
+            self.assertIn(event, log)
+        self.assertNotIn("BRIEF", log)
+        self.assertNotIn("SECRET", log)
+        self.assertNotIn("2020-01-01", log)
+        for line in log.strip().splitlines():
+            self.assertEqual(len(line.split("\t")), 4)
+            self.assertIn(self.SID, line)
+
+
+
+class RoundFourTests(PeekHookBase):
+    """Fixes from the check of round 3: the off file for a peek already
+    queued, a double delivery after a SIGTERM, a leftover evidence folder, and
+    the real window in the deny."""
+    run_peek = RoundThreeTests.run_peek
+    log = RoundThreeTests.log
+
+    def setUp(self):
+        super().setUp()
+        sys.path.insert(0, str(ROOT))
+        import peek
+        self.peek = peek
+        self.off = Path(self.td) / "off"
+        self.env["SCRY_PEEK_OFF_FILE"] = str(self.off)
+
+    def state(self):
+        patcher = mock.patch.dict(os.environ, {"SCRY_PEEK_STATE_DIR": str(Path(self.td) / "peek")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_peek_queued_when_the_off_file_is_set_makes_no_model_call(self):
+        import fcntl
+        j = self.stage(age=2800)
+        os.makedirs(Path(self.td) / "peek", exist_ok=True)
+        with open(Path(self.td) / "peek" / "peek.lock", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            p = self.run_peek(j, wait=False)
+            time.sleep(0.6)  # queued behind the lock
+            self.off.write_text("")
+        p.wait(timeout=60)
+        self.assertFalse(Path(self.env["FAKE_CLAUDE_STDIN"]).exists())
+        self.assertIn("facts only (switched off)", self.log())
+        note = json.loads((Path(self.td) / "peek" / self.SID / "a1b2c3.json").read_text())
+        self.assertEqual(note["note"], "")
+        self.assertIn("Status: waiting on a Bash call", note["facts"])
+
+    def test_the_off_file_is_read_again_just_before_haiku_is_called(self):
+        j = self.stage(age=2800)
+        real = self.peek.write_evidence
+
+        def write_then_switch_off(*a, **k):
+            real(*a, **k)
+            self.off.write_text("")
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(self.peek, "write_evidence", write_then_switch_off), \
+                mock.patch.object(self.peek, "ask_haiku", side_effect=AssertionError("Haiku was called")):
+            self.peek.run_peek(self.SID, "a1b2c3", str(j), 5, time.time())
+        self.assertIn("facts only (switched off)", self.log())
+        self.assertEqual([p for p in Path(tempfile.gettempdir()).glob("scry-peek-*")
+                          if p.stat().st_mtime > time.time() - 60], [])
+
+    def test_a_stored_note_and_a_stale_pending_file_are_delivered_once(self):
+        self.state()
+        self.peek.write_pending(self.SID, "a1b2c3", "d", "FACTS LINE", time.time())
+        pend = Path(self.peek.pending_path(self.SID, "a1b2c3"))
+        data = json.loads(pend.read_text())
+        data["pid"] = 999_999  # its peek is gone
+        pend.write_text(json.dumps(data))
+        time.sleep(0.01)
+        self.peek.store_note(self.SID, "a1b2c3", "d", "FACTS LINE", "", 5, time.time())
+        said = context(self.hook("peek_deliver.sh"))
+        self.assertEqual(said.count("FACTS LINE"), 1)
+        self.assertFalse(pend.exists())
+        self.assertEqual(context(self.hook("peek_deliver.sh")), "")
+
+    def test_a_dead_peek_with_no_stored_note_still_delivers_its_pending_line(self):
+        self.state()
+        self.peek.write_pending(self.SID, "a1b2c3", "d", "ONLY PENDING", time.time())
+        pend = Path(self.peek.pending_path(self.SID, "a1b2c3"))
+        data = json.loads(pend.read_text())
+        data["pid"] = 999_999
+        pend.write_text(json.dumps(data))
+        self.assertIn("ONLY PENDING", context(self.hook("peek_deliver.sh")))
+
+    def test_sigterm_removes_the_evidence_folder_and_stops_haiku(self):
+        import signal
+        j = self.stage(age=2800)
+        pidfile = Path(self.td) / "child.pid"
+        slow = self.bin / "claude"
+        slow.write_text(f"#!/bin/sh\ncat > /dev/null\necho $$ > {pidfile}\nsleep 300\n")
+        p = self.run_peek(j, extra={"TMPDIR": self.td}, wait=False)
+        for _ in range(100):
+            if pidfile.exists():
+                break
+            time.sleep(0.1)
+        child = int(pidfile.read_text())
+        self.addCleanup(lambda: subprocess.run(["kill", "-9", str(child)], capture_output=True))
+        self.assertTrue(list(Path(self.td).glob("scry-peek-*")))  # the evidence is on disk while Haiku runs
+        p.send_signal(signal.SIGTERM)
+        p.wait(timeout=30)
+        self.assertEqual(list(Path(self.td).glob("scry-peek-*")), [])
+        time.sleep(0.3)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child, 0)
+
+    def test_the_deny_names_the_real_window(self):
+        self.stage(age=7200)
+        self.env["SCRY_COLD_SEND_WINDOW"] = "7200"
+        out = json.loads(self.hook("send_cold_guard.sh", tool_name="SendMessage",
+                                   tool_input={"to": "a1b2c3", "message": "hi"}).stdout)
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("(for 2h00m)", reason)
+        self.assertNotIn("for an hour", reason)
+
+
+class ScheduleCostAdvisoryTests(unittest.TestCase):
+    def run_it(self, tool, inp):
+        with tempfile.TemporaryDirectory() as td:
+            tp = Path(td) / "s.jsonl"
+            tp.write_text(json.dumps(_asst(time.time(), [], stop="end_turn", ctx=212_000)) + "\n")
+            return context(run_hook("schedule_cost_advisory.sh", td, {
+                "session_id": "s", "transcript_path": str(tp), "tool_name": tool, "tool_input": inp}))
+
+    def test_a_cron_says_runs_a_day_and_what_each_run_re_reads(self):
+        said = self.run_it("CronCreate", {"cron": "*/30 * * * *", "prompt": "x"})
+        self.assertIn("48 runs a day", said)
+        self.assertIn("212k tokens", said)
+        self.assertIn("48 runs a day", self.run_it("CronCreate", {"cron": "7,37 * * * *", "prompt": "x"}))
+        self.assertIn("9 runs a day", self.run_it("CronCreate", {"cron": "0 9-17 * * *", "prompt": "x"}))
+
+    def test_a_wakeup_counts_from_its_delay_and_a_one_shot_cron_is_left_alone(self):
+        self.assertIn("48 runs a day", self.run_it("ScheduleWakeup", {"delaySeconds": 1800}))
+        self.assertEqual(self.run_it("CronCreate", {"cron": "30 14 28 2 *", "recurring": False, "prompt": "x"}), "")
+
+    def test_it_is_an_observation_not_an_instruction(self):
+        said = self.run_it("ScheduleWakeup", {"delaySeconds": 3600})
+        self.assertNotRegex(said, r"(?i)\b(should|must|avoid|consider)\b")
+
+
+class CheckSessionsSkillTests(unittest.TestCase):
+    def test_the_gather_script_reads_through_the_shared_reader(self):
+        script = ROOT / "skills" / "check-sessions" / "scrum-gather.py"
+        r = subprocess.run([sys.executable, str(script), "--no-herdr", "--name", "no-such-tab",
+                            "--state", os.devnull], capture_output=True, text=True,
+                           env={**os.environ, "SCRUM_NO_SAVE": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("# 0 tabs", r.stdout)
+        self.assertIn("from peek import", script.read_text())
+        self.assertNotIn("def transcript_facts", script.read_text())
 
 
 class TeammateRosterTests(unittest.TestCase):

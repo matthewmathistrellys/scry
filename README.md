@@ -22,6 +22,9 @@ machine is carrying. Independent checks and advisories fill that in.
 | **`pressure.sh`** | What shape is this machine in? |
 | **`context_length_advisory.sh`** | How much is this session carrying, and what does that mean? A ladder of notes as the context grows (60k, 80k, 100k, 200k, then every 100k), each adding a work type and updating the earlier ones |
 | **`load_fanout_advisory.sh`**, **`service_distress_advisory.sh`** | Is this session about to hit something shared many times over, or already getting the answers a struggling service gives? A note before a loop, parallel or background fan-out against a remote tool; a note after repeated timeouts, 5xx, 429 or slow calls |
+| **`subagent_cold_advisory.sh`**, **`peek_deliver.sh`**, **`send_cold_guard.sh`** | What is a quiet subagent doing, how big is it, and what would waking it re-read? At 45 minutes of silence a background peek reads its record and a small model writes a note, which the main agent receives on its next hook; the first message to an agent whose cache is cold is turned down once with that note |
+| **`schedule_cost_advisory.sh`** | What does a repeating check-in re-read, and how many runs a day does the schedule make? |
+| **`skills/check-sessions`** | What are all the other sessions doing? Reads them without messaging or waking any, through the same reader the peek uses (`peek.py`) |
 | **`main_drift_advisory.sh`** | Is the tree this subagent was handed the current one? |
 | **`cache_handoff_monitor.sh`** | Is this session about to lose its prompt cache — and what is still unfinished, or what should be summarised first? |
 | **`roster.sh`** | What did *this* session start that has not finished — and is it what I remember? |
@@ -404,7 +407,7 @@ machine is carrying. Independent checks and advisories fill that in.
   |---|---|---|
   | workflow | its journal has an agent `started` with no `result`, however long it has been quiet | `workflow <name> (<id>): <finished> of <started> agents done, last activity <age> ago` — the name from `workflows/scripts/<name>-<id>.js`, else the id alone |
   | background command | a process still holds its `b*.output` open (one `lsof` call over the files with no exit marker; the shell running a command has the file as stdout until it exits, and nothing holds a finished one) — except a Scry monitor's own notification stream (opens with "Scry — "). Until 1.35.0 the missing marker alone was the test, and a foreground Bash call writes the same file with no marker, so every large-output command a session ever ran read as running forever (2026-09-22: fifty in one session, four days old, kept warm hourly for nothing). Without `lsof`, none is listed | `background command <task id>: a process still holds its output open, last output <age> ago` — what Scry sees, not a claim that it is progressing |
-  | subagent | its `agent-*.jsonl` was written within `SCRY_KEEPALIVE_FRESH_SECS` (default 3600, one TTL) | `subagent <id> "<description>": last activity <age> ago` — and in the last quarter of the window, what the silence means: its own cache goes cold at the TTL; finished, nothing happens; still working, its next step re-reads its context once at the full rate; stuck, stop it before that read. The same note rides a tool result while the session is awake (`subagent_cold_advisory.sh`, PostToolUse, once per subagent), so it is never a wake of its own (Matt, 2026-09-22) |
+  | subagent | its `agent-*.jsonl` was written within `SCRY_KEEPALIVE_FRESH_SECS` (default 3600, one TTL) | `subagent <id> "<description>": last activity <age> ago` — and in the last quarter of the window, what the silence means: its own cache goes cold at the TTL; finished, nothing happens; still working, its next step re-reads its context once at the full rate; stuck, stop it before that read. While the session is awake, the peek below carries what the subagent is doing instead (`subagent_cold_advisory.sh`, once per subagent), so it is never a wake of its own |
 
   A plain subagent's metadata has nothing that says it finished, so Scry
   cannot tell a finished one from a quiet one; the one-TTL window is its only
@@ -1381,6 +1384,98 @@ Known gaps:
 - Codex is not covered: there was no Codex build here to check its hook
   payloads, and Codex writes files through `apply_patch`.
 
+## When a subagent goes quiet
+
+A subagent's cache goes cold one TTL after its last request, and a file time
+cannot say whether it finished, is waiting, or stopped on a limit. So Scry
+reads what the subagent said and was told. This bends "metadata, not
+conversation content" on purpose: the record is read by a script and a small
+model, and only the note they write reaches the main agent. The reason: in six
+real subagents cut at 45 minutes of silence, four had stopped on the session
+limit or an interruption rather than finished, and one finished agent with a
+background wait still open was woken 19 hours later at 309k tokens for
+nothing; none of that shows in a file time.
+
+- **The peek** (`subagent_cold_advisory.sh`, PostToolUse). At
+  `SCRY_KEEPALIVE_FRESH_SECS` x 3/4 of silence (45 minutes by default), once
+  per silence of a subagent (a subagent that wakes and goes quiet again is
+  peeked again), the hook starts `peek.py` in the background and exits at once.
+  Peeks run one at a time, so several subagents going quiet together never
+  hold several readers and several Haiku calls at once; if one fails, the
+  facts line alone is stored and delivered. Notes are removed after 7 days.
+  The peek reads the whole record, once, line by line (subagent records are all `isSidechain`, and
+  the tail cut that suits a long session drops the early part of a long
+  subagent), works out a **facts line** by script, and runs Haiku on the
+  subscription with the check-sessions prompt unchanged:
+  `claude -p --model haiku` with hooks, settings, MCP, slash commands and tools
+  all off (about 550 tokens of setup against 185k with defaults), never
+  `--bare` (it drops the subscription login). A note costs about 16k tokens in
+  and 600 words out, about 10 seconds. There is no size threshold; the size is
+  in the facts line. A subagent that handed back its report, with nothing after
+  the hand-back and no background command or monitor still open, gets the facts
+  line alone and no model call: everything is handed off. Every other status
+  gets the note too.
+- **The facts line.** Status: finished (handed back); ended its turn with
+  background commands still running; waiting on a call (its name and start
+  time); stopped on the session limit (with the reset time); stopped by an
+  interruption or a turned-down call; or working (its last call returned, no
+  reply yet). Open background commands, each named by its Bash description,
+  read from `toolUseResult.backgroundTaskId` and closed by a completion notice.
+  Context size, and that a message after its cache goes cold re-reads all of it
+  and a background notice wakes it the same way. Times are local.
+- **Delivery** (`peek_deliver.sh`, PostToolUse and UserPromptSubmit). The next
+  hook that fires in the main session hands over the facts line, then the note,
+  as additional context, once per subagent. Nothing wakes the main agent or the
+  subagent to carry it. Where `claude` is not on the path (Codex), the facts
+  line goes alone.
+- **The guard** (`send_cold_guard.sh`, PreToolUse on `SendMessage`). When the
+  target (resolved as SendMessage does: an agent id, else a name, newest wins) is
+  a subagent of this session, or a session in `~/.claude/sessions`,
+  and its last request is older than its cache TTL (decided from the file time
+  and the record's tail; the record is read only when it is cold), the first send is turned
+  down once with the facts line and the latest note; a second send to it within
+  `SCRY_COLD_SEND_WINDOW` goes through. A send that only subscribes to the
+  idle notice (no message) is never turned down. This is the one place Scry blocks: a
+  PreToolUse note arrives only with the tool result, after the message has gone,
+  so only a deny lands in time.
+- **Repeating check-ins** (`schedule_cost_advisory.sh`, PostToolUse on
+  `CronCreate` and `ScheduleWakeup`). Says what each run re-reads (this
+  session's context) and how many runs a day the schedule makes.
+
+All of these are silent inside a subagent.
+
+- **Queue and death.** A peek waits at most 5 minutes (`SCRY_PEEK_LOCK_WAIT`) for
+  its turn; one that times out says its facts line alone, so a burst does not
+  leave notes arriving long after the silence they describe. The silence in a
+  note is counted when it is delivered. A peek writes its facts line to a
+  pending file before it calls Haiku, so a peek killed at any point still
+  delivers it once its process is gone. Haiku runs in its own process group,
+  killed on a timeout or a SIGTERM to the peek. A SIGKILL to the peek itself
+  cannot be caught: its `claude -p` child then runs on to its own end, and the
+  evidence folder it leaves in `$TMPDIR` (`scry-peek-*`, record text) is
+  removed by the next run once it is an hour old.
+- **Off switch.** Environment variables reach a running session only after a
+  restart, so the peek, its delivery and the guard also read a file on every
+  hook run. Off, in every running session at once: `touch ~/.claude/scry-peek.off`.
+  On again: `rm ~/.claude/scry-peek.off`. A peek already queued reads the file
+  again after it gets its turn and just before it calls Haiku, and says its
+  facts line alone if it is set. (`SCRY_PEEK_OFF_FILE` names another path;
+  `SCRY_PEEK=0` and `SCRY_COLD_SEND_GUARD=0` still work from the environment.)
+- **Log.** One line per event in `$TMPDIR/scry-peek/events.log`, tab separated:
+  time, session, subagent or target, event. Events: peek started; peek stored
+  with note; peek stored, facts only (handed off, no note, timed out, failed);
+  delivered; send turned down once; send let through inside the window. Never
+  any record text. Lines older than 30 days are removed. A week of these lines
+  is what the peek is judged from.
+- **Sweeps.** Notes, claims, guard markers and the cold hook's markers older
+  than 7 days are removed (at most once an hour per folder).
+- **The guard's address.** The marker is per sender and target, and the refusal is
+  spent only once the guard has decided to deny: a guard that cannot finish
+  (a record it cannot read, a timeout) lets the send through and keeps it. A
+  `[ref]` is ListAgents' own short code and cannot be rebuilt from the session
+  registry, so an address that could mean more than one running session is not
+  judged at all (SendMessage itself refuses such an address).
+
 ## Tuning
 
 Every threshold is an environment variable. Defaults are set where the number
@@ -1427,6 +1522,13 @@ starts changing a decision.
 | `SCRY_DISTRESS_WINDOW_MINUTES` | `10` | how far back those answers are counted |
 | `SCRY_CONTEXT_NOTES` | `1` | `0` stops the note when the session's context first reaches a band |
 | `SCRY_CONTEXT_STALE_MINUTES` | `120` | age of the status-line reading past which the note stays silent |
+| `SCRY_PEEK` | `1` | `0` stops the background peek on a quiet subagent and the delivery of its note |
+| `SCRY_KEEPALIVE_FRESH_SECS` (peek) | `3600` | the peek starts at three quarters of this much silence |
+| `SCRY_COLD_SEND_GUARD` | `1` | `0` stops the one-time turn-down of a first message to a cold agent |
+| `SCRY_COLD_SEND_WINDOW` | `3600` | seconds after a turn-down during which a second send goes through |
+| `SCRY_SCHEDULE_NOTES` | `1` | `0` stops the cost note on `CronCreate` and `ScheduleWakeup` |
+| `SCRY_PEEK_OFF_FILE` | `~/.claude/scry-peek.off` | a file whose existence turns the peek, its delivery and the guard off, read on every hook run |
+| `SCRY_PEEK_LOCK_WAIT` | `300` | seconds a peek waits for its turn before saying its facts line alone |
 | `SCRY_STATUSLINE_CHECK` | `1` | `0` (in the environment or in settings.json `env`) stops the session-start note that Scry's status bar is not set up |
 
 Raising a threshold buys silence. Lowering one buys warning. Neither changes

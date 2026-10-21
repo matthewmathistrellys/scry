@@ -11,7 +11,10 @@ behavior lives in `README.md`; these rules govern changes to the shared hooks.
 - **Quiet by default.** A signal speaks only when it would change a decision.
   A check that reports nothing is reporting that nothing needs attention.
 - **Advisory, never blocking.** Every hook exits zero. Scry says what it sees
-  and leaves the response to the reader.
+  and leaves the response to the reader. One exception: the first message to an
+  agent whose cache is cold is turned down once, with the peek note as the
+  reason, and a second send goes through. A PreToolUse note reaches the sender
+  only after the message has gone, so only a deny arrives in time.
 - **Observations and insights, never instructions.** Scry gives information
   (what it observed, and how it knows) and insights (what that observation
   means: often a potential consequence, or why a source is untrustworthy for
@@ -23,7 +26,12 @@ behavior lives in `README.md`; these rules govern changes to the shared hooks.
   and machine pressure remain independent checks.
 - **Metadata, not conversation content.** Fleet detection may read stable or
   minimal session metadata needed for identity, cwd, activity, and title. It
-  must not ingest prompts, responses, or summaries.
+  must not ingest prompts, responses, or summaries. One exception: a quiet agent's own record is read
+  by `peek.py` (the automatic peek on a quiet subagent), by `send_cold_guard.sh`
+  (before a message to a cold agent), and by the `check-sessions` skill, because
+  a file time cannot say whether an agent finished, waits, or stopped on a limit.
+  Only a facts line worked out by script and a note written from the reading
+  reach the main agent, never the text itself.
 
 Keep thresholds documented in the README tuning table. Before handing off a
 change, run `python3 -m unittest discover -s tests -v`, validate shell and JSON
