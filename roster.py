@@ -18,9 +18,12 @@ and report "nothing running". The file system has the list all along.
 Scry reports; the session judges.
 
 What is listed, and what Scry can read for each:
-  subagent            <session>/subagents/agent-*.jsonl — nothing in the
-                      metadata says "finished", so listed only while written
-                      within `fresh` seconds (one cache TTL by default). In
+  subagent            <session>/subagents/agent-*.jsonl — left out once its
+                      last assistant step is the hand-back (the tool a
+                      subagent calls to deliver its report), read from the
+                      file's last few KB: the name of a tool, never the text.
+                      Otherwise nothing says "finished", so listed only while
+                      written within `fresh` seconds (one cache TTL by default). In
                       the last quarter of that window the row says what the
                       silence means: its own cache goes cold at the TTL;
                       finished, nothing happens; still working, its next
@@ -100,6 +103,37 @@ def mtime(p):
         return None
 
 
+HANDBACK_TOOLS = {"SubagentHandback"}
+
+
+def handed_back(path, tail=16384):
+    """True when the subagent's last assistant record calls the hand-back
+    tool: it has delivered its report and stopped. A resumed agent writes
+    new records after it, so this reads only the end of the file, and only
+    tool names from it."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - tail))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return False
+    for line in reversed(lines):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("type") != "assistant":
+            continue
+        msg = d.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            return False
+        return any(isinstance(x, dict) and x.get("type") == "tool_use"
+                   and x.get("name") in HANDBACK_TOOLS for x in content)
+    return False
+
+
 def cold_note(fresh):
     """What a subagent's silence means as it nears the cache TTL. Fixed text:
     the consequence does not depend on the agent."""
@@ -141,7 +175,7 @@ def roster_items(sid, projects, task_roots, fresh=3600, launch=None, now=None):
         sub = os.path.join(sdir, "subagents")
         for j in glob.glob(os.path.join(sub, "agent-*.jsonl")):
             m = mtime(j)
-            if m is None or m < now - fresh:
+            if m is None or m < now - fresh or handed_back(j):
                 continue
             aid = os.path.basename(j)[len("agent-"):-len(".jsonl")]
             desc = ""

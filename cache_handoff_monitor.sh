@@ -105,9 +105,10 @@
 #                   ago". Listed however long it has been quiet, for the same
 #                   reason.
 #                 subagent — an agent-*.jsonl: "last activity <age> ago".
-#                   Nothing in a plain subagent's metadata says it finished,
-#                   so Scry cannot tell a finished one from a quiet one. It is
-#                   listed only while written within SCRY_KEEPALIVE_FRESH_SECS,
+#                   Left out once its last step is the hand-back of its
+#                   report (roster.py reads the tool name at the file's end).
+#                   Otherwise Scry cannot tell a finished one from a quiet one,
+#                   so it is listed only while written within SCRY_KEEPALIVE_FRESH_SECS,
 #                   default 3600 — one cache TTL — so one silent that long is
 #                   left out rather than reported as running.
 #               Agents and workflows are looked up under the current session,

@@ -4093,6 +4093,32 @@ class CacheHandoffTests(unittest.TestCase):
             self.assertNotIn("has not finished", out)
             self.assertEqual(self._state(td)[0], "requested")
 
+    def test_a_subagent_that_handed_back_its_report_is_not_listed(self):
+        # A finished subagent's last step is the hand-back tool; listing it
+        # as unfinished wakes the session for work that is already done.
+        handback = ('{"type":"assistant","message":{"content":[{"type":"tool_use",'
+                    '"name":"SubagentHandback","input":{"report":"SECRET"}}]}}\n'
+                    '{"type":"user","message":{"content":[{"type":"tool_result"}]}}\n')
+        with tempfile.TemporaryDirectory() as td:
+            j = self._subagent(td, age=1300)
+            with open(j, "a") as f:
+                f.write(handback)
+            os.utime(j, (time.time() - 1300, time.time() - 1300))
+            self._armed_near_expiry(td)
+            out = self._monitor(td).stdout
+            self.assertNotIn("a1b2c3", out)
+            self.assertNotIn("keep-alive", out)
+            self.assertNotIn("SECRET", out)
+        with tempfile.TemporaryDirectory() as td:
+            # Resumed after the hand-back: a later assistant step is working.
+            j = self._subagent(td, age=1300)
+            with open(j, "a") as f:
+                f.write(handback + '{"type":"assistant","message":{"content":[{"type":'
+                        '"tool_use","name":"Bash","input":{}}]}}\n')
+            os.utime(j, (time.time() - 1300, time.time() - 1300))
+            self._armed_near_expiry(td)
+            self.assertRegex(self._monitor(td).stdout, r'keep-alive.*subagent a1b2c3')
+
     def test_a_background_command_is_listed_while_a_process_holds_its_file_however_quiet(self):
         with tempfile.TemporaryDirectory() as td:
             self._shell_task(td, "SECRET OUTPUT\n[exited with code 0]\n")
