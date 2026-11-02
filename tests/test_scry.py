@@ -6840,3 +6840,80 @@ class StatuslineSetupTests(unittest.TestCase):
         self.assertTrue(ours[0].endswith("/statusline_setup.sh"), ours)
         skill = (ROOT / "skills/scry-statusline/SKILL.md").read_text()
         self.assertIn("statusline_setup.sh\" --install", skill)
+
+
+class AgentStartFolderGuardTests(unittest.TestCase):
+    """agent_start_folder_guard.sh: a Herdr agent start whose folder has
+    folder pages below it is paused once; a start in the domain folder is not."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.td, True)
+        self.repo = Path(self.td) / "repo"
+        domain = self.repo / "apps/engine/lib/app/files"
+        domain.mkdir(parents=True)
+        (self.repo / "AGENTS.md").write_text("root\n")
+        (domain / "AGENTS.md").write_text("files page\n")
+        (domain / "worker.ex").write_text("defmodule W do end\n")
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        fake = Path(self.td) / "fakeherdr"
+        fake.write_text('#!/bin/sh\nprintf \'{"result":{"pane":{"cwd":"%s"}}}\' "$FAKE_PANE_CWD"\n')
+        fake.chmod(0o755)
+        self.env = {"SCRY_HERDR_BIN": str(fake), "FAKE_PANE_CWD": str(self.repo),
+                    "SCRY_AGENT_START_STATE": str(Path(self.td) / "state")}
+
+    def run_guard(self, command, pane_cwd=None, session="s1"):
+        env = dict(self.env)
+        if pane_cwd is not None:
+            env["FAKE_PANE_CWD"] = str(pane_cwd)
+        payload = {"tool_name": "Bash", "session_id": session, "cwd": str(self.repo),
+                   "tool_input": {"command": command}}
+        out = run_hook("agent_start_folder_guard.sh", self.td, payload, env).stdout.strip()
+        return json.loads(out)["hookSpecificOutput"] if out else None
+
+    def test_a_start_at_the_top_is_paused_once_and_names_the_folder(self):
+        cmd = 'herdr agent start b1 --kind pi --pane w1:p2 -- "work in app/files"'
+        first = self.run_guard(cmd)
+        self.assertEqual(first["permissionDecision"], "deny")
+        reason = first["permissionDecisionReason"]
+        self.assertIn("top of its repository", reason)
+        self.assertIn("apps/engine/lib/app/ (files)", reason)
+        self.assertIn("This command names apps/engine/lib/app/files.", reason)
+        self.assertIsNone(self.run_guard(cmd))  # the same start again goes through
+        self.assertIsNotNone(self.run_guard(cmd, session="s2"))
+
+    def test_a_start_in_the_domain_folder_is_silent(self):
+        self.assertIsNone(self.run_guard("herdr agent start b1 --kind claude --pane w1:p2",
+                                         pane_cwd=self.repo / "apps/engine/lib/app/files"))
+
+    def test_pane_run_of_an_agent_cli_follows_its_cd(self):
+        self.assertIsNotNone(self.run_guard('herdr pane run w1:p3 "pi --model glm"'))
+        self.assertIsNone(self.run_guard(
+            'herdr pane run w1:p4 "cd apps/engine/lib/app/files && claude"'))
+        self.assertIsNone(self.run_guard('herdr pane run w1:p5 "mix test"'))
+
+    def test_a_pane_id_in_a_variable_is_read_from_the_split_in_the_same_command(self):
+        cmd = ('P=$(herdr pane split --current --direction right --cwd "$PWD" --no-focus | jq -r .x); '
+               'herdr agent start b --kind pi --pane "$P"')
+        self.assertIsNotNone(self.run_guard(cmd, pane_cwd="/nonexistent"))
+        domain = self.repo / "apps/engine/lib/app/files"
+        cmd = (f'P=$(herdr pane split --current --cwd {domain} | jq -r .x); '
+               'herdr agent start c --kind pi --pane "$P"')
+        self.assertIsNone(self.run_guard(cmd, pane_cwd="/nonexistent"))
+
+    def test_fails_open(self):
+        for cmd in ('herdr --machine mini agent start b --kind pi --pane w1:p2',
+                    'herdr agent list', 'echo herdr'):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.run_guard(cmd))
+        plain = Path(self.td) / "plain"
+        plain.mkdir()
+        self.assertIsNone(self.run_guard("herdr agent start b --kind pi --pane w1:p2", pane_cwd=plain))
+        self.env["SCRY_AGENT_START_GUARD"] = "0"
+        self.assertIsNone(self.run_guard("herdr agent start b --kind pi --pane w1:p9"))
+
+    def test_it_is_wired_to_the_bash_surface(self):
+        hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]["PreToolUse"]
+        bash = [h["command"] for b in hooks if b.get("matcher") == "Bash" for h in b["hooks"]]
+        self.assertTrue(any("agent_start_folder_guard.sh" in c for c in bash), bash)
