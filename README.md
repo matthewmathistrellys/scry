@@ -1476,6 +1476,22 @@ All of these are silent inside a subagent.
   registry, so an address that could mean more than one running session is not
   judged at all (SendMessage itself refuses such an address).
 
+## When a folder's page is an AGENTS.md alone
+
+Claude Code loads `CLAUDE.md` files and never reads an `AGENTS.md` on its
+own; Codex and pi load `AGENTS.md` and never read `CLAUDE.md`. Rules written
+only in an `AGENTS.md` reach Codex and pi sessions and no Claude session, and
+nothing shows it: they look written and are not read.
+
+`folder_pages.sh` looks at the session's folder and each parent up to the
+home folder, every tracked `AGENTS.md` in the session's repository (outside a
+repository, a walk four levels down), and, after a `Write` or `Edit` of an
+`AGENTS.md` or `CLAUDE.md`, that one folder (once per folder per session). It
+speaks when an `AGENTS.md` has no `CLAUDE.md` beside it, or one that is neither
+a symlink to it nor imports it with an `@AGENTS.md` line. Vendored trees
+(deps, node_modules, virtualenvs, plugin caches) are skipped. It changes
+nothing.
+
 ## When an agent is started through Herdr
 
 An agent's start folder decides which folder pages (`AGENTS.md`,
@@ -1555,6 +1571,7 @@ starts changing a decision.
 | `SCRY_COLD_SEND_WINDOW` | `3600` | seconds after a turn-down during which a second send goes through |
 | `SCRY_AGENT_START_GUARD` | `1` | `0` stops the one-time pause of a Herdr agent start whose folder has folder pages below it |
 | `SCRY_AGENT_START_WINDOW` | `3600` | seconds after a pause during which the same start goes through |
+| `SCRY_FOLDER_PAGES` | `1` | `0` silences the note on an AGENTS.md with no CLAUDE.md linked to it |
 | `SCRY_SCHEDULE_NOTES` | `1` | `0` stops the cost note on `CronCreate` and `ScheduleWakeup` |
 | `SCRY_PEEK_OFF_FILE` | `~/.claude/scry-peek.off` | a file whose existence turns the peek, its delivery and the guard off, read on every hook run |
 | `SCRY_PEEK_LOCK_WAIT` | `300` | seconds a peek waits for its turn before saying its facts line alone |

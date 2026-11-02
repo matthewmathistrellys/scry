@@ -41,6 +41,11 @@
           },
           {
             "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/folder_pages.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/statusline_setup.sh",
             "timeout": 5
           },
@@ -119,6 +124,11 @@
           {
             "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/pins_edit_advisory.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/folder_pages.sh",
             "timeout": 10
           }
         ]
