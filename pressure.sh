@@ -8,7 +8,7 @@
 # as free as the first, even with the load at more than twice the core
 # count and nothing running able to tell.
 #
-# Reports load, swap, disk and locally-listening dev servers. All of it
+# Reports load, memory, disk and locally-listening dev servers. All of it
 # comes from local macOS/Linux system interfaces — instant, local, no network.
 #
 # Silence is the default. Every threshold below is set where the number
@@ -21,9 +21,11 @@ set -uo pipefail
 # Load per core. Above this the machine is oversubscribed enough that
 # more parallelism buys nothing and everything already running slows.
 LOAD_PER_CORE_WARN=${SCRY_LOAD_PER_CORE_WARN:-1.5}
-# Swap in use. Any sustained swapping on a dev box means RAM is gone and
-# builds are about to get mysteriously slow.
-SWAP_USED_MB_WARN=${SCRY_SWAP_USED_MB_WARN:-2048}
+# Memory. Judged by free memory and the kernel's own pressure level, not by
+# swap in use: macOS keeps swap allocated long after pressure has passed, so
+# gigabytes of swap sit beside most of RAM free. Swap is named only when
+# memory is actually short.
+MEMORY_FREE_PCT_WARN=${SCRY_MEMORY_FREE_PCT_WARN:-10}
 # Disk. Below either bound, builds and containers start failing in ways
 # that look like code bugs.
 DISK_FREE_GB_WARN=${SCRY_DISK_FREE_GB_WARN:-20}
@@ -66,18 +68,36 @@ PY
   [ -n "$verdict" ] && lines+=("$verdict")
 fi
 
-# ── Swap ────────────────────────────────────────────────────────────────
+# ── Memory ──────────────────────────────────────────────────────────────
+# macOS: kern.memorystatus_level is the free percentage memory_pressure prints;
+# kern.memorystatus_vm_pressure_level is the kernel's verdict (1 normal,
+# 2 warn, 4 critical). Linux: MemAvailable over MemTotal.
+free_pct="$(sysctl -n kern.memorystatus_level 2>/dev/null)"
+kernel_level="$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)"
+[ -n "$free_pct" ] || free_pct="$(awk '
+  /^MemTotal:/ { total=$2 }
+  /^MemAvailable:/ { avail=$2 }
+  END { if (total > 0 && avail != "") printf "%d", avail*100/total }
+' /proc/meminfo 2>/dev/null)"
 swap_used="$(sysctl -n vm.swapusage 2>/dev/null | sed -n 's/.*used = \([0-9.]*\)M.*/\1/p')"
 [ -n "$swap_used" ] || swap_used="$(awk '
   /^SwapTotal:/ { total=$2 }
   /^SwapFree:/ { free=$2 }
   END { if (total != "" && free != "") printf "%.0f", (total-free)/1024 }
 ' /proc/meminfo 2>/dev/null)"
-if [ -n "$swap_used" ]; then
-  used_int="${swap_used%%.*}"
-  if [ "${used_int:-0}" -ge "$SWAP_USED_MB_WARN" ] 2>/dev/null; then
-    lines+=("- Swapping: ${used_int}MB of swap in use. RAM is exhausted; expect builds and test runs to be much slower than they look.")
-  fi
+swap_int="${swap_used%%.*}"
+short=""
+case "$kernel_level" in
+  2) short="the kernel reports memory pressure at warn" ;;
+  4) short="the kernel reports memory pressure at critical" ;;
+esac
+if [ -z "$short" ] && [ -n "$free_pct" ] && [ "$free_pct" -lt "$MEMORY_FREE_PCT_WARN" ] 2>/dev/null; then
+  short="memory is short"
+fi
+if [ -n "$short" ]; then
+  line="- Memory: ${free_pct:-?}% free; ${short}"
+  [ "${swap_int:-0}" -gt 0 ] 2>/dev/null && line="${line}, with ${swap_int}MB of swap in use"
+  lines+=("${line}. Builds and test runs started now compete for it and run slower than they look.")
 fi
 
 # ── Disk ────────────────────────────────────────────────────────────────

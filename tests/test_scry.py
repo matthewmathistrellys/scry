@@ -2392,7 +2392,9 @@ class ScryHookTests(unittest.TestCase):
         for command in ('echo "run codex now"',
                         'cd ~/dev/codex && ls',
                         'grep -rn codex .',
-                        'ls -la'):
+                        'ls -la',
+                        "git commit -q -F - <<'EOF'\nfeat: note\n\nClaude Code reads CLAUDE.md; Codex and pi read AGENTS.md.\nEOF\ngit push -q",
+                        'git commit -m "$(cat <<\'EOF\'\nfix: "quoted" prose; Codex and pi read AGENTS.md\nEOF\n)"'):
             self.assertIsNone(self._bash(command), command)
 
     def test_metered_cli_guard_does_not_split_a_separator_inside_a_prompt(self):
@@ -6977,3 +6979,36 @@ class FolderPagesTests(unittest.TestCase):
         post = [x["command"] for b in h["PostToolUse"] if "Write" in (b.get("matcher") or "") for x in b["hooks"]]
         self.assertTrue(any(c.endswith("/folder_pages.sh") for c in start))
         self.assertTrue(any(c.endswith("/folder_pages.sh") for c in post))
+
+
+class MemoryPressureTests(unittest.TestCase):
+    """pressure.sh judges memory by free percentage and the kernel's level, not swap."""
+
+    def run_with(self, level, pressure, swap_mb):
+        with tempfile.TemporaryDirectory() as td:
+            bin_dir = Path(td) / "bin"
+            bin_dir.mkdir()
+            fake = bin_dir / "sysctl"
+            fake.write_text(
+                "#!/bin/sh\n"
+                'case "$2" in\n'
+                f"  kern.memorystatus_level) echo {level} ;;\n"
+                f"  kern.memorystatus_vm_pressure_level) echo {pressure} ;;\n"
+                f'  vm.swapusage) echo "total = 5120.00M  used = {swap_mb}.00M  free = 1.00M" ;;\n'
+                "  *) exit 1 ;;\n"
+                "esac\n")
+            fake.chmod(0o755)
+            env = {"PATH": f"{bin_dir}:{os.environ['PATH']}"}
+            return context(run_hook("pressure.sh", td, {"cwd": td}, env))
+
+    def test_swap_with_most_memory_free_is_silent(self):
+        self.assertNotIn("Memory", self.run_with(74, 1, 4153))
+        self.assertNotIn("swap", self.run_with(74, 1, 4153))
+
+    def test_low_free_memory_is_reported_with_its_swap(self):
+        text = self.run_with(6, 1, 4153)
+        self.assertIn("- Memory: 6% free; memory is short, with 4153MB of swap in use.", text)
+
+    def test_the_kernel_warn_level_is_reported_at_any_free_percentage(self):
+        self.assertIn("kernel reports memory pressure at warn", self.run_with(40, 2, 0))
+        self.assertIn("at critical", self.run_with(40, 4, 0))
