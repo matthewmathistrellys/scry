@@ -684,7 +684,7 @@ machine is carrying. Independent checks and advisories fill that in.
   longer counts as a live neighbour — its transcript is seconds old, so the live
   window read it as an active session competing for this tree, in the same
   report that said it had ended.
-- **`pressure.sh`** — load per core, swap in use, disk headroom, and which dev
+- **`pressure.sh`** — load per core, free memory, disk headroom, and which dev
   servers are already listening.
 - **`load_fanout_advisory.sh`**, **`service_distress_advisory.sh`** — a session
   cannot see the load it puts on something shared, nor the health of the thing
@@ -794,7 +794,7 @@ industrialise that problem.
 | Signal | Silent | Speaks |
 |---|---|---|
 | Load | 4 on 8 cores | ≥1.5× cores |
-| Swap | none | ≥2GB in use |
+| Memory | none | under 10% free, or the kernel's pressure level at warn or critical (swap alone never) |
 | Disk | 60% used | ≥90% used, or <20GB free |
 | Sessions in this repo | just you | any other live one |
 | Last session | none recorded | a title exists |
@@ -1486,7 +1486,7 @@ starts changing a decision.
 | `SCRY_FLEET_ACTIVE_MINUTES` | `15` | how recently a session must have written to count as live |
 | `SCRY_TASK_STATE_DIR` | `$TMPDIR/claude-$(id -u)` | where task output files live, read after `/clear` to name the tasks a cleared session left without an exit; absent directory means silence. The cache-deadline monitor also looks in `/tmp/claude-$(id -u)` when this is unset |
 | `SCRY_LOAD_PER_CORE_WARN` | `1.5` | load-per-core before "oversubscribed" |
-| `SCRY_SWAP_USED_MB_WARN` | `2048` | swap in use before it's reported |
+| `SCRY_MEMORY_FREE_PCT_WARN` | `10` | free memory (percent) below which memory is reported; the kernel's own warn or critical pressure level is reported at any free percentage. Swap in use alone is never reported: macOS keeps it allocated long after pressure passes |
 | `SCRY_DISK_FREE_GB_WARN` | `20` | free-space floor |
 | `SCRY_DISK_USED_PCT_WARN` | `90` | used-percentage ceiling |
 | `SCRY_SUBAGENT_STALE_DAYS` | `7` | drift in days before a subagent is told the tree is unreliable |
