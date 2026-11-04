@@ -175,7 +175,7 @@ class ScryHookTests(unittest.TestCase):
             for group in hooks["hooks"]["SessionStart"]
             for item in group["hooks"]
         ]
-        self.assertEqual(len(commands), 9)
+        self.assertEqual(len(commands), 10)
         self.assertTrue(all("PLUGIN_ROOT" in command for command in commands))
         self.assertTrue(all("CLAUDE_PLUGIN_ROOT" in command for command in commands))
         entry = marketplace["plugins"][0]
@@ -192,7 +192,7 @@ class ScryHookTests(unittest.TestCase):
             (repo / "src").mkdir()
             subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
             payload = {"cwd": str(repo), "session_id": "contract-test"}
-            for hook in ("architecture.sh", "health.sh", "fleet.sh", "pressure.sh"):
+            for hook in ("architecture.sh", "health.sh", "fleet.sh", "pressure.sh", "folder_pages.sh"):
                 with self.subTest(hook=hook):
                     result = run_hook(
                         hook,
@@ -2392,7 +2392,9 @@ class ScryHookTests(unittest.TestCase):
         for command in ('echo "run codex now"',
                         'cd ~/dev/codex && ls',
                         'grep -rn codex .',
-                        'ls -la'):
+                        'ls -la',
+                        "git commit -q -F - <<'EOF'\nfeat: note\n\nClaude Code reads CLAUDE.md; Codex and pi read AGENTS.md.\nEOF\ngit push -q",
+                        'git commit -m "$(cat <<\'EOF\'\nfix: "quoted" prose; Codex and pi read AGENTS.md\nEOF\n)"'):
             self.assertIsNone(self._bash(command), command)
 
     def test_metered_cli_guard_does_not_split_a_separator_inside_a_prompt(self):
@@ -6840,6 +6842,143 @@ class StatuslineSetupTests(unittest.TestCase):
         self.assertTrue(ours[0].endswith("/statusline_setup.sh"), ours)
         skill = (ROOT / "skills/scry-statusline/SKILL.md").read_text()
         self.assertIn("statusline_setup.sh\" --install", skill)
+
+
+class AgentStartFolderGuardTests(unittest.TestCase):
+    """agent_start_folder_guard.sh: a Herdr agent start whose folder has
+    folder pages below it is paused once; a start in the domain folder is not."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.td, True)
+        self.repo = Path(self.td) / "repo"
+        domain = self.repo / "apps/engine/lib/app/files"
+        domain.mkdir(parents=True)
+        (self.repo / "AGENTS.md").write_text("root\n")
+        (domain / "AGENTS.md").write_text("files page\n")
+        (domain / "worker.ex").write_text("defmodule W do end\n")
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        fake = Path(self.td) / "fakeherdr"
+        fake.write_text('#!/bin/sh\nprintf \'{"result":{"pane":{"cwd":"%s"}}}\' "$FAKE_PANE_CWD"\n')
+        fake.chmod(0o755)
+        self.env = {"SCRY_HERDR_BIN": str(fake), "FAKE_PANE_CWD": str(self.repo),
+                    "SCRY_AGENT_START_STATE": str(Path(self.td) / "state")}
+
+    def run_guard(self, command, pane_cwd=None, session="s1"):
+        env = dict(self.env)
+        if pane_cwd is not None:
+            env["FAKE_PANE_CWD"] = str(pane_cwd)
+        payload = {"tool_name": "Bash", "session_id": session, "cwd": str(self.repo),
+                   "tool_input": {"command": command}}
+        out = run_hook("agent_start_folder_guard.sh", self.td, payload, env).stdout.strip()
+        return json.loads(out)["hookSpecificOutput"] if out else None
+
+    def test_a_start_at_the_top_is_paused_once_and_names_the_folder(self):
+        cmd = 'herdr agent start b1 --kind pi --pane w1:p2 -- "work in app/files"'
+        first = self.run_guard(cmd)
+        self.assertEqual(first["permissionDecision"], "deny")
+        reason = first["permissionDecisionReason"]
+        self.assertIn("top of its repository", reason)
+        self.assertIn("apps/engine/lib/app/ (files)", reason)
+        self.assertIn("This command names apps/engine/lib/app/files.", reason)
+        self.assertIsNone(self.run_guard(cmd))  # the same start again goes through
+        self.assertIsNotNone(self.run_guard(cmd, session="s2"))
+
+    def test_a_start_in_the_domain_folder_is_silent(self):
+        self.assertIsNone(self.run_guard("herdr agent start b1 --kind claude --pane w1:p2",
+                                         pane_cwd=self.repo / "apps/engine/lib/app/files"))
+
+    def test_pane_run_of_an_agent_cli_follows_its_cd(self):
+        self.assertIsNotNone(self.run_guard('herdr pane run w1:p3 "pi --model glm"'))
+        self.assertIsNone(self.run_guard(
+            'herdr pane run w1:p4 "cd apps/engine/lib/app/files && claude"'))
+        self.assertIsNone(self.run_guard('herdr pane run w1:p5 "mix test"'))
+
+    def test_a_pane_id_in_a_variable_is_read_from_the_split_in_the_same_command(self):
+        cmd = ('P=$(herdr pane split --current --direction right --cwd "$PWD" --no-focus | jq -r .x); '
+               'herdr agent start b --kind pi --pane "$P"')
+        self.assertIsNotNone(self.run_guard(cmd, pane_cwd="/nonexistent"))
+        domain = self.repo / "apps/engine/lib/app/files"
+        cmd = (f'P=$(herdr pane split --current --cwd {domain} | jq -r .x); '
+               'herdr agent start c --kind pi --pane "$P"')
+        self.assertIsNone(self.run_guard(cmd, pane_cwd="/nonexistent"))
+
+    def test_fails_open(self):
+        for cmd in ('herdr --machine mini agent start b --kind pi --pane w1:p2',
+                    'herdr agent list', 'echo herdr'):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.run_guard(cmd))
+        plain = Path(self.td) / "plain"
+        plain.mkdir()
+        self.assertIsNone(self.run_guard("herdr agent start b --kind pi --pane w1:p2", pane_cwd=plain))
+        self.env["SCRY_AGENT_START_GUARD"] = "0"
+        self.assertIsNone(self.run_guard("herdr agent start b --kind pi --pane w1:p9"))
+
+    def test_it_is_wired_to_the_bash_surface(self):
+        hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]["PreToolUse"]
+        bash = [h["command"] for b in hooks if b.get("matcher") == "Bash" for h in b["hooks"]]
+        self.assertTrue(any("agent_start_folder_guard.sh" in c for c in bash), bash)
+
+
+class FolderPagesTests(unittest.TestCase):
+    """folder_pages.sh: an AGENTS.md with no CLAUDE.md that links to or imports it."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.td, True)
+        self.home = Path(self.td) / "home"
+        self.repo = self.home / "repo"
+        (self.repo / "lib/files").mkdir(parents=True)
+        (self.repo / "AGENTS.md").write_text("root rules\n")
+        (self.repo / "CLAUDE.md").symlink_to("AGENTS.md")
+        (self.repo / "lib/files/AGENTS.md").write_text("files page\n")
+        (self.repo / "deps/x").mkdir(parents=True)
+        (self.repo / "deps/x/AGENTS.md").write_text("vendored\n")
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "add", "-f", "."], check=True)
+        self.env = {"HOME": str(self.home), "SCRY_FOLDER_PAGES_STATE": str(Path(self.td) / "state")}
+
+    def start(self, cwd=None):
+        return context(run_hook("folder_pages.sh", self.td,
+                                {"cwd": str(cwd or self.repo), "hook_event_name": "SessionStart"}, self.env))
+
+    def test_a_missing_claude_md_is_named_and_vendored_trees_are_not(self):
+        text = self.start()
+        self.assertIn("1 folder has an AGENTS.md and no CLAUDE.md: ~/repo/lib/files.", text)
+        self.assertNotIn("deps", text)
+        self.assertIn("Claude Code loads CLAUDE.md files and never reads an AGENTS.md", text)
+
+    def test_a_link_or_an_import_pairs_them_and_prose_does_not(self):
+        (self.repo / "lib/files/CLAUDE.md").write_text("Read AGENTS.md.\n")
+        self.assertIn("neither a link to its AGENTS.md nor imports it", self.start())
+        (self.repo / "lib/files/CLAUDE.md").write_text("@AGENTS.md\n")
+        self.assertEqual(self.start(), "")
+        (self.repo / "lib/files/CLAUDE.md").unlink()
+        (self.repo / "lib/files/CLAUDE.md").symlink_to("AGENTS.md")
+        self.assertEqual(self.start(), "")
+
+    def test_a_parent_folder_up_to_home_is_checked(self):
+        (self.home / "AGENTS.md").write_text("herdr rules\n")
+        (self.repo / "lib/files/CLAUDE.md").symlink_to("AGENTS.md")
+        self.assertIn("no CLAUDE.md: ~.", self.start())
+
+    def test_a_write_of_an_agents_md_speaks_once_per_folder(self):
+        payload = {"session_id": "s1", "cwd": str(self.repo), "tool_name": "Write",
+                   "hook_event_name": "PostToolUse",
+                   "tool_input": {"file_path": str(self.repo / "lib/files/AGENTS.md")}}
+        first = context(run_hook("folder_pages.sh", self.td, payload, self.env))
+        self.assertIn("~/repo/lib/files", first)
+        self.assertEqual(context(run_hook("folder_pages.sh", self.td, payload, self.env)), "")
+        payload["tool_input"] = {"file_path": str(self.repo / "README.md")}
+        self.assertEqual(context(run_hook("folder_pages.sh", self.td, payload, self.env)), "")
+
+    def test_it_is_wired_to_session_start_and_writes(self):
+        h = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]
+        start = [x["command"] for b in h["SessionStart"] for x in b["hooks"]]
+        post = [x["command"] for b in h["PostToolUse"] if "Write" in (b.get("matcher") or "") for x in b["hooks"]]
+        self.assertTrue(any(c.endswith("/folder_pages.sh") for c in start))
+        self.assertTrue(any(c.endswith("/folder_pages.sh") for c in post))
 
 
 class MemoryPressureTests(unittest.TestCase):

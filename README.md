@@ -1476,6 +1476,49 @@ All of these are silent inside a subagent.
   registry, so an address that could mean more than one running session is not
   judged at all (SendMessage itself refuses such an address).
 
+## When a folder's page is an AGENTS.md alone
+
+Claude Code loads `CLAUDE.md` files and never reads an `AGENTS.md` on its
+own; Codex and pi load `AGENTS.md` and never read `CLAUDE.md`. Rules written
+only in an `AGENTS.md` reach Codex and pi sessions and no Claude session, and
+nothing shows it: they look written and are not read.
+
+`folder_pages.sh` looks at the session's folder and each parent up to the
+home folder, every tracked `AGENTS.md` in the session's repository (outside a
+repository, a walk four levels down), and, after a `Write` or `Edit` of an
+`AGENTS.md` or `CLAUDE.md`, that one folder (once per folder per session). It
+speaks when an `AGENTS.md` has no `CLAUDE.md` beside it, or one that is neither
+a symlink to it nor imports it with an `@AGENTS.md` line. Vendored trees
+(deps, node_modules, virtualenvs, plugin caches) are skipped. It changes
+nothing.
+
+## When an agent is started through Herdr
+
+An agent's start folder decides which folder pages (`AGENTS.md`,
+`CLAUDE.md`) it loads. Codex and pi read `AGENTS.md` from the start folder
+and its parents only; Claude Code reads a lower folder's `CLAUDE.md` only once
+it reads a file there. Herdr's defaults land at the top (a split takes the
+caller's folder, a worktree opens at its root), so in a repo whose domains keep
+their own page lower down, an agent started there begins without the page of
+the domain it works in, and a brief naming the domain does not change that.
+
+`agent_start_folder_guard.sh` (`PreToolUse` on Bash, Claude Code and Codex)
+reads a Bash command that starts an agent through Herdr — `herdr agent start
+... --pane ID`, or `herdr pane run ID "<agent cli> ..."` with any `cd` before
+it — asks Herdr for the pane's folder, and lists the tracked `AGENTS.md` and
+`CLAUDE.md` files below it. When there are any, the first start is turned down
+once: the start folder, those folders grouped by parent, and any of them the
+command itself names. The same start again within `SCRY_AGENT_START_WINDOW`
+goes through. A pane id held in a shell variable is read from a `pane split`
+in the same command (its `--cwd`, with `$PWD` as the session's folder).
+
+Like the cold-send guard, it denies because a note arrives too late: a
+`PreToolUse` note reaches the session with the tool result, after the agent
+has started. Fails open: `--machine` (a remote pane), a pane id it cannot
+resolve, Herdr or git unavailable, a folder outside a git repo, nothing below.
+It does not see an agent started any other way (a plain `claude` in a terminal,
+an agent that pi itself starts).
+
 ## Tuning
 
 Every threshold is an environment variable. Defaults are set where the number
@@ -1526,6 +1569,9 @@ starts changing a decision.
 | `SCRY_KEEPALIVE_FRESH_SECS` (peek) | `3600` | the peek starts at three quarters of this much silence |
 | `SCRY_COLD_SEND_GUARD` | `1` | `0` stops the one-time turn-down of a first message to a cold agent |
 | `SCRY_COLD_SEND_WINDOW` | `3600` | seconds after a turn-down during which a second send goes through |
+| `SCRY_AGENT_START_GUARD` | `1` | `0` stops the one-time pause of a Herdr agent start whose folder has folder pages below it |
+| `SCRY_AGENT_START_WINDOW` | `3600` | seconds after a pause during which the same start goes through |
+| `SCRY_FOLDER_PAGES` | `1` | `0` silences the note on an AGENTS.md with no CLAUDE.md linked to it |
 | `SCRY_SCHEDULE_NOTES` | `1` | `0` stops the cost note on `CronCreate` and `ScheduleWakeup` |
 | `SCRY_PEEK_OFF_FILE` | `~/.claude/scry-peek.off` | a file whose existence turns the peek, its delivery and the guard off, read on every hook run |
 | `SCRY_PEEK_LOCK_WAIT` | `300` | seconds a peek waits for its turn before saying its facts line alone |

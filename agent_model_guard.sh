@@ -173,9 +173,19 @@ if tool == "Bash":
                 return True
         return False
 
+    # Strip heredoc bodies before lexing: shlex does not know `<<EOF ... EOF`,
+    # so prose inside a commit message or file body (e.g. `...; Codex and pi`)
+    # would otherwise be split on `;` and read as a command invocation.
+    stripped = re.sub(
+        r"(<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?[^\n]*)\n.*?\n[ \t]*\2(?=\n|$)",
+        r"\1",
+        command,
+        flags=re.S,
+    )
+
     try:
         import shlex
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer = shlex.shlex(stripped, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
         tokens = list(lexer)
     except Exception:
@@ -208,7 +218,7 @@ if tool == "Bash":
         if head >= len(seg):
             continue
 
-        cli = os.path.basename(seg[head]).lower()
+        cli = os.path.basename(seg[head])
         rest_all = seg[head + 1:]
 
         # ── Headless Claude bills the API account, never the subscription. ──
