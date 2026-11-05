@@ -6844,85 +6844,126 @@ class StatuslineSetupTests(unittest.TestCase):
         self.assertIn("statusline_setup.sh\" --install", skill)
 
 
-class AgentStartFolderGuardTests(unittest.TestCase):
-    """agent_start_folder_guard.sh: a Herdr agent start whose folder has
-    folder pages below it is paused once; a start in the domain folder is not."""
+class MergeQueueHealthTests(unittest.TestCase):
+    """health.sh flags reviewed PRs sitting unqueued, PRs knocked out of the
+    merge queue, checks that failed after passing on the run before, and an
+    idle merge queue while reviewed PRs wait."""
 
     def setUp(self):
         self.td = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.td, True)
         self.repo = Path(self.td) / "repo"
-        domain = self.repo / "apps/engine/lib/app/files"
-        domain.mkdir(parents=True)
-        (self.repo / "AGENTS.md").write_text("root\n")
-        (domain / "AGENTS.md").write_text("files page\n")
-        (domain / "worker.ex").write_text("defmodule W do end\n")
-        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
-        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
-        fake = Path(self.td) / "fakeherdr"
-        fake.write_text('#!/bin/sh\nprintf \'{"result":{"pane":{"cwd":"%s"}}}\' "$FAKE_PANE_CWD"\n')
-        fake.chmod(0o755)
-        self.env = {"SCRY_HERDR_BIN": str(fake), "FAKE_PANE_CWD": str(self.repo),
-                    "SCRY_AGENT_START_STATE": str(Path(self.td) / "state")}
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)], check=True)
+        self.fake_bin = Path(self.td) / "bin"
+        self.fake_bin.mkdir()
+        self.fixture = Path(self.td) / "prs.json"
+        gh = self.fake_bin / "gh"
+        gh.write_text('#!/bin/sh\ncat "$GH_FIXTURE"\n')
+        gh.chmod(0o755)
 
-    def run_guard(self, command, pane_cwd=None, session="s1"):
-        env = dict(self.env)
-        if pane_cwd is not None:
-            env["FAKE_PANE_CWD"] = str(pane_cwd)
-        payload = {"tool_name": "Bash", "session_id": session, "cwd": str(self.repo),
-                   "tool_input": {"command": command}}
-        out = run_hook("agent_start_folder_guard.sh", self.td, payload, env).stdout.strip()
-        return json.loads(out)["hookSpecificOutput"] if out else None
+    def run_health(self, prs, extra_env=None):
+        self.fixture.write_text(json.dumps(prs))
+        env = {
+            "GH_FIXTURE": str(self.fixture),
+            "HOME": self.td,
+            "PATH": f"{self.fake_bin}{os.pathsep}{os.environ['PATH']}",
+        }
+        if extra_env:
+            env.update(extra_env)
+        return context(run_hook("health.sh", self.repo, {}, env))
 
-    def test_a_start_at_the_top_is_paused_once_and_names_the_folder(self):
-        cmd = 'herdr agent start b1 --kind pi --pane w1:p2 -- "work in app/files"'
-        first = self.run_guard(cmd)
-        self.assertEqual(first["permissionDecision"], "deny")
-        reason = first["permissionDecisionReason"]
-        self.assertIn("top of its repository", reason)
-        self.assertIn("apps/engine/lib/app/ (files)", reason)
-        self.assertIn("This command names apps/engine/lib/app/files.", reason)
-        self.assertIsNone(self.run_guard(cmd))  # the same start again goes through
-        self.assertIsNotNone(self.run_guard(cmd, session="s2"))
+    def test_reviewed_green_pr_not_in_queue_screams_at_top(self):
+        report = self.run_health([
+            {
+                "number": 2406,
+                "headRefName": "feat/files-clean",
+                "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+                "reviewDecision": "APPROVED",
+                "title": "Clean files",
+                "isDraft": False,
+                "autoMergeRequest": None,
+                "mergeQueueEntry": None,
+                "updatedAt": "2020-01-01T00:00:00Z",
+            }
+        ])
+        top = report.split("Primary worktree:")[0]
+        self.assertIn("REVIEWED PRs / MERGE QUEUE ATTENTION NEEDED:", top)
+        self.assertIn("PR #2406 (feat/files-clean) passed review and CI", top)
+        self.assertIn("NOT in the merge queue", top)
+        self.assertIn("MERGE QUEUE IDLE", top)
+        self.assertIn("#2406 feat/files-clean -- CI green, approved, UNQUEUED", report)
 
-    def test_a_start_in_the_domain_folder_is_silent(self):
-        self.assertIsNone(self.run_guard("herdr agent start b1 --kind claude --pane w1:p2",
-                                         pane_cwd=self.repo / "apps/engine/lib/app/files"))
+    def test_pr_knocked_out_of_merge_queue_is_flagged_at_top(self):
+        report = self.run_health([
+            {
+                "number": 2431,
+                "headRefName": "fix/affidavit",
+                "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+                "reviewDecision": "APPROVED",
+                "title": "Fix affidavit",
+                "isDraft": False,
+                "autoMergeRequest": None,
+                "mergeQueueEntry": None,
+                "removedFromQueue": {"reason": "FAILED_CHECKS", "createdAt": "2020-01-01T00:00:00Z"},
+            }
+        ])
+        top = report.split("Primary worktree:")[0]
+        self.assertIn("PR #2431 (fix/affidavit) was KNOCKED OUT OF THE MERGE QUEUE", top)
+        self.assertIn("FAILED_CHECKS", top)
+        self.assertIn("while branch CI is green", top)
+        self.assertIn("KNOCKED OUT OF QUEUE (FAILED_CHECKS)", report)
 
-    def test_pane_run_of_an_agent_cli_follows_its_cd(self):
-        self.assertIsNotNone(self.run_guard('herdr pane run w1:p3 "pi --model glm"'))
-        self.assertIsNone(self.run_guard(
-            'herdr pane run w1:p4 "cd apps/engine/lib/app/files && claude"'))
-        self.assertIsNone(self.run_guard('herdr pane run w1:p5 "mix test"'))
+    def test_flaky_check_that_failed_after_passing_is_named(self):
+        report = self.run_health([
+            {
+                "number": 2440,
+                "headRefName": "fix/hashtag-worker",
+                "statusCheckRollup": [
+                    {
+                        "workflowName": "Validate",
+                        "name": "Test engine",
+                        "startedAt": "2026-11-04T10:00:00Z",
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS",
+                    },
+                    {
+                        "workflowName": "Validate",
+                        "name": "Test engine",
+                        "startedAt": "2026-11-04T11:00:00Z",
+                        "status": "COMPLETED",
+                        "conclusion": "FAILURE",
+                    },
+                ],
+                "reviewDecision": "APPROVED",
+                "title": "Fix hashtag worker",
+                "isDraft": False,
+                "autoMergeRequest": None,
+            }
+        ])
+        top = report.split("Primary worktree:")[0]
+        self.assertIn("PR #2440 (fix/hashtag-worker): check Test engine FAILED on the latest run after PASSING on the run before (flaky test)", top)
 
-    def test_a_pane_id_in_a_variable_is_read_from_the_split_in_the_same_command(self):
-        cmd = ('P=$(herdr pane split --current --direction right --cwd "$PWD" --no-focus | jq -r .x); '
-               'herdr agent start b --kind pi --pane "$P"')
-        self.assertIsNotNone(self.run_guard(cmd, pane_cwd="/nonexistent"))
-        domain = self.repo / "apps/engine/lib/app/files"
-        cmd = (f'P=$(herdr pane split --current --cwd {domain} | jq -r .x); '
-               'herdr agent start c --kind pi --pane "$P"')
-        self.assertIsNone(self.run_guard(cmd, pane_cwd="/nonexistent"))
-
-    def test_fails_open(self):
-        for cmd in ('herdr --machine mini agent start b --kind pi --pane w1:p2',
-                    'herdr agent list', 'echo herdr'):
-            with self.subTest(cmd=cmd):
-                self.assertIsNone(self.run_guard(cmd))
-        plain = Path(self.td) / "plain"
-        plain.mkdir()
-        self.assertIsNone(self.run_guard("herdr agent start b --kind pi --pane w1:p2", pane_cwd=plain))
-        self.env["SCRY_AGENT_START_GUARD"] = "0"
-        self.assertIsNone(self.run_guard("herdr agent start b --kind pi --pane w1:p9"))
-
-    def test_it_is_wired_to_the_bash_surface(self):
-        hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]["PreToolUse"]
-        bash = [h["command"] for b in hooks if b.get("matcher") == "Bash" for h in b["hooks"]]
-        self.assertTrue(any("agent_start_folder_guard.sh" in c for c in bash), bash)
+    def test_queued_or_auto_merging_pr_does_not_scream(self):
+        report = self.run_health([
+            {
+                "number": 2450,
+                "headRefName": "feat/queued",
+                "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+                "reviewDecision": "APPROVED",
+                "title": "Queued PR",
+                "isDraft": False,
+                "autoMergeRequest": {"enabledAt": "2026-11-04T12:00:00Z"},
+                "mergeQueueEntry": {"position": 1, "state": "QUEUED"},
+            }
+        ])
+        self.assertNotIn("REVIEWED PRs / MERGE QUEUE ATTENTION NEEDED:", report)
+        self.assertIn("in merge queue (#1)", report)
 
 
 class FolderPagesTests(unittest.TestCase):
-    """folder_pages.sh: an AGENTS.md with no CLAUDE.md that links to or imports it."""
+    """folder_pages.sh: subfolders below cwd with their own domain pages, and
+    any AGENTS.md with no CLAUDE.md that links to or imports it."""
 
     def setUp(self):
         self.td = tempfile.mkdtemp()
@@ -6949,19 +6990,29 @@ class FolderPagesTests(unittest.TestCase):
         self.assertNotIn("deps", text)
         self.assertIn("Claude Code loads CLAUDE.md files and never reads an AGENTS.md", text)
 
+    def test_starting_above_domain_pages_reports_subfolder_insight_and_starting_in_domain_is_silent(self):
+        (self.repo / "lib/files/CLAUDE.md").symlink_to("AGENTS.md")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-f", "."], check=True)
+        at_root = self.start(self.repo)
+        self.assertIn("Scry — folder pages below ~/repo: 1 folder under this directory carries its own AGENTS.md or CLAUDE.md: lib/ (files).", at_root)
+        self.assertIn("domain vocabulary, action ownership, and boundary rules are absent from early plans, search terms, names, and builder briefs", at_root)
+        self.assertNotIn("no CLAUDE.md", at_root)
+        in_domain = self.start(self.repo / "lib/files")
+        self.assertEqual(in_domain, "")
+
     def test_a_link_or_an_import_pairs_them_and_prose_does_not(self):
         (self.repo / "lib/files/CLAUDE.md").write_text("Read AGENTS.md.\n")
-        self.assertIn("neither a link to its AGENTS.md nor imports it", self.start())
+        self.assertIn("neither a link to its AGENTS.md nor imports it", self.start(self.repo / "lib/files"))
         (self.repo / "lib/files/CLAUDE.md").write_text("@AGENTS.md\n")
-        self.assertEqual(self.start(), "")
+        self.assertEqual(self.start(self.repo / "lib/files"), "")
         (self.repo / "lib/files/CLAUDE.md").unlink()
         (self.repo / "lib/files/CLAUDE.md").symlink_to("AGENTS.md")
-        self.assertEqual(self.start(), "")
+        self.assertEqual(self.start(self.repo / "lib/files"), "")
 
     def test_a_parent_folder_up_to_home_is_checked(self):
         (self.home / "AGENTS.md").write_text("herdr rules\n")
         (self.repo / "lib/files/CLAUDE.md").symlink_to("AGENTS.md")
-        self.assertIn("no CLAUDE.md: ~.", self.start())
+        self.assertIn("no CLAUDE.md: ~.", self.start(self.repo / "lib/files"))
 
     def test_a_write_of_an_agents_md_speaks_once_per_folder(self):
         payload = {"session_id": "s1", "cwd": str(self.repo), "tool_name": "Write",

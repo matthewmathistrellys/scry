@@ -492,49 +492,161 @@ if [ "$abandoned" -gt 0 ]; then
   lines+=("- $abandoned worktree(s) UNMERGED but untouched for over $ABANDONED_DAYS days — likely abandoned, needs a human look (not auto-removable, may hold real work): $sample")
 fi
 
-# ── Open PRs and CI status ─────────────────────────────────────────────────
-# One gh call, zero config — the remote is already in git. Fails open: if gh
-# isn't installed or not authenticated, this block is silently skipped.
+# ── Open PRs, merge queue, and CI status ───────────────────────────────────
+# Queries open PRs (and, on GitHub, merge-queue state) with zero config.
+# Fails open: if gh isn't installed or not authenticated, this block is
+# silently skipped. When reviewed PRs sit unqueued, a PR was knocked out of
+# the merge queue, a check failed after passing on the run before, or the
+# merge queue has been idle over SCRY_MERGE_QUEUE_IDLE_MINUTES (default 60)
+# while reviewed PRs wait, those alerts are placed at the very top of the
+# SessionStart health report so no session can miss them.
+urgent_pr_lines=()
 if command -v gh >/dev/null 2>&1; then
-  pr_json="$(gh pr list --repo "$(g remote get-url origin 2>/dev/null)" \
+  repo_url="$(g remote get-url origin 2>/dev/null || true)"
+  pr_json="$(gh pr list --repo "$repo_url" \
     --state open \
-    --json number,headRefName,statusCheckRollup,reviewDecision,title,isDraft \
+    --json number,headRefName,statusCheckRollup,reviewDecision,title,isDraft,autoMergeRequest,mergeStateStatus,updatedAt \
     2>/dev/null || true)"
   if [ -n "$pr_json" ] && [ "$pr_json" != "[]" ]; then
+    mq_json=""
+    slug="$(printf '%s' "$repo_url" | sed -n 's#.*github\.com[:/]\([^/[:space:]]\{1,\}/[^/.[:space:]]\{1,\}\)\(\.git\)\{0,1\}$#\1#p')"
+    if [ -n "$slug" ]; then
+      owner="${slug%/*}"
+      rname="${slug#*/}"
+      mq_json="$(gh api graphql -F owner="$owner" -F name="$rname" -f query='
+        query($owner: String!, $name: String!) {
+          repository(owner: $owner, name: $name) {
+            mergeQueue { entries(first: 20) { totalCount } }
+            merged: pullRequests(states: MERGED, last: 1, orderBy: {field: UPDATED_AT, direction: DESC}) {
+              nodes { mergedAt }
+            }
+            open: pullRequests(states: OPEN, first: 50) {
+              nodes {
+                number
+                mergeQueueEntry { state position enqueuedAt }
+                timelineItems(last: 5, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) {
+                  nodes { ... on RemovedFromMergeQueueEvent { createdAt reason } }
+                }
+              }
+            }
+          }
+        }' 2>/dev/null || true)"
+    fi
     # Determine the session's branch for marking
     if [ "$in_primary" -eq 0 ]; then
       mark_branch="$(git -C "$session_wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
     else
       mark_branch="$branch"
     fi
-    pr_lines="$(MARK_BRANCH="$mark_branch" PR_DATA="$pr_json" python3 - <<'PRPY' 2>/dev/null
-import json, os, sys
+    pr_out="$(MARK_BRANCH="$mark_branch" NOW_EPOCH="$now_epoch" IDLE_MIN="${SCRY_MERGE_QUEUE_IDLE_MINUTES:-60}" PR_DATA="$pr_json" MQ_DATA="$mq_json" python3 - <<'PRPY' 2>/dev/null
+import datetime, json, os, sys
+
 try:
     prs = json.loads(os.environ.get("PR_DATA", "[]"))
 except Exception:
     sys.exit(0)
-if not prs:
+if not isinstance(prs, list) or not prs:
     sys.exit(0)
+
+now_epoch = int(os.environ.get("NOW_EPOCH") or 0)
+try:
+    idle_min = int(os.environ.get("IDLE_MIN") or 60)
+except ValueError:
+    idle_min = 60
+
+def parse_iso(ts):
+    if not ts or not isinstance(ts, str):
+        return 0
+    try:
+        return int(datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
+    except Exception:
+        return 0
+
+def fmt_age(seconds):
+    if seconds <= 0:
+        return ""
+    mins = seconds // 60
+    if mins < 60:
+        return f"{mins}m"
+    hrs = mins // 60
+    if hrs < 48:
+        return f"{hrs}h"
+    return f"{hrs // 24}d"
+
+mq_by_num = {}
+queue_total = 0
+last_merged_ts = 0
+try:
+    mq_raw = json.loads(os.environ.get("MQ_DATA") or "{}")
+    if isinstance(mq_raw, dict):
+        repo_node = (mq_raw.get("data") or {}).get("repository") or {}
+        if isinstance(repo_node.get("mergeQueue"), dict):
+            queue_total = ((repo_node["mergeQueue"].get("entries") or {}).get("totalCount")) or 0
+        merged_nodes = ((repo_node.get("merged") or {}).get("nodes")) or []
+        if merged_nodes and isinstance(merged_nodes[0], dict):
+            last_merged_ts = parse_iso(merged_nodes[0].get("mergedAt"))
+        for node in ((repo_node.get("open") or {}).get("nodes")) or []:
+            if isinstance(node, dict) and "number" in node:
+                mq_by_num[node["number"]] = node
+except Exception:
+    pass
+
 mark = os.environ.get("MARK_BRANCH", "")
 out = []
+urgent = []
+waiting_reviewed = []
+
+pass_conclusions = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+failure_conclusions = {"FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+interrupted_conclusions = {"CANCELLED", "STALE"}
+pending_statuses = {"QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"}
+
+def verdict(check):
+    if "state" in check:  # GraphQL StatusContext, not CheckRun
+        state = check.get("state")
+        if state == "SUCCESS":
+            return "pass"
+        if state in {"FAILURE", "ERROR"}:
+            return "fail"
+        if state in {"PENDING", "EXPECTED"}:
+            return "pending"
+        return "unknown"
+
+    status = check.get("status")
+    if status in pending_statuses:
+        return "pending"
+    if status != "COMPLETED":
+        return "unknown"
+    conclusion = check.get("conclusion")
+    if conclusion in pass_conclusions:
+        return "pass"
+    if conclusion in failure_conclusions:
+        return "fail"
+    if conclusion in interrupted_conclusions:
+        return "interrupted"
+    return "unknown"
+
 for pr in sorted(prs, key=lambda p: p.get("number", 0)):
     n = pr.get("number", "?")
     branch = pr.get("headRefName", "")
     draft = pr.get("isDraft", False)
-    checks = pr.get("statusCheckRollup") or []
+    raw_checks = pr.get("statusCheckRollup") or []
     review = pr.get("reviewDecision", "")
-    if not checks:
+    flaky_names = []
+    review_check_passed = False
+
+    if not raw_checks:
         ci = "no CI"
     else:
         # The gh statusCheckRollup payload can retain an older cancelled
-        # or failed Actions run beside its successful rerun. The GitHub PR UI
-        # uses the latest logical check; counting both resurrects a result the
-        # rerun superseded. Only collapse entries with an unambiguous identity
-        # and timestamp -- otherwise preserving both is safer than hiding a
-        # distinct check behind a guess.
+        # or failed Actions run beside its successful rerun, or a failed
+        # merge-queue run beside the earlier passing run. Group by logical
+        # check identity to find both the latest attempt and any check that
+        # failed on its latest run after passing on the run before.
+        by_identity = {}
         latest_checks = {}
         undeduplicated_checks = []
-        for index, check in enumerate(checks):
+        for index, check in enumerate(raw_checks):
             if "state" in check:
                 context = check.get("context")
                 identity = ("status", context) if context else None
@@ -547,41 +659,25 @@ for pr in sorted(prs, key=lambda p: p.get("number", 0)):
                 undeduplicated_checks.append(check)
                 continue
             candidate = (started, index, check)
+            by_identity.setdefault(identity, []).append(candidate)
             if candidate[:2] > latest_checks.get(identity, ("", -1))[:2]:
                 latest_checks[identity] = candidate
 
+        for identity, runs in by_identity.items():
+            ordered = sorted(runs, key=lambda r: r[:2])
+            completed = [r for r in ordered if verdict(r[2]) in ("pass", "fail")]
+            if len(completed) >= 2 and verdict(completed[-2][2]) == "pass" and verdict(completed[-1][2]) == "fail":
+                label = identity[-1]
+                if label not in flaky_names:
+                    flaky_names.append(label)
+
         checks = undeduplicated_checks + [item[2] for item in latest_checks.values()]
+        for c in checks:
+            cname = f"{c.get('workflowName', '')} {c.get('name', '')} {c.get('context', '')}".lower()
+            if "review" in cname and verdict(c) == "pass":
+                review_check_passed = True
+
         total = len(checks)
-        pass_conclusions = {"SUCCESS", "NEUTRAL", "SKIPPED"}
-        failure_conclusions = {"FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
-        interrupted_conclusions = {"CANCELLED", "STALE"}
-        pending_statuses = {"QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"}
-
-        def verdict(check):
-            if "state" in check:  # GraphQL StatusContext, not CheckRun
-                state = check.get("state")
-                if state == "SUCCESS":
-                    return "pass"
-                if state in {"FAILURE", "ERROR"}:
-                    return "fail"
-                if state in {"PENDING", "EXPECTED"}:
-                    return "pending"
-                return "unknown"
-
-            status = check.get("status")
-            if status in pending_statuses:
-                return "pending"
-            if status != "COMPLETED":
-                return "unknown"
-            conclusion = check.get("conclusion")
-            if conclusion in pass_conclusions:
-                return "pass"
-            if conclusion in failure_conclusions:
-                return "fail"
-            if conclusion in interrupted_conclusions:
-                return "interrupted"
-            return "unknown"
-
         verdicts = [verdict(check) for check in checks]
         passed = verdicts.count("pass")
         failed = verdicts.count("fail")
@@ -600,28 +696,111 @@ for pr in sorted(prs, key=lambda p: p.get("number", 0)):
             ci = "CI green"
         else:
             ci = "CI unknown"
+
+    mq_node = mq_by_num.get(n, {})
+    mq_entry = pr.get("mergeQueueEntry") if "mergeQueueEntry" in pr else mq_node.get("mergeQueueEntry")
+    if mq_entry:
+        queue_total = max(queue_total, 1)
+    removed = pr.get("removedFromQueue")
+    if removed is None:
+        tl = ((mq_node.get("timelineItems") or {}).get("nodes")) or []
+        removed = tl[-1] if tl else None
+
+    auto_merge = pr.get("autoMergeRequest")
+    updated_ts = parse_iso(pr.get("updatedAt"))
+    wait_secs = (now_epoch - updated_ts) if (now_epoch and updated_ts and now_epoch > updated_ts) else 0
+    wait_age = fmt_age(wait_secs)
+
+    passed_review = (not draft) and (
+        review == "APPROVED"
+        or (review not in ("CHANGES_REQUESTED", "REVIEW_REQUIRED") and review_check_passed)
+    )
+
+    queue_tag = ""
+    if mq_entry:
+        pos = mq_entry.get("position")
+        queue_tag = f", in merge queue{f' (#{pos})' if pos is not None else ''}"
+    elif not draft:
+        if removed:
+            reason = removed.get("reason") or "removed"
+            ev_ts = parse_iso(removed.get("createdAt"))
+            ev_age = fmt_age(now_epoch - ev_ts) if (now_epoch and ev_ts and now_epoch > ev_ts) else wait_age
+            age_note = f" {ev_age} ago" if ev_age else ""
+            if ci == "CI green" or flaky_names:
+                flaky_detail = f" (flaky check: {', '.join(flaky_names)})" if flaky_names else " while branch CI is green (flaky queue test or conflict with recent main)"
+                urgent.append(
+                    f"- PR #{n} ({branch}) was KNOCKED OUT OF THE MERGE QUEUE{age_note} ({reason}){flaky_detail} "
+                    f"— needs re-queue (`gh pr merge {n} --auto`) or inspection if already retried on this commit."
+                )
+            else:
+                urgent.append(
+                    f"- PR #{n} ({branch}) was KNOCKED OUT OF THE MERGE QUEUE{age_note} ({reason}, {ci}) "
+                    f"— needs failing check fixed or re-queued (`gh pr merge {n} --auto`)."
+                )
+            queue_tag = f", KNOCKED OUT OF QUEUE ({reason})"
+            if passed_review and ci == "CI green":
+                waiting_reviewed.append((n, wait_secs or (now_epoch - ev_ts if now_epoch and ev_ts else 0)))
+        elif flaky_names:
+            urgent.append(
+                f"- PR #{n} ({branch}): check {', '.join(flaky_names)} FAILED on the latest run after PASSING on the run before (flaky test) "
+                f"— needs rerun or re-queue (`gh pr merge {n} --auto`)."
+            )
+            queue_tag = f", flaky fail ({', '.join(flaky_names)})"
+        elif passed_review and ci == "CI green" and not auto_merge:
+            w_str = f" (waiting {wait_age})" if wait_age else ""
+            urgent.append(
+                f"- PR #{n} ({branch}) passed review and CI{w_str} but is NOT in the merge queue and not auto-merging "
+                f"— needs queueing (`gh pr merge {n} --auto`)."
+            )
+            queue_tag = ", UNQUEUED"
+            waiting_reviewed.append((n, wait_secs))
+
     rv = {"APPROVED": "approved", "CHANGES_REQUESTED": "changes requested",
-          "REVIEW_REQUIRED": "needs review"}.get(review, "no reviews")
+          "REVIEW_REQUIRED": "needs review"}.get(review, "review passed" if review_check_passed else "no reviews")
     tag = "draft, " if draft else ""
     me = " <- this session" if branch == mark else ""
-    out.append(f"  #{n} {branch} -- {tag}{ci}, {rv}{me}")
+    out.append(f"  #{n} {branch} -- {tag}{ci}, {rv}{queue_tag}{me}")
+
+if waiting_reviewed and queue_total == 0:
+    max_wait = max(w for _, w in waiting_reviewed)
+    idle_secs = max_wait
+    if last_merged_ts and now_epoch > last_merged_ts:
+        idle_secs = min(max_wait, now_epoch - last_merged_ts) if max_wait else (now_epoch - last_merged_ts)
+    if idle_secs >= idle_min * 60:
+        nums = ", ".join(f"#{num}" for num, _ in waiting_reviewed)
+        urgent.insert(
+            0,
+            f"- MERGE QUEUE IDLE FOR {fmt_age(idle_secs)} while {len(waiting_reviewed)} reviewed PR(s) wait ({nums}) "
+            f"— nothing has entered or merged through the queue."
+        )
+
+for u in urgent:
+    print("URGENT:" + u)
 print(f"Open PRs: {len(prs)}")
 for line in out:
     print(line)
 PRPY
 )"
-    if [ -n "$pr_lines" ]; then
+    if [ -n "$pr_out" ]; then
       while IFS= read -r pl; do
-        lines+=("$pl")
-      done <<< "$pr_lines"
+        case "$pl" in
+          URGENT:*) urgent_pr_lines+=("${pl#URGENT:}") ;;
+          *) lines+=("$pl") ;;
+        esac
+      done <<< "$pr_out"
     fi
   fi
+fi
+
+if [ "${#urgent_pr_lines[@]}" -gt 0 ]; then
+  top_block=("REVIEWED PRs / MERGE QUEUE ATTENTION NEEDED:" "${urgent_pr_lines[@]}" "")
+  lines=("${top_block[@]}" "${lines[@]}")
 fi
 
 ctx="Dev environment health (SessionStart):
 $(printf '%s\n' "${lines[@]}")
 
-Say anything flagged above directly and plainly at the start of your first response — don't wait to be asked. That includes: session in the primary worktree, session inside a linked worktree (do not orchestrate from it), primary not on main, deploy drift, session worktree stranded/drifted/unpushed, stale or abandoned worktrees, and failing CI on open PRs."
+Say anything flagged above directly and plainly at the start of your first response — don't wait to be asked. That includes: reviewed PRs sitting unqueued or knocked out of the merge queue, merge queue idle while reviewed PRs wait, flaky queue test failures, session in the primary worktree, session inside a linked worktree (do not orchestrate from it), primary not on main, deploy drift, session worktree stranded/drifted/unpushed, stale or abandoned worktrees, and failing CI on open PRs."
 
 emit "" "$ctx"
 exit 0

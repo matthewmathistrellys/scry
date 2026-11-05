@@ -252,11 +252,6 @@
           },
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/agent_start_folder_guard.sh",
-            "timeout": 10
-          },
-          {
-            "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/load_fanout_advisory.sh",
             "timeout": 10
           },

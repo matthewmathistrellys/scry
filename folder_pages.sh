@@ -9,13 +9,16 @@
 # are not read. A CLAUDE.md that is a symlink to the AGENTS.md (or imports it
 # with an `@AGENTS.md` line) gives both clients the same text.
 #
-# At SessionStart it looks at the session's folder and each parent up to the
-# home folder, and every tracked AGENTS.md in the session's repository (or,
-# outside a repository, a bounded walk of the folder below). After a write to
-# an AGENTS.md or CLAUDE.md it looks at that one folder, once per folder per
-# session. It speaks only when a folder has an AGENTS.md whose CLAUDE.md is
-# missing or neither links to it nor imports it. Vendored trees (deps,
-# node_modules, virtualenvs, plugin caches) are skipped.
+# At SessionStart it reports two things:
+#   1. Subfolders below the session's start folder that carry their own
+#      AGENTS.md or CLAUDE.md, and what starting above them means for domain
+#      vocabulary, action ownership, and boundary rules during early planning,
+#      search, naming, and builder briefs.
+#   2. Any folder (from cwd up to home, or tracked in the repo) whose AGENTS.md
+#      has no CLAUDE.md linked to or importing it.
+# After a write to an AGENTS.md or CLAUDE.md it checks that one folder's pairing
+# once per folder per session. Vendored trees (deps, node_modules, virtualenvs,
+# plugin caches) are skipped.
 #
 # Advisory: exits zero, changes nothing. SCRY_FOLDER_PAGES=0 turns it off.
 set -uo pipefail
@@ -73,6 +76,7 @@ def show(folder):
 
 
 folders = []
+below_folders = []
 if event == "PostToolUse":
     fp = str((d.get("tool_input") or {}).get("file_path") or "")
     if os.path.basename(fp) not in ("AGENTS.md", "CLAUDE.md"):
@@ -96,11 +100,15 @@ else:
                              capture_output=True, text=True, timeout=4)
         top = top.stdout.strip() if top.returncode == 0 else ""
         if top:
-            ls = subprocess.run(["git", "-C", top, "ls-files", "--", "*AGENTS.md"],
+            ls = subprocess.run(["git", "-C", top, "ls-files", "--", "*AGENTS.md", "*CLAUDE.md"],
                                 capture_output=True, text=True, timeout=4)
             for p in ls.stdout.splitlines():
-                if os.path.basename(p) == "AGENTS.md":
-                    folders.append(os.path.realpath(os.path.join(top, os.path.dirname(p))))
+                if os.path.basename(p) in ("AGENTS.md", "CLAUDE.md"):
+                    full = os.path.realpath(os.path.join(top, os.path.dirname(p)))
+                    if os.path.basename(p) == "AGENTS.md":
+                        folders.append(full)
+                    if full.startswith(cwd + os.sep) and not vendored(full):
+                        below_folders.append(full)
     except Exception:
         top = ""
     if not top and cwd != home:
@@ -110,8 +118,11 @@ else:
             if root[len(cwd):].count(os.sep) >= 4:
                 dirs[:] = []
             seen += 1
+            full = os.path.realpath(root)
             if "AGENTS.md" in files:
-                folders.append(os.path.realpath(root))
+                folders.append(full)
+            if ("AGENTS.md" in files or "CLAUDE.md" in files) and full.startswith(cwd + os.sep) and not vendored(full):
+                below_folders.append(full)
             if seen > 3000:
                 break
 
@@ -123,13 +134,15 @@ for f in dict.fromkeys(folders):
     if s:
         found.setdefault(s, []).append(f)
 
+below = sorted({os.path.relpath(f, cwd) for f in below_folders})
+
 if event == "PostToolUse":
     try:
         os.makedirs(os.environ["SCRY_STATE"], exist_ok=True)
         open(marker, "w").close()
     except OSError:
         pass
-if not found:
+if not found and not below:
     sys.exit(0)
 
 
@@ -138,22 +151,50 @@ def listing(fs):
     return ", ".join(names) + (f", +{len(fs) - 6} more" if len(fs) > 6 else "")
 
 
-parts = []
-if found.get("missing"):
-    n = len(found["missing"])
-    parts.append(f"{n} folder{'s have' if n != 1 else ' has'} an AGENTS.md and no CLAUDE.md: "
-                 + listing(found["missing"]) + ".")
-if found.get("separate"):
-    n = len(found["separate"])
-    parts.append(f"{n} folder{'s have' if n != 1 else ' has'} a CLAUDE.md that is neither a link to its "
-                 "AGENTS.md nor imports it (`@AGENTS.md`): " + listing(found["separate"])
-                 + ". What the AGENTS.md says reaches a Claude session only if that CLAUDE.md's own "
-                 "words lead the model to open it.")
-text = ("Scry — folder pages: " + " ".join(parts) +
+sections = []
+if below:
+    groups = {}
+    for b in below:
+        parent, name = os.path.split(b)
+        groups.setdefault(parent, []).append(name)
+    shown = []
+    for parent, names in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:4]:
+        head = ", ".join(names[:8]) + (f", +{len(names) - 8} more" if len(names) > 8 else "")
+        shown.append(f"{parent + '/' if parent else './'} ({head})")
+    if len(groups) > 4:
+        shown.append(f"+{len(groups) - 4} more parent folders")
+    n = len(below)
+    sections.append(
+        f"Scry — folder pages below {show(cwd)}: {n} folder{'s' if n != 1 else ''} under this "
+        f"directory {'carry their' if n != 1 else 'carries its'} own AGENTS.md or CLAUDE.md: "
+        + "; ".join(shown) + ". "
+        "Codex and pi never load pages below the start folder, and Claude Code loads a subfolder's "
+        "CLAUDE.md only after Read opens a file inside it — not during initial planning, Grep/Glob "
+        "searches, or agent dispatch. Until a subfolder's page is in context, its domain vocabulary, "
+        "action ownership, and boundary rules are absent from early plans, search terms, names, and "
+        "builder briefs."
+    )
+
+if found:
+    parts = []
+    if found.get("missing"):
+        n = len(found["missing"])
+        parts.append(f"{n} folder{'s have' if n != 1 else ' has'} an AGENTS.md and no CLAUDE.md: "
+                     + listing(found["missing"]) + ".")
+    if found.get("separate"):
+        n = len(found["separate"])
+        parts.append(f"{n} folder{'s have' if n != 1 else ' has'} a CLAUDE.md that is neither a link to its "
+                     "AGENTS.md nor imports it (`@AGENTS.md`): " + listing(found["separate"])
+                     + ". What the AGENTS.md says reaches a Claude session only if that CLAUDE.md's own "
+                     "words lead the model to open it.")
+    sections.append(
+        "Scry — folder pages: " + " ".join(parts) +
         " Claude Code loads CLAUDE.md files and never reads an AGENTS.md on its own; Codex and pi load "
         "AGENTS.md and never read CLAUDE.md. Rules written only in an AGENTS.md reach Codex and pi "
         "sessions and no Claude session, and nothing shows it: they look written and are not read. "
-        "A CLAUDE.md that is a symlink to the AGENTS.md gives both clients the same text.")
-print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}))
+        "A CLAUDE.md that is a symlink to the AGENTS.md gives both clients the same text."
+    )
+
+print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": "\n\n".join(sections)}}))
 PY
 exit 0
