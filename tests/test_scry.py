@@ -1415,29 +1415,24 @@ class ScryHookTests(unittest.TestCase):
             self.assertIn("CLAUDE_PLUGIN_ROOT", command)
 
     def test_manifests_disclose_the_two_advisory_hooks(self):
-        """A hook that speaks into a subagent, and one that fires on every turn,
-        are both visible behavior — disclosed in BOTH manifests or not shipped."""
+        """A hook that speaks into a subagent is visible behavior: disclosed in
+        BOTH manifests or not shipped. And neither manifest describes a hook
+        event that hooks.json does not register (the Stop hook was removed on
+        2026-09-27, and a manifest still describing it is silently wrong)."""
         claude = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
         codex = json.loads((ROOT / ".codex-plugin/plugin.json").read_text())
         self.assertEqual(claude["version"], codex["version"])
         long_desc = codex["interface"]["longDescription"]
         self.assertIn("SubagentStart", claude["description"])
         self.assertIn("SubagentStart", long_desc)
-        self.assertIn("Stop hook", claude["description"])
-        self.assertIn("Stop", long_desc)
-        self.assertIn("SCRY_WORKTREE_REMINDER_MINUTES", long_desc)
-        self.assertIn("SCRY_WORKTREE_DISK_MB_WARN", long_desc)
-        self.assertIn("SCRY_SCRATCH_MD_LIST_MAX", long_desc)
-        # It must not read as another deny hook: these two never block.
         self.assertIn("ADVISORY", long_desc)
         self.assertIn("deletes nothing", long_desc)
-        # The Stop hook now reports scratch Markdown too, and a manifest that
-        # does not say so is a manifest that under-discloses what fires on
-        # every turn. Both manifests or not shipped.
+        registered = set(json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"])
+        self.assertNotIn("Stop", registered)
         for text in (claude["description"], long_desc, codex["description"]):
-            self.assertIn("Markdown", text)
-        self.assertIn("untracked Markdown files", claude["description"])
-        self.assertIn("untracked Markdown files", long_desc)
+            self.assertNotIn("Stop hook", text)
+            self.assertNotIn("SCRY_WORKTREE_REMINDER_MINUTES", text)
+            self.assertNotIn("SCRY_SCRATCH_MD_LIST_MAX", text)
 
     def test_the_tuning_table_documents_the_new_thresholds(self):
         """AGENTS.md: keep thresholds documented in the README tuning table."""
