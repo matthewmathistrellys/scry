@@ -6962,7 +6962,7 @@ class MergeQueueHealthTests(unittest.TestCase):
 
 
 class FolderPagesTests(unittest.TestCase):
-    """folder_pages.sh: subfolders below cwd with their own domain pages, and
+    """folder_pages.sh: subfolders below cwd with their own pages, and
     any AGENTS.md with no CLAUDE.md that links to or imports it."""
 
     def setUp(self):
@@ -6995,7 +6995,7 @@ class FolderPagesTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), "add", "-f", "."], check=True)
         at_root = self.start(self.repo)
         self.assertIn("Scry — folder pages below ~/repo: 1 folder under this directory carries its own AGENTS.md or CLAUDE.md: lib/ (files).", at_root)
-        self.assertIn("domain vocabulary, action ownership, and boundary rules are absent from early plans, search terms, names, and builder briefs", at_root)
+        self.assertIn("what it says is absent from early plans, search terms, names, and builder briefs", at_root)
         self.assertNotIn("no CLAUDE.md", at_root)
         in_domain = self.start(self.repo / "lib/files")
         self.assertEqual(in_domain, "")

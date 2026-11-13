@@ -5,15 +5,14 @@
 # Claude Code loads CLAUDE.md files and never reads an AGENTS.md on its own;
 # Codex and pi load AGENTS.md and never read CLAUDE.md. A folder whose page is
 # an AGENTS.md with no CLAUDE.md beside it reaches Codex and pi sessions and
-# no Claude session, and nothing anywhere says so: the rules look written and
-# are not read. A CLAUDE.md that is a symlink to the AGENTS.md (or imports it
+# no Claude session, and nothing anywhere says so: the page looks written and
+# is not read. A CLAUDE.md that is a symlink to the AGENTS.md (or imports it
 # with an `@AGENTS.md` line) gives both clients the same text.
 #
 # At SessionStart it reports two things:
 #   1. Subfolders below the session's start folder that carry their own
-#      AGENTS.md or CLAUDE.md, and what starting above them means for domain
-#      vocabulary, action ownership, and boundary rules during early planning,
-#      search, naming, and builder briefs.
+#      AGENTS.md or CLAUDE.md, and that what they say is not in context during
+#      early planning, search, naming, and builder briefs.
 #   2. Any folder (from cwd up to home, or tracked in the repo) whose AGENTS.md
 #      has no CLAUDE.md linked to or importing it.
 # After a write to an AGENTS.md or CLAUDE.md it checks that one folder's pairing
@@ -170,9 +169,8 @@ if below:
         + "; ".join(shown) + ". "
         "Codex and pi never load pages below the start folder, and Claude Code loads a subfolder's "
         "CLAUDE.md only after Read opens a file inside it — not during initial planning, Grep/Glob "
-        "searches, or agent dispatch. Until a subfolder's page is in context, its domain vocabulary, "
-        "action ownership, and boundary rules are absent from early plans, search terms, names, and "
-        "builder briefs."
+        "searches, or agent dispatch. Until a subfolder's page is in context, what it says is absent "
+        "from early plans, search terms, names, and builder briefs."
     )
 
 if found:
@@ -190,8 +188,8 @@ if found:
     sections.append(
         "Scry — folder pages: " + " ".join(parts) +
         " Claude Code loads CLAUDE.md files and never reads an AGENTS.md on its own; Codex and pi load "
-        "AGENTS.md and never read CLAUDE.md. Rules written only in an AGENTS.md reach Codex and pi "
-        "sessions and no Claude session, and nothing shows it: they look written and are not read. "
+        "AGENTS.md and never read CLAUDE.md. What is written only in an AGENTS.md reaches Codex and pi "
+        "sessions and no Claude session, and nothing shows it: it looks written and is not read. "
         "A CLAUDE.md that is a symlink to the AGENTS.md gives both clients the same text."
     )
 

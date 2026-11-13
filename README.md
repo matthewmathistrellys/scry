@@ -1476,21 +1476,20 @@ All of these are silent inside a subagent.
   registry, so an address that could mean more than one running session is not
   judged at all (SendMessage itself refuses such an address).
 
-## Folder pages: domain pages below the start folder, and an AGENTS.md alone
+## Folder pages: pages below the start folder, and an AGENTS.md alone
 
 An agent's start folder decides which folder pages (`AGENTS.md`, `CLAUDE.md`)
 are in context from turn 1. Codex and pi never load pages below the start
 folder, and Claude Code loads a subfolder's `CLAUDE.md` only after `Read`
 opens a file inside it — not during initial planning, `Grep`/`Glob` searches,
-or agent dispatch. Until a subfolder's page is in context, its domain
-vocabulary, action ownership, and boundary rules are absent from early plans,
-search terms, names, and builder briefs.
+or agent dispatch. Until a subfolder's page is in context, what it says is
+absent from early plans, search terms, names, and builder briefs.
 
 At the same time, Claude Code loads `CLAUDE.md` files and never reads an
 `AGENTS.md` on its own; Codex and pi load `AGENTS.md` and never read
-`CLAUDE.md`. Rules written only in an `AGENTS.md` reach Codex and pi sessions
-and no Claude session, and nothing shows it: they look written and are not
-read.
+`CLAUDE.md`. What is written only in an `AGENTS.md` reaches Codex and pi
+sessions and no Claude session, and nothing shows it: it looks written and is
+not read.
 
 `folder_pages.sh` (`SessionStart`, and `PostToolUse` on `Write|Edit` of an
 `AGENTS.md` or `CLAUDE.md`) checks both:
@@ -1559,7 +1558,7 @@ starts changing a decision.
 | `SCRY_KEEPALIVE_FRESH_SECS` (peek) | `3600` | the peek starts at three quarters of this much silence |
 | `SCRY_COLD_SEND_GUARD` | `1` | `0` stops the one-time turn-down of a first message to a cold agent |
 | `SCRY_COLD_SEND_WINDOW` | `3600` | seconds after a turn-down during which a second send goes through |
-| `SCRY_FOLDER_PAGES` | `1` | `0` silences `folder_pages.sh` (subfolder domain pages below `cwd` and `AGENTS.md` with no `CLAUDE.md` linked to it) |
+| `SCRY_FOLDER_PAGES` | `1` | `0` silences `folder_pages.sh` (subfolder pages below `cwd` and `AGENTS.md` with no `CLAUDE.md` linked to it) |
 | `SCRY_MERGE_QUEUE_IDLE_MINUTES` | `60` | minutes the merge queue can sit empty while reviewed, CI-green PRs wait before `health.sh` flags the queue as idle |
 | `SCRY_SCHEDULE_NOTES` | `1` | `0` stops the cost note on `CronCreate` and `ScheduleWakeup` |
 | `SCRY_PEEK_OFF_FILE` | `~/.claude/scry-peek.off` | a file whose existence turns the peek, its delivery and the guard off, read on every hook run |
