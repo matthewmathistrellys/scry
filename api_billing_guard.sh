@@ -177,3 +177,4 @@ if tool == "Bash":
 
 allow()
 PY
+exit 0

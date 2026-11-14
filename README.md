@@ -766,7 +766,6 @@ industrialise that problem.
 | Pooler for migrations | direct URL configured | DDL pointed at a transaction pooler |
 | Dev tooling | none depended on | Tidewave / Livebook / LiveReload present |
 | Stale migration | migrations newer than any RESOURCE file | a resource changed since the last codegen |
-| Ash read without an actor | target resource has no policies, or an explicit bypass | a policy-bearing resource is read with no actor |
 | Elixir build state | `_build` populated | `_build` cold — next compile is a FULL build |
 | Force-rebuild command | any ordinary command | first `--force`/`rm -rf _build` attempt |
 | Open PRs | none, or `gh` unavailable | any open PR exists |
