@@ -158,9 +158,9 @@ SCALE — @REL@ is @LINES@ lines and has changed @CHURN@ times in the last six m
 
 What goes wrong in a file this size is specific and silent. You are holding a fraction of it, so absence from the part you have seen is not absence from the file: a helper, constant, clause or private function you are about to add may already exist hundreds of lines away, and the duplicate will compile, pass review, and diverge from the original later — when the two disagree in production and neither is obviously wrong. A second failure runs the other way: behavior you did not read is behavior you can still break, because a pattern match, guard, default or branch further down the file may depend on the shape you just changed. Neither announces itself. The tests that would catch them are the tests nobody wrote, because nobody knew the second copy was there.
 
-Before adding anything here, grep THIS FILE for the name you are about to introduce. Before changing a shared function, grep THIS FILE for its callers. Both take seconds, and neither is implied by having read part of the file.
+A search of this file for a name about to be introduced, or for the callers of a shared function, takes seconds; having read part of the file does not stand in for either.
 
-This is a look, not a gate. Finish the work you were asked to do. If the file needs splitting, that is separate work with its own commit and its own tests — and split it by job, not by size: the plumbing a module does (auth, retries, rate limits, transport) is a different job from what it does with that plumbing, and the test of a good split is that each resulting file states its purpose in one clause with no "and". A long flat registry or schema is not a defect and should be left alone.
+This is a look, not a gate. Splitting a file is separate work from the task at hand, with its own commit and tests, and the split that holds is by job, not by size: the plumbing a module does (auth, retries, rate limits, transport) is a different job from what it does with that plumbing, and the test of a good split is that each resulting file states its purpose in one clause with no "and". A long flat registry or schema is not a defect.
 EOF
 )"
 

@@ -100,12 +100,12 @@ STALE_COMMITS="${SCRY_SUBAGENT_STALE_COMMITS:-50}"
 
 verdict=""
 if [ "$days" -ge "$STALE_DAYS" ] || [ "$behind" -ge "$STALE_COMMITS" ]; then
-  verdict=" At this distance an architecture or inventory answer read from this working tree is UNRELIABLE: whole features land in a gap this size, so a component that exists upstream can be absent here and a stage of a pipeline can be missing entirely. Read origin/$default_branch, and say which of the two you read when you report."
+  verdict=" At this distance an architecture or inventory answer read from this working tree is UNRELIABLE: whole features land in a gap this size, so a component that exists upstream can be absent here and a stage of a pipeline can be missing entirely. origin/$default_branch has what this tree lacks, and an answer that names which of the two it read can be checked."
 fi
 
 ADVISORY_TEXT="$repo: this checkout's $branch is $behind commit(s) / $days day(s) behind origin/$default_branch, and its files are the older ones. The working tree at $wt is stale — anything added upstream since is simply ABSENT from disk, so a grep here returns nothing for a feature that exists, and nothing reads as \"not there.\"
 
-Read repo facts from the live tip instead of from disk: \`git -C $wt show origin/$default_branch:<path>\`, \`git -C $wt grep <pattern> origin/$default_branch\`, \`git -C $wt ls-tree -r --name-only origin/$default_branch\`. Nothing here is checked out or moved by those; they read the ref.$verdict"
+The live tip can be read without checking anything out: \`git -C $wt show origin/$default_branch:<path>\`, \`git -C $wt grep <pattern> origin/$default_branch\`, \`git -C $wt ls-tree -r --name-only origin/$default_branch\`. Nothing here is checked out or moved by those; they read the ref.$verdict"
 
 CTX="$ADVISORY_TEXT" python3 - <<'PY'
 import json, os

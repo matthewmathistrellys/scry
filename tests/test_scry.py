@@ -955,18 +955,16 @@ class ScryHookTests(unittest.TestCase):
         self.assertIn("DENIES", codex["interface"]["longDescription"])
         self.assertIn("SCRY_BUILD_GUARD=0", codex["interface"]["longDescription"])
         self.assertIn("DenyToolCall", codex["interface"]["capabilities"])
-        self.assertIn("denies", claude["description"])
+        self.assertIn("turn a first attempt down once", claude["description"])
         self.assertNotIn("quiet, advisory session-start context",
                          codex["interface"]["longDescription"])
-        # The Bash surface spends real money, so both its existence and its
-        # off switch have to be visible before anyone installs this.
-        self.assertIn("SCRY_METERED_CLI_GUARD=0",
+        # The billing speed bump spends real money when it is wrong, so its
+        # existence and its off switch are visible before anyone installs this.
+        self.assertIn("SCRY_API_BILLING_GUARD=0",
                       codex["interface"]["longDescription"])
-        for text in (codex["interface"]["longDescription"],
-                     codex["description"], claude["description"]):
-            self.assertIn("CLI", text)
+        self.assertIn("claude -p", claude["description"])
 
-    def test_the_model_guard_is_actually_wired_to_the_bash_surface(self):
+    def test_the_billing_guard_is_actually_wired_to_the_bash_surface(self):
         """A guard nothing invokes is a guard that does not exist.
 
         Every shape below was verified by hand; none of it runs in a session
@@ -977,7 +975,7 @@ class ScryHookTests(unittest.TestCase):
                 if b.get("matcher") == "Bash"]
         self.assertEqual(len(bash), 1)
         commands = [h["command"] for h in bash[0]["hooks"]]
-        self.assertTrue(any("agent_model_guard.sh" in c for c in commands),
+        self.assertTrue(any("api_billing_guard.sh" in c for c in commands),
                         commands)
         self.assertTrue(all("PLUGIN_ROOT" in c for c in commands))
 
@@ -1254,8 +1252,8 @@ class ScryHookTests(unittest.TestCase):
 
             self.assertIn("NEW MARKDOWN", report)
             self.assertIn("notes/plan.md", report)
-            self.assertIn("cleared out at session end", report)
-            self.assertIn("where long-lived work is tracked", report)
+            self.assertIn("gone when the worktree is removed", report)
+            self.assertIn("other sessions do not find it", report)
             for gone in ("Artifact", "bind future sessions",
                          "worth checking in", "delete it before the session"):
                 self.assertNotIn(gone, report)
@@ -1786,9 +1784,9 @@ class ScryHookTests(unittest.TestCase):
                 f = repo / name
                 f.write_text("# some code\n")
                 report = context(run_hook("code_prose_advisory.sh", repo, self._read_payload(f)))
-                self.assertIn("STRICKEN", report)
+                self.assertIn("cannot be checked from this file", report)
                 self.assertIn("only for this module", report)
-                self.assertIn("investigate", report)
+                self.assertIn("where to look", report)
 
     def test_code_prose_advisory_is_silent_for_markdown_and_other_files(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1818,7 +1816,7 @@ class ScryHookTests(unittest.TestCase):
                 self._prose_drift_edit(f, "def f, do: 1", "def f, do: 2")))
             self.assertIn("prose-drift", out)
             self.assertIn("ATOMIC", out)
-            self.assertIn("not a gate", out)
+            self.assertIn("describes code that is gone", out)
 
     def test_prose_drift_is_silent_when_the_edit_touches_prose_or_lacks_shape(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1852,30 +1850,6 @@ class ScryHookTests(unittest.TestCase):
                 context(run_hook(
                     "elixir_advisory.sh", repo,
                     self._prose_drift_edit(f, "def f, do: 1", "def f, do: 2"))), "")
-
-    def test_architecture_flags_env_reads_in_build_time_config(self):
-        """config.exs is evaluated at BUILD time; env read there bakes in CI's value."""
-        with tempfile.TemporaryDirectory() as td:
-            repo = Path(td) / "repo"
-            (repo / "lib").mkdir(parents=True)
-            (repo / "config").mkdir(parents=True)
-            (repo / "deps").mkdir()
-            (repo / "_build").mkdir()
-            (repo / "mix.exs").write_text("defmodule M do\nend\n")
-            (repo / "config/config.exs").write_text(
-                'import Config\nconfig :app, k: System.get_env("SECRET")\n')
-            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-
-            out = context(run_hook("architecture.sh", repo, {}, {"HOME": td}))
-            self.assertIn("BUILD-TIME CONFIG READS ENV", out)
-            self.assertIn("runtime.exs", out)
-
-            # Correct placement is silent.
-            (repo / "config/config.exs").write_text("import Config\n")
-            (repo / "config/runtime.exs").write_text(
-                'import Config\nconfig :app, k: System.get_env("SECRET")\n')
-            clean = context(run_hook("architecture.sh", repo, {}, {"HOME": td}))
-            self.assertNotIn("BUILD-TIME CONFIG", clean)
 
     def test_migrate_guard_ignores_non_resource_files_under_lib(self):
         """Only resource edits imply stale migrations.
@@ -1928,52 +1902,6 @@ class ScryHookTests(unittest.TestCase):
         path = repo / "lib/app/c.ex"
         path.write_text("defmodule AppWeb.C do\n" + body + "\nend\n")
         return path
-
-    def test_actor_check_fires_only_when_the_resource_has_policies(self):
-        """The gate that turned 93-of-93 noise into a real signal.
-
-        Measured on a live Ash app: ungated, this flagged every for_read call
-        site in the project -- 93 of 93, across 67 files -- because only 5 of
-        ~189 resources declare policies, so for the rest the actor would be
-        discarded unread. Passing an actor only matters where a rule exists to
-        consult it (2026-08-22).
-        """
-        with tempfile.TemporaryDirectory() as td:
-            repo = self._policy_repo(Path(td))
-
-            # The real mistake: policy-bearing resource, no actor, no bypass.
-            bad = self._caller(repo, "  def f do\n    App.Secret\n"
-                                     "    |> Ash.Query.for_read(:read)\n"
-                                     "    |> Ash.read()\n  end")
-            out = context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(bad)))
-            self.assertIn("ash-for-read-without-actor", out)
-            self.assertIn("declares policies", out)
-
-            # Same shape against a resource with no policies: nothing to check.
-            ok = self._caller(repo, "  def f do\n    App.Plain\n"
-                                    "    |> Ash.Query.for_read(:read)\n"
-                                    "    |> Ash.read()\n  end")
-            self.assertEqual(
-                context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(ok))), "")
-
-    def test_actor_check_respects_an_explicit_authorization_bypass(self):
-        """`authorize?: false` is a reviewed decision, not an oversight."""
-        with tempfile.TemporaryDirectory() as td:
-            repo = self._policy_repo(Path(td))
-            bypass = self._caller(repo, "  def f do\n    App.Secret\n"
-                                        "    |> Ash.Query.for_read(:read)\n"
-                                        "    |> Ash.read(authorize?: false)\n  end")
-            self.assertEqual(
-                context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(bypass))), "")
-
-    def test_actor_check_fails_quiet_on_an_unresolvable_target(self):
-        """A guess here would be the confident-wrong-answer this tool exists to stop."""
-        with tempfile.TemporaryDirectory() as td:
-            repo = self._policy_repo(Path(td))
-            odd = self._caller(repo, "  def f(q) do\n"
-                                     "    q |> Ash.Query.for_read(:read) |> Ash.read()\n  end")
-            self.assertEqual(
-                context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(odd))), "")
 
     def test_fleet_is_silent_for_only_current_codex_session(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2161,9 +2089,9 @@ class ScryHookTests(unittest.TestCase):
             self.assertIn("duplicate", report)
             self.assertIn("production", report)
             # And it must give the remedy, plus the guard against turning it into a refactor.
-            self.assertIn("grep THIS FILE", report)
+            self.assertIn("search of this file", report)
             self.assertIn("This is a look, not a gate", report)
-            self.assertIn("split it by job, not by size", report)
+            self.assertIn("by job, not by size", report)
 
     def test_scale_advisory_stays_silent_on_a_large_file_nobody_touches(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2219,176 +2147,7 @@ class ScryHookTests(unittest.TestCase):
             self.assertEqual("", self._scale(repo, moved, session="vendor"))
 
 
-    # ── agent_model_guard.sh ───────────────────────────────────────────────
-    def _guard(self, payload):
-        import tempfile as _tf
-        with _tf.TemporaryDirectory() as td:
-            result = run_hook("agent_model_guard.sh", td, payload)
-        out = result.stdout.strip()
-        if not out:
-            return None
-        h = json.loads(out)["hookSpecificOutput"]
-        return h.get("permissionDecisionReason") or h.get("additionalContext")
-
-    def _pre(self, tool, tool_input):
-        return self._guard({"tool_name": tool, "hook_event_name": "PreToolUse",
-                            "tool_input": tool_input})
-
-    def _post(self, tool, tool_input):
-        return self._guard({"tool_name": tool, "hook_event_name": "PostToolUse",
-                            "tool_input": tool_input})
-
-    def test_agent_guard_blocks_only_the_absent_choice(self):
-        reason = self._pre("Agent", {"description": "verify the fix"})
-        self.assertIsNotNone(reason)
-        self.assertIn("inherits", reason)
-
-    def test_agent_guard_does_not_prescribe_which_model_to_use(self):
-        """Model names age out; the rule does not. A roster would rot in months."""
-        reason = self._pre("Agent", {"description": "d"})
-        for rostered in ("opus", "sonnet", "haiku"):
-            self.assertNotIn(rostered, reason.lower())
-        self.assertIn("cheapest model that can actually do this job", reason)
-
-    def test_agent_guard_never_objects_to_a_model_that_was_actually_chosen(self):
-        """The guard is against accident, not against any model."""
-        for model in ("fable", "opus", "sonnet", "haiku", "some-future-model"):
-            self.assertIsNone(self._pre("Agent", {"description": "d", "model": model}),
-                              model)
-
-    def test_agent_guard_allows_a_premium_model_inside_a_workflow_when_chosen(self):
-        """A cheaper session asking the strongest model questions is legitimate."""
-        self.assertIsNone(self._pre("Workflow", {
-            "script": "agent(a,{model:'fable'}); agent(b,{model:'fable'})"}))
-
-    def test_agent_guard_denies_a_workflow_whose_agents_do_not_all_choose(self):
-        reason = self._pre("Workflow", {
-            "script": "agent(a,{model:'opus'}); agent(b,{}); agent(c,{})"})
-        self.assertIsNotNone(reason)
-        self.assertIn("3 agent() call(s)", reason)
-
-    def test_agent_guard_makes_a_fork_a_conscious_choice_but_lets_the_retry_through(self):
-        payload = {"subagent_type": "fork", "description": "carry on here"}
-        first = self._pre("Agent", payload)
-        self.assertIsNotNone(first)
-        self.assertIn("inherits", first.lower())
-        self.assertIsNone(self._pre("Agent", payload))
-
-    def test_agent_guard_ignores_model_names_that_appear_only_in_comments(self):
-        self.assertIsNone(self._pre("Workflow", {
-            "script": "// consider model: 'fable' here\nagent(a,{model:'opus'})"}))
-
-    def test_agent_guard_reports_the_cost_after_a_premium_model_is_used(self):
-        """Guidance after a legitimate choice -- never a block."""
-        for payload in ({"description": "d", "model": "fable"},):
-            note = self._post("Agent", payload)
-            self.assertIsNotNone(note)
-            self.assertIn("COST", note)
-            self.assertIn("smaller usage allowance", note)
-            # It must not scold: the choice was deliberate and that is the point.
-            self.assertIn("Nothing is wrong here", note)
-
-        note = self._post("Workflow", {"script": "agent(a,{model:'fable'})"})
-        self.assertIsNotNone(note)
-        self.assertIn("COST", note)
-
-    def test_agent_guard_stays_silent_after_an_everyday_model(self):
-        self.assertIsNone(self._post("Agent", {"description": "d", "model": "sonnet"}))
-
-    def test_agent_guard_premium_list_is_configurable_not_hardcoded(self):
-        import tempfile as _tf
-        payload = {"tool_name": "Agent", "hook_event_name": "PostToolUse",
-                   "tool_input": {"description": "d", "model": "opus"}}
-        with _tf.TemporaryDirectory() as td:
-            out = run_hook("agent_model_guard.sh", td, payload,
-                           env={"SCRY_PREMIUM_MODELS": "opus"}).stdout.strip()
-        self.assertIn("COST", out)
-
-    # ── agent_model_guard.sh — metered CLI on Bash ─────────────────────────
-    def _bash(self, command, env=None):
-        import tempfile as _tf
-        payload = {"tool_name": "Bash", "hook_event_name": "PreToolUse",
-                   "tool_input": {"command": command}}
-        with _tf.TemporaryDirectory() as td:
-            out = run_hook("agent_model_guard.sh", td, payload, env=env).stdout.strip()
-        if not out:
-            return None
-        return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
-
-    def test_metered_cli_guard_blocks_a_call_that_names_no_model(self):
-        for command in ('codex exec "fix the thing"',
-                        'codex "fix the thing"',
-                        '/Users/m/.local/bin/codex exec "fix"',
-                        'cat notes | codex exec'):
-            reason = self._bash(command)
-            self.assertIsNotNone(reason, command)
-            self.assertIn("config default", reason)
-
-    def test_metered_cli_guard_accepts_every_way_of_naming_the_model(self):
-        for command in ('codex exec -m gpt-5.6-terra "fix"',
-                        'codex exec --model=gpt-5.6-terra "fix"',
-                        'codex exec --model gpt-5.6-terra "fix"',
-                        'codex exec -c model=gpt-5.6-terra "fix"',
-                        'ls && codex exec -m gpt-5.6-terra "fix"'):
-            self.assertIsNone(self._bash(command), command)
-
-    def test_metered_cli_guard_does_not_prescribe_which_model_to_use(self):
-        """Model names age out; the rule does not."""
-        reason = self._bash('codex exec "fix"')
-        for rostered in ("gpt-", "astra", "terra", "opus", "sonnet"):
-            self.assertNotIn(rostered, reason.lower(), rostered)
-        self.assertIn("cheapest model that can actually do this job", reason)
-
-    def test_metered_cli_guard_reads_the_segment_not_the_whole_command_line(self):
-        """A `-m` belonging to another command must not vouch for this one.
-
-        The whole-string grep this replaced passed `mkdir -m 755 x && codex
-        exec` — the exact shape that makes a chained call look pinned.
-        """
-        reason = self._bash('mkdir -m 755 x && codex exec "fix"')
-        self.assertIsNotNone(reason)
-        self.assertIn("config default", reason)
-
-    def test_metered_cli_guard_ignores_the_cli_name_where_it_is_not_a_command(self):
-        for command in ('echo "run codex now"',
-                        'cd ~/dev/codex && ls',
-                        'grep -rn codex .',
-                        'ls -la',
-                        "git commit -q -F - <<'EOF'\nfeat: note\n\nClaude Code reads CLAUDE.md; Codex and pi read AGENTS.md.\nEOF\ngit push -q",
-                        'git commit -m "$(cat <<\'EOF\'\nfix: "quoted" prose; Codex and pi read AGENTS.md\nEOF\n)"'):
-            self.assertIsNone(self._bash(command), command)
-
-    def test_metered_cli_guard_does_not_split_a_separator_inside_a_prompt(self):
-        self.assertIsNone(self._bash('codex exec -m some-model "run a && b"'))
-
-    def test_metered_cli_guard_lets_management_verbs_through(self):
-        """login, --help and friends run no inference, so they bill nothing."""
-        for command in ('codex login', 'codex logout', 'codex --help',
-                        'codex --version', 'codex mcp list', 'codex doctor'):
-            self.assertIsNone(self._bash(command), command)
-
-    def test_metered_cli_guard_covers_a_call_behind_env_assignments(self):
-        for command in ('FOO=1 codex exec "fix"', 'env FOO=1 codex exec "fix"'):
-            self.assertIsNotNone(self._bash(command), command)
-
-    def test_metered_cli_list_is_configurable_not_hardcoded(self):
-        """A tool that bills today may not tomorrow, and vice versa."""
-        self.assertIsNone(self._bash('gemini "hi"'))
-        self.assertIsNotNone(self._bash('gemini "hi"',
-                                        env={"SCRY_METERED_CLIS": "gemini"}))
-        self.assertIsNone(self._bash('codex exec "fix"',
-                                     env={"SCRY_METERED_CLIS": "gemini"}))
-
-    def test_metered_cli_guard_can_be_switched_off(self):
-        self.assertIsNone(self._bash('codex exec "fix"',
-                                     env={"SCRY_METERED_CLI_GUARD": "0"}))
-
-    def test_metered_cli_free_verbs_are_extensible(self):
-        self.assertIsNotNone(self._bash('codex cloud list'))
-        self.assertIsNone(self._bash('codex cloud list',
-                                     env={"SCRY_METERED_CLI_FREE": "cloud"}))
-
-    # ── agent_model_guard.sh — headless Claude on the API account ──────────
+    # ── api_billing_guard.sh — headless Claude on the API account ──────────
     def _billing(self, command, env=None, tmp=None):
         import tempfile as _tf
         payload = {"tool_name": "Bash", "hook_event_name": "PreToolUse",
@@ -2397,7 +2156,7 @@ class ScryHookTests(unittest.TestCase):
         if tmp:
             merged["TMPDIR"] = tmp
         with _tf.TemporaryDirectory() as td:
-            out = run_hook("agent_model_guard.sh", td, payload,
+            out = run_hook("api_billing_guard.sh", td, payload,
                            env=merged).stdout.strip()
         if not out:
             return None
@@ -2438,37 +2197,18 @@ class ScryHookTests(unittest.TestCase):
         self.assertIsNotNone(reason)
         self.assertIn("API BILLING", reason)
 
-    def test_the_billing_advisory_can_be_switched_off_on_its_own(self):
-        """Its switch is separate from the metered-CLI switch, both ways."""
+    def test_the_billing_advisory_can_be_switched_off(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertIsNone(self._billing(
                 'claude -p "fix"',
                 {"ANTHROPIC_API_KEY": "sk-x", "SCRY_API_BILLING_GUARD": "0"}, tmp))
-            self.assertIsNotNone(self._billing(
-                'claude -p "fix"',
-                {"ANTHROPIC_API_KEY": "sk-x", "SCRY_METERED_CLI_GUARD": "0"}, tmp))
 
-    def test_metered_cli_guard_says_nothing_after_the_call(self):
-        """PreToolUse is the only useful moment; a PostToolUse note on every
-        Bash call would be noise."""
-        import tempfile as _tf
-        payload = {"tool_name": "Bash", "hook_event_name": "PostToolUse",
-                   "tool_input": {"command": 'codex exec "fix"'}}
-        with _tf.TemporaryDirectory() as td:
-            self.assertEqual("", run_hook("agent_model_guard.sh", td,
-                                          payload).stdout.strip())
-
-    def test_metered_cli_guard_fails_open_on_a_command_it_cannot_lex(self):
-        """Refusing what cannot be parsed wedges a session over a lexing bug."""
-        self.assertIsNone(self._bash('codex exec "unbalanced'))
-        self.assertIsNone(self._bash(""))
-
-    def test_agent_guard_fails_open_rather_than_wedging_a_session(self):
-        """A cost guard that blocks what it cannot parse costs more than it saves."""
-        self.assertIsNone(self._guard({"tool_name": "Bash", "tool_input": {"command": "ls"}}))
-        self.assertIsNone(self._guard({}))
-        self.assertIsNone(self._pre("Agent", None))
-        self.assertIsNone(self._pre("Workflow", {"name": "saved-workflow"}))
+    def test_the_billing_guard_fails_open_on_what_it_cannot_read(self):
+        """A guard that blocks what it cannot parse costs more than it saves."""
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"ANTHROPIC_API_KEY": "sk-x"}
+            self.assertIsNone(self._billing('claude -p "unbalanced', env, tmp))
+            self.assertIsNone(self._billing("", env, tmp))
 
 
 class SharedServiceLoadTests(unittest.TestCase):

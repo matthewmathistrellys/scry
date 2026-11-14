@@ -4,8 +4,7 @@ Elixir build state — the Elixir scanner behind architecture.sh.
 
 architecture.sh hands it the repo root; it finds every mix project at or
 below it and reports what a session would otherwise discover mid-command:
-deps not fetched, a cold build (the next compile is a full one), and
-build-time config that reads the environment. It prints nothing when a
+deps not fetched, and a cold build (the next compile is a full one). It prints nothing when a
 project is fetched, built and clean. Pure text and file checks, no BEAM
 boot, well under a second.
 
@@ -43,50 +42,6 @@ def deps_not_fetched(mix_root: str) -> bool:
     `mix deps.get` has actually run.
     """
     return bool(mix_root) and os.path.isdir(mix_root) and not os.path.isdir(os.path.join(mix_root, "deps"))
-
-
-# Everything in config/ is evaluated at BUILD time EXCEPT runtime.exs. dev.exs
-# and test.exs are excluded because they never ship in a release. Expressed as
-# a denylist rather than an allowlist of known names: a project's own
-# staging.exs / appsignal.exs imported from config.exs is build-time too, and
-# an allowlist silently misses it (Fable review, 2026-08-22).
-NOT_BUILD_TIME = {"runtime.exs", "dev.exs", "test.exs"}
-ENV_READ_RE = re.compile(r"System\.(get_env|fetch_env)")
-
-
-def build_time_env_reads(mix_root: str) -> list[str]:
-    """config/*.exs files that read env vars — the release configuration trap.
-
-    Everything except runtime.exs is evaluated at BUILD time, so a
-    `System.get_env` there captures whatever was set on the build machine or
-    CI runner and bakes it into the release. `mix phx.server` works locally,
-    CI passes, and the value is wrong only in the compiled release, where it
-    presents as "the env var is definitely set on the box but the app cannot
-    see it". Purely textual and entirely offline.
-    """
-    hits = []
-    cfg = os.path.join(mix_root, "config")
-    if not os.path.isdir(cfg):
-        return hits
-    try:
-        names = sorted(os.listdir(cfg))
-    except OSError:
-        return hits
-    for name in names:
-        if not name.endswith(".exs") or name in NOT_BUILD_TIME:
-            continue
-        path = os.path.join(cfg, name)
-        if not os.path.isfile(path):
-            continue
-        try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                body = f.read()
-        except OSError:
-            continue
-        count = len(ENV_READ_RE.findall(body))
-        if count:
-            hits.append(f"config/{name} ({count})")
-    return hits
 
 
 def build_is_cold(mix_root: str) -> bool:
@@ -138,16 +93,6 @@ def main():
             body.append(
                 "Elixir deps not fetched in this worktree yet (no deps/ directory "
                 f"found under {project}): nothing here compiles until they are."
-            )
-        env_traps = build_time_env_reads(project)
-        if env_traps:
-            body.append(
-                f"BUILD-TIME CONFIG READS ENV in {project}: {', '.join(env_traps)}. "
-                "Everything outside config/runtime.exs is evaluated when the release "
-                "is BUILT, so these capture the build machine's environment (or nil) "
-                "and bake it in. It works under `mix phx.server` and passes CI; it is "
-                "wrong only in the compiled release, where it looks like a missing "
-                "env var that is definitely set."
             )
         if build_is_cold(project):
             body.append(

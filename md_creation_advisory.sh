@@ -73,7 +73,7 @@ seen_marker="$state_dir/seen-$seen_key"
 [ -e "$seen_marker" ] && exit 0
 : > "$seen_marker" 2>/dev/null
 
-ADVISORY_TEXT="NEW MARKDOWN — $rel is not one of this repo's standard Markdown files. Scratch Markdown created this session may be cleared out at session end. If what is in it needs to outlive the session, put it where long-lived work is tracked, not in a repo file."
+ADVISORY_TEXT="NEW MARKDOWN — $rel is not one of this repo's standard Markdown files. A file like this lives only in this working tree: nothing tracks it, other sessions do not find it, and it is gone when the worktree is removed."
 
 CTX="$ADVISORY_TEXT" python3 - <<'PY'
 import json, os

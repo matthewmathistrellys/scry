@@ -52,7 +52,7 @@ marker="$marker_dir/$(printf '%s' "$file_path" | shasum | cut -c1-16)"
 : > "$marker"
 
 ADVISORY_TEXT="$(cat <<'EOF'
-You just edited a source file. If the edit changed what this module DOES — behavior, contract, inputs, failure modes — bring the inline documentation (@moduledoc/@doc/docstring) along in the same pass, and delete any sentence the change just falsified. Prose here may describe only the module in this file; never add claims about other modules, the pipeline, or production. If the edit was mechanical (rename, formatting, test plumbing), no doc change is owed — move on.
+This edit changed a source file. When an edit changes what a module DOES (behavior, contract, inputs, failure modes), its inline documentation (@moduledoc/@doc/docstring) still describes the old behavior until it changes in the same pass, and a later reader takes it as true. A claim in that prose about other modules, the pipeline or production cannot be checked from this file. A mechanical edit (rename, formatting, test plumbing) leaves the documentation true.
 EOF
 )"
 
