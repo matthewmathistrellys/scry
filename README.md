@@ -13,7 +13,7 @@ machine is carrying. Independent checks and advisories fill that in.
 
 | | Answers |
 |---|---|
-| **`architecture.sh`** | What *is* this codebase? |
+| **`architecture.sh`** | Will the first build or compile here surprise me? |
 | **`stack.sh`** | What is it built *on*? |
 | **`pins.sh`**, **`pins_edit_advisory.sh`** | Is a version pinned here known-vulnerable, or far behind what is released? One line at startup, once, for a high or critical advisory on a runtime dependency; a count in the status line; a note on the manifest being edited; the rest on demand |
 | **`elixir_build_guard.sh`** | Is this command about to cost me 20 minutes? |
@@ -32,20 +32,23 @@ machine is carrying. Independent checks and advisories fill that in.
 | **`statusline_setup.sh`** | Is Scry's status bar set up — and if not, why is there no bar? |
 | **Markdown trust** | What goes wrong when repository prose is mistaken for authority? |
 
-- **`architecture.sh`** — a map of the codebase. It is a *dispatcher*, not a
-  language scanner: it detects the stack and hands off to `scanners/`
-  (Elixir/Ash today, others to follow), so one hook works in every repo
-  including a polyglot tree. It searches **down from the repo root**, not up
-  from the session's directory — an upward walk only finds a project marker at
-  or above cwd, so a monorepo whose `mix.exs` files live in `apps/*` reported a
-  bare folder list and the domain map went silently missing, in exactly the
-  repo that most needed it. Every mix project found is reported, each with its
-  domains, resource counts, and `@moduledoc` first sentences.
+- **`architecture.sh`** — the build state of the codebase's projects, or a
+  quick folder layout when there is nothing to say. It is a *dispatcher*, not a
+  language scanner: it hands off to `scanners/` (Elixir today), so one hook
+  works in every repo including a polyglot tree. For each mix project it says
+  when deps are not fetched, when the build is cold (the next compile is a full
+  one), and when build-time config reads the environment. It does not describe
+  what the code holds (domains, resources): that is the work, not the
+  environment, and a repo's own pages carry it (removed in 1.52.0). It searches
+  **down from the repo root**, not up from the session's directory — an upward
+  walk only finds a project marker at or above cwd, so a monorepo whose
+  `mix.exs` files live in `apps/*` got nothing, in exactly the repo that most
+  needed it.
 
   The search prunes vendored trees as it walks rather than filtering after —
   a naive repo-wide search of a real monorepo returned **2,512** `mix.exs`
-  files, almost all under `deps/`, which would have reported Ash's own domains
-  as the application's. Excluding `deps/`, `_build/` and `node_modules/` left
+  files, almost all under `deps/`, which would have reported Ash's own
+  projects as the application's. Excluding `deps/`, `_build/` and `node_modules/` left
   62; excluding `.worktrees/` (~20 checkouts of the same projects) left the
   real 3. Pruned, it runs in ~240ms where a naive `find` takes ~2s.
 
@@ -807,7 +810,6 @@ industrialise that problem.
 | Orphan files (primary or session worktree) | none | a file exists in no commit on any branch |
 | Stashes | none | any stash entry exists, with its age |
 | Elixir/Ash worktree deps | `deps/` present | `deps/` missing — `mix deps.get` needed |
-| Ash domains | no mix project in the repo | every project found, with descriptions |
 | Scale-to-zero conflict | machine can actually stop | a polling worker + a pinned machine make it inert |
 | Pooler for migrations | direct URL configured | DDL pointed at a transaction pooler |
 | Dev tooling | none depended on | Tidewave / Livebook / LiveReload present |
@@ -837,9 +839,8 @@ a doctrine that quietly accumulates unlisted exceptions is just a preference.
 Deploy drift never stays silent **once configured** (unconfigured it says
 nothing, since a repo with no running service can never satisfy it); the
 Markdown trust census reports whenever repository Markdown exists; the stack summary
-reports whenever it finds config; and the Ash domain map reports whenever a mix
-project exists. The first two were granted exemptions previously; the last two
-were added deliberately (Matt, 2026-08-21/22) on the grounds that a stale doc
+reports whenever it finds config. The first two were granted exemptions
+previously; the stack summary was added deliberately (Matt, 2026-08-21/22) on the grounds that a stale doc
 crosses no threshold and trips no alarm, so orientation facts have to be stated
 rather than waited for. So does `stack.sh`: a stale doc crosses no threshold and trips no alarm,
 so the stack is stated every session rather than only when something looks
@@ -849,13 +850,9 @@ read-time reminder, avoiding a repeated token-heavy explanation.
 ## Example output
 
 ```
-Ash domains [apps/engine] (36, 122 resources):
-  MyApp.Accounts (3 resources) — Users, sessions, and API tokens.
-  MyApp.Billing (5 resources) — Subscriptions, invoices, and usage metering.
-  ... every domain, with its @moduledoc first sentence
-
-Ash domains [apps/exhibits] (1, 2 resources):
-  Exhibits.Jobs (2 resources)
+Elixir build is COLD in apps/engine (deps fetched, nothing compiled yet): the
+next `mix compile`/`mix test` is a FULL build of every dependency, not an
+incremental one.
 ```
 
 ```

@@ -673,63 +673,43 @@ class ScryHookTests(unittest.TestCase):
             (repo / "lib/my_app").mkdir(parents=True)
             (repo / "mix.exs").write_text("defmodule MyApp.MixProject do\nend\n")
             (repo / "lib/my_app/accounts.ex").write_text(
-                'defmodule MyApp.Accounts do\n'
-                '  @moduledoc """\n'
-                "  Users and sessions.\n"
-                '  """\n'
-                "  use Ash.Domain\n"
-                "end\n"
+                "defmodule MyApp.Accounts do\n  use Ash.Domain\nend\n"
             )
 
             missing = run_hook("architecture.sh", repo, {}, {"HOME": str(base)})
             report = context(missing)
             self.assertIn("Elixir deps not fetched", report)
-            self.assertIn("mix deps.get", report)
-            self.assertIn("Ash domains (1, 0 resources)", report)
+            # What the code holds is not the environment: no domain map.
+            self.assertNotIn("Ash domains", report)
+            self.assertNotIn("MyApp.Accounts", report)
 
             (repo / "deps").mkdir()
+            (repo / "_build/dev").mkdir(parents=True)
             fetched = run_hook("architecture.sh", repo, {}, {"HOME": str(base)})
             fetched_report = context(fetched)
             self.assertNotIn("Elixir deps not fetched", fetched_report)
-            self.assertIn("Ash domains (1, 0 resources)", fetched_report)
+            self.assertIn("Quick layout", fetched_report)  # nothing to say, so the layout
 
     def test_architecture_finds_mix_projects_below_cwd_not_only_above(self):
         """The monorepo gap: mix.exs in apps/* was invisible to an upward walk.
 
         architecture.sh used to walk UP from cwd for a project marker, so a
-        repo whose mix projects live in apps/* reported a bare folder list
-        and the domain map went silently missing. Also pins the pruning:
-        a vendored copy under deps/ must not be reported as first-party.
+        repo whose mix projects live in apps/* got no build-state notes. Also
+        pins the pruning: a vendored copy under deps/ is not a project.
         """
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td) / "repo"
-            for app, domain in (("engine", "Engine.Cases"), ("web", "Web.Accounts")):
-                lib = repo / "apps" / app / "lib" / app
-                lib.mkdir(parents=True)
+            for app in ("engine", "web"):
+                (repo / "apps" / app / "lib" / app).mkdir(parents=True)
                 (repo / "apps" / app / "mix.exs").write_text("defmodule M do\nend\n")
-                (repo / "apps" / app / "deps").mkdir()
-                (lib / "domain.ex").write_text(
-                    f'defmodule {domain} do\n'
-                    '  @moduledoc """\n  Real first-party domain.\n  """\n'
-                    "  use Ash.Domain\n  resource Foo\n  resource Bar\nend\n"
-                )
-            # A vendored dependency that must be pruned, not reported.
-            vend = repo / "apps/engine/deps/ash/lib"
-            vend.mkdir(parents=True)
+            (repo / "apps/engine/deps/ash/lib").mkdir(parents=True)
             (repo / "apps/engine/deps/ash/mix.exs").write_text("defmodule A do\nend\n")
-            (vend / "vendored.ex").write_text(
-                'defmodule Ash.Vendored do\n  use Ash.Domain\nend\n'
-            )
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
 
             report = context(run_hook("architecture.sh", repo, {}, {"HOME": td}))
-            self.assertIn("Engine.Cases", report)
-            self.assertIn("Web.Accounts", report)
-            self.assertIn("apps/engine", report)
-            self.assertIn("Real first-party domain.", report)  # descriptions kept
-            self.assertIn("2 resources", report)
-            self.assertNotIn("Ash.Vendored", report)  # deps/ pruned
-            self.assertNotIn("Quick layout", report)  # no longer falls back
+            self.assertIn("apps/web", report)       # found below the root
+            self.assertIn("COLD", report)           # engine: deps fetched, nothing built
+            self.assertNotIn("deps/ash", report)    # deps/ pruned
 
     def test_architecture_falls_back_to_layout_with_no_mix_project(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1430,6 +1410,7 @@ class ScryHookTests(unittest.TestCase):
         registered = set(json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"])
         self.assertNotIn("Stop", registered)
         for text in (claude["description"], long_desc, codex["description"]):
+            self.assertNotIn("boundary rules", text)  # Scry assumes no page style
             self.assertNotIn("Stop hook", text)
             self.assertNotIn("SCRY_WORKTREE_REMINDER_MINUTES", text)
             self.assertNotIn("SCRY_SCRATCH_MD_LIST_MAX", text)

@@ -4,9 +4,9 @@
 # Runs in well under a second.
 #
 # This file is a DISPATCHER, not a language scanner. It hands the repo root
-# to a scanner under scanners/ — scanners/elixir_ash.py, which searches DOWN
-# for mix.exs files, is the one language scanner — and prints what that
-# scanner reports. The language name belongs on the scanner, never on this
+# to a scanner under scanners/ — scanners/elixir_build.py, which searches DOWN
+# for mix.exs files and reports their build state, is the one language
+# scanner — and prints what that scanner reports. The language name belongs on the scanner, never on this
 # entry point: one hook wired once has to work in every repo, including a
 # polyglot tree, so it cannot require the installer to know the stack in
 # advance. Adding a language means adding a scanner and a call here — never
@@ -43,7 +43,7 @@ quick_layout() {
     | sort)"
   [ -n "$listing" ] || return 0
   local body
-  body="Quick layout of $base (no mix.exs — or other recognized project marker — found in this repository):
+  body="Quick layout of $base:
 $(printf '%s\n' "$listing" | sed 's/^/  /')"
   emit_context "$body"
 }
@@ -51,13 +51,13 @@ $(printf '%s\n' "$listing" | sed 's/^/  /')"
 # Search DOWN from the repo root, not UP from cwd. An upward walk only
 # finds a project marker sitting at or above the session's directory, so
 # in a monorepo whose mix.exs files live in apps/* it finds nothing and
-# the domain map goes silently missing — in exactly the repo that most
-# needs it. The scanner prunes vendored trees during its walk, so this
+# the build-state notes go silently missing — in exactly the repo that
+# most needs them. The scanner prunes vendored trees during its walk, so this
 # stays fast (a naive find over the same repo returns 2,512 mix.exs from
 # deps/ alone, and takes ~2s; the pruned walk avoids entering them).
 root="$(git rev-parse --show-toplevel 2>/dev/null)" || root="$PWD"
 
-script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scanners/elixir_ash.py"
+script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scanners/elixir_build.py"
 if [ -f "$script" ]; then
   out="$(python3 "$script" --repo-root "$root" 2>/dev/null)"
   [ -n "$out" ] && printf '%s\n' "$out" || quick_layout
