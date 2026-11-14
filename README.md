@@ -1263,41 +1263,6 @@ changed code. An earlier wording made agents replace a precise, current referenc
 to another module with a vague one in 3 of 3 runs on one file; the sentence about a
 reference that still matches brought that to 1 of 3.
 
-## When a session writes guidance
-
-A `PostToolUse` hook on `Edit`, `Write` and `MultiEdit` reads the lines an edit
-added to an instruction file: `AGENTS.md`, `CLAUDE.md` or `CLAUDE.local.md`
-anywhere, in a repo or not (`~/AGENTS.md` counts), and any `.md` under a
-`.claude/` directory. Every other path exits on the raw payload. When an added
-line opens with a person's name and a date, Scry quotes the line and its line
-number and says how it reads later: as one person's note from one day, which a
-later session weighs as dated and possibly drifted, not as standing guidance.
-It never tells the session what to do.
-
-The lines an edit added are those of the new text that were not lines of the
-old text. For a `Write`, they are the lines not in the file's git `HEAD`
-version when the file is tracked, otherwise all of the content, so rewriting a
-file that already held a dated line is silent. Lines inside a fenced code block
-are skipped.
-
-A line matches when, after optional list, quote, dash or emphasis markers
-(`-`, `*`, `>`, `_`, `—`, `–`, `**`), it opens with a capitalised name of one
-to three words and then a date: `2026-10-18`, `Oct 18, 2026`,
-`October 18, 2026` or `18 October 2026`. The shape is a sign-off: after the
-date the line ends (an optional `.`, `:`, `)`, `]` or closing emphasis), or goes
-on only after a colon or a dash. So `Matt, 2026-10-18.`,
-`— Matt, Oct 18, 2026`, `> Claude 2026-10-18: keep it short`,
-`Matt, 2026-10-18 — moved the pins check` and `- **Matt Mathis**, 2026-10-18`
-speak; `2026-10-18: released 1.40` (no name), `See the 2026-10-18 note`, `The
-Oct 18 build`, a date later in a sentence, and a capitalised word, date and
-more words (`Verified 2026-10-18 against prod`, `Postgres 2026-10-18 migration
-rules`) do not. Month and weekday names,
-and a few heading words such as `Updated` or `Released`, are not read as names.
-
-A file changed through a shell command reaches it through the shell-writes
-hook below. Once per file per session, and the marker is written only when the
-note is said. `SCRY_GUIDANCE_ATTRIBUTION=0` turns it off.
-
 ## When a shell command writes files
 
 The write notes above, and the others bound to `Edit` or `Write` in
@@ -1507,7 +1472,6 @@ starts changing a decision.
 | `SCRY_PINS_REFRESH_BUDGET` | `45` | seconds of wall-clock the background refresh may spend; no session waits on it |
 | `SCRY_PINS_CACHE_DIR` | `${XDG_CACHE_HOME:-~/.cache}/scry` | where the pin cache lives |
 | `SCRY_PINS_OSV_URL`, `_HEX_URL`, `_NPM_URL`, `_PYPI_URL`, `_GITHUB_URL` | the public services | base URL of each source, for a mirror |
-| `SCRY_GUIDANCE_ATTRIBUTION` | `1` | `0` stops the note when an edit adds a line opening with a name and a date to `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md` or a `.md` under `.claude/` |
 | `SCRY_SHELL_WRITES` | `1` | `0` stops the before-and-after picture around each Bash command, and with it the write notes for files a shell command changed |
 | `SCRY_LOAD_NOTES` | `1` | `0` stops the note before a loop, parallel or background run of a remote tool |
 | `SCRY_LOAD_NOTE_MINUTES` | `30` | minutes before the fan-out note is said again for the same tool in the same session |
