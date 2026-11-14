@@ -262,11 +262,6 @@
           },
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/pr_open_advisory.sh",
-            "timeout": 10
-          },
-          {
-            "type": "command",
             "command": "\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}\"/shell_writes.sh",
             "timeout": 10
           }

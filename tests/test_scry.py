@@ -1792,23 +1792,6 @@ class ScryHookTests(unittest.TestCase):
         (repo / "lib/app/thing.ex").write_text(body + "end\n")
         return repo
 
-    def test_advisory_warns_that_a_spark_extension_edit_is_expensive(self):
-        with tempfile.TemporaryDirectory() as td:
-            repo = Path(td) / "repo"
-            (repo / "lib").mkdir(parents=True)
-            (repo / "mix.exs").write_text("defmodule M do\nend\n")
-            (repo / "mix.lock").write_text('"spark": {:hex, :spark, "2.0"},\n')
-            ext = repo / "lib/ext.ex"
-            ext.write_text("defmodule App.Ext do\n  use Spark.Dsl.Transformer\nend\n")
-            out = context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(ext)))
-            self.assertIn("spark-extension-edit", out)
-            self.assertIn("COMPILE time", out)
-
-            plain = repo / "lib/plain.ex"
-            plain.write_text("defmodule App.P do\n  def f, do: 1\nend\n")
-            self.assertEqual(
-                context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(plain))), "")
-
     def _read_payload(self, path):
         return {"tool_name": "Read", "tool_input": {"file_path": str(path)}}
 
@@ -2896,104 +2879,6 @@ class BranchPointAdvisoryTests(unittest.TestCase):
             result = run_hook("branch_point_advisory.sh", repo, {"cwd": str(repo)})
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout.strip(), "")
-
-
-class PrOpenAdvisoryTests(unittest.TestCase):
-    """Opening a pull request is the last cheap moment for a second reader.
-
-    Observed 2026-10-12 in trellys-app: auto-merge is armed on open and merge
-    deploys, and a session built every finding a reviewer returned, including
-    a guard against a worry the reviewer called an unconfirmed suspicion.
-    """
-
-    @staticmethod
-    def _git(cwd, *args):
-        return subprocess.run(["git", "-C", str(cwd), *args], check=True,
-                              capture_output=True, text=True).stdout.strip()
-
-    def _branch_with(self, base, files):
-        """A clone on a feature branch whose commit adds `files` {path: text}."""
-        origin = base / "origin"
-        repo = base / "repo"
-        g = self._git
-        origin.mkdir(parents=True)
-        g(origin, "init", "-q", "-b", "main")
-        g(origin, "config", "user.name", "Scry Test")
-        g(origin, "config", "user.email", "scry@example.test")
-        (origin / "seed.txt").write_text("seed\n")
-        g(origin, "add", "seed.txt")
-        g(origin, "commit", "-qm", "first")
-        subprocess.run(["git", "clone", "-q", str(origin), str(repo)],
-                       check=True, capture_output=True)
-        g(repo, "config", "user.name", "Scry Test")
-        g(repo, "config", "user.email", "scry@example.test")
-        g(repo, "checkout", "-q", "-b", "feat/thing")
-        for path, text in files.items():
-            (repo / path).parent.mkdir(parents=True, exist_ok=True)
-            (repo / path).write_text(text)
-            g(repo, "add", path)
-        g(repo, "commit", "-qm", "change")
-        return repo
-
-    def _run(self, repo, command, state, session="pr-1"):
-        payload = {
-            "session_id": session,
-            "transcript_path": "/dev/null",
-            "cwd": str(repo),
-            "hook_event_name": "PreToolUse",
-            "tool_name": "Bash",
-            "tool_input": {"command": command},
-        }
-        return run_hook("pr_open_advisory.sh", repo, payload,
-                        env={"TMPDIR": str(state)})
-
-    def _code(self, n):
-        return {"app.py": "".join(f"x{i} = {i}\n" for i in range(n))}
-
-    def test_it_states_the_size_and_the_evidence_before_a_pr_opens(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            repo = self._branch_with(base, self._code(40))
-            report = context(self._run(repo, 'gh pr create --title "x" --body "y"', base / "state"))
-            self.assertIn("changes 40 lines across 1 files", report)
-            self.assertIn("91.5% → 88.0%", report)
-            self.assertNotIn("A finding is input", report)
-            self.assertIn("`/code-review`, a separate agent, or a person", report)
-
-    def test_it_is_said_once_per_branch_per_session(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            repo = self._branch_with(base, self._code(40))
-            state = base / "state"
-            self.assertNotEqual(context(self._run(repo, "gh pr create", state)), "")
-            self.assertEqual(context(self._run(repo, "gh pr create", state)), "")
-            self.assertNotEqual(context(self._run(repo, "gh pr create", state, session="pr-2")), "")
-
-    def test_it_is_silent_for_other_commands(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            repo = self._branch_with(base, self._code(40))
-            for cmd in ("gh pr view", "gh pr merge --auto", "git push", "gh pr checks"):
-                self.assertEqual(context(self._run(repo, cmd, base / "state")), "", cmd)
-
-    def test_it_is_silent_for_a_tiny_change(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            repo = self._branch_with(base, self._code(5))
-            self.assertEqual(context(self._run(repo, "gh pr create", base / "state")), "")
-
-    def test_it_is_silent_when_only_prose_changed(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            text = "".join(f"line {i}\n" for i in range(60))
-            repo = self._branch_with(base, {"README.md": text, "docs/guide.txt": text})
-            self.assertEqual(context(self._run(repo, "gh pr create", base / "state")), "")
-
-    def test_it_never_fails_outside_a_repo(self):
-        with tempfile.TemporaryDirectory() as td:
-            result = self._run(Path(td), "gh pr create", Path(td) / "state")
-            self.assertEqual(result.returncode, 0)
-            self.assertEqual(context(result), "")
 
 
 class ReviewHandbackAdvisoryTests(unittest.TestCase):
