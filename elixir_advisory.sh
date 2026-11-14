@@ -30,7 +30,7 @@
 #   - Needs to shell out to a tool, walk the AST, or do anything a regex
 #     can't? Write one check_<name> function (mix_root and file_path are
 #     already in scope; append findings via `findings+=("...")`) and add its
-#     name to the EXTRA_CHECKS array. See check_credo below as the template.
+#     name to the EXTRA_CHECKS array. See check_ash_for_read_without_actor below as the template.
 #   Either path leaves every existing check untouched.
 set -uo pipefail
 
@@ -133,27 +133,6 @@ done
 # EXTRA CHECKS (non-regex) — append the function name to EXTRA_CHECKS.
 # ============================================================================
 
-# mix credo --strict, scoped to the single edited file. Only runs when the
-# nearest mix.exs's own mix.lock actually depends on credo — a plain Elixir
-# project (or one that doesn't use credo) is silently skipped, no noise.
-# Bounds a cold/hung compile with whatever timeout binary is available
-# (GNU `timeout`, or macOS's `gtimeout` from coreutils); if neither exists,
-# falls back to running unwrapped — the hook's own PostToolUse timeout in
-# hooks.json still caps the whole thing, this is just belt-and-suspenders.
-check_credo() {
-  mix_has_dep "credo" || return 0
-  local credo_out timeout_bin=""
-  if command -v timeout >/dev/null 2>&1; then
-    timeout_bin="timeout 25"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    timeout_bin="gtimeout 25"
-  fi
-  credo_out="$(cd "$mix_root" && $timeout_bin mix credo --strict "$file_path" 2>&1)"
-  [ -n "$credo_out" ] || return 0
-  printf '%s' "$credo_out" | grep -q 'found no issues' && return 0
-  findings+=("mix credo --strict — $(basename "$file_path"):
-$credo_out")
-}
 
 # Ash.Query.for_read (or bare for_read/2,3 when Ash.Query is imported/used)
 # called without an `actor:` option. This is a real Ash security advisory
@@ -165,7 +144,7 @@ $credo_out")
 # trade-off as the Repo-bypass check above) but needs to look past the end of
 # the line the call starts on — Ash calls are routinely multi-line — so a
 # single per-line pattern.search() can't do it. It lives here (not in
-# add_regex_check) for the same reason check_credo does: the shared loop only
+# add_regex_check) because the shared loop only
 # matches within one line at a time. Detection: find each `for_read(`, walk
 # forward counting balanced parens to find that call's own closing paren
 # (falling back to a bounded 400-char lookahead if parens never balance,
@@ -310,24 +289,6 @@ $out
 Ash.Query.for_read (or for_read/2,3) called without an actor: option. This maps to a real, documented Ash security advisory — GHSA-pcxq-fjp3-r752 (github.com/ash-project/ash/security/advisories/GHSA-pcxq-fjp3-r752). Calling for_read without the actor, then passing the actor later (e.g. only on the downstream read/read! call), can let policies evaluate without actor context — silently skipping authorization. The correct form is for_read(:action, %{}, actor: current_user) |> read!() — actor goes on for_read itself, not (only) on the downstream call.")
 }
 
-# Editing a Spark compile-time extension (a DSL extension, transformer or
-# verifier). Ash resources ARE Spark DSLs, and an extension's work happens at
-# COMPILE time, so every resource that uses it carries a compile-time
-# dependency on this module. Touching it invalidates all of them at once and
-# the next `mix compile` walks the whole resource graph — minutes, not
-# seconds, on a large domain set.
-#
-# Deliberately does not try to count the affected resources. Doing that needs
-# an index that has to be built and kept correct, and the number is not what
-# changes the decision: knowing the edit is expensive BEFORE running compile is
-# the whole value. Cheap, exact, and it cannot drift.
-check_spark_extension_edit() {
-  mix_has_dep "spark" || return 0
-  grep -qE "use[[:space:]]+Spark\\.Dsl\\.(Extension|Transformer|Verifier|Fragment)" "$file_path" 2>/dev/null || return 0
-  findings+=("[spark-extension-edit] $(basename "$file_path"):
-
-This file is a Spark compile-time extension (a DSL extension, transformer or verifier). Every resource or domain that uses it depends on it at COMPILE time, so this edit invalidates all of them at once — the next \`mix compile\` or \`mix test\` rebuilds the whole resource graph, which is minutes rather than seconds on a large domain set. That is expected here, not a fault: budget for it rather than discovering it mid-command, and batch other extension edits into the same compile instead of paying the cost once per change.")
-}
 
 # Prose drift: this edit changed function-level code, but the file's embedded
 # prose (moduledoc / @doc / CRISP block) was not part of the edit. Prose is
@@ -374,7 +335,7 @@ print("drift")
 This edit changed function-level code, and the file's prose (moduledoc / @doc / CRISP block) was not touched. Prose here is ATOMIC — it may describe only this module — and it is trusted only as far as it matches the code it sits next to. If this change altered what the module does or claims, update the prose now; a future reader otherwise inherits testimony the code no longer supports. If the prose still holds, move on — this is a look, not a gate.")
 }
 
-EXTRA_CHECKS=(check_credo check_ash_for_read_without_actor check_spark_extension_edit check_prose_drift)
+EXTRA_CHECKS=(check_ash_for_read_without_actor check_prose_drift)
 
 # To add anti-pattern #4 (or beyond) that needs more than a regex: write a
 # check_<name> function above this line, then list its name here.

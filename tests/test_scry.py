@@ -673,63 +673,43 @@ class ScryHookTests(unittest.TestCase):
             (repo / "lib/my_app").mkdir(parents=True)
             (repo / "mix.exs").write_text("defmodule MyApp.MixProject do\nend\n")
             (repo / "lib/my_app/accounts.ex").write_text(
-                'defmodule MyApp.Accounts do\n'
-                '  @moduledoc """\n'
-                "  Users and sessions.\n"
-                '  """\n'
-                "  use Ash.Domain\n"
-                "end\n"
+                "defmodule MyApp.Accounts do\n  use Ash.Domain\nend\n"
             )
 
             missing = run_hook("architecture.sh", repo, {}, {"HOME": str(base)})
             report = context(missing)
             self.assertIn("Elixir deps not fetched", report)
-            self.assertIn("mix deps.get", report)
-            self.assertIn("Ash domains (1, 0 resources)", report)
+            # What the code holds is not the environment: no domain map.
+            self.assertNotIn("Ash domains", report)
+            self.assertNotIn("MyApp.Accounts", report)
 
             (repo / "deps").mkdir()
+            (repo / "_build/dev").mkdir(parents=True)
             fetched = run_hook("architecture.sh", repo, {}, {"HOME": str(base)})
             fetched_report = context(fetched)
             self.assertNotIn("Elixir deps not fetched", fetched_report)
-            self.assertIn("Ash domains (1, 0 resources)", fetched_report)
+            self.assertIn("Quick layout", fetched_report)  # nothing to say, so the layout
 
     def test_architecture_finds_mix_projects_below_cwd_not_only_above(self):
         """The monorepo gap: mix.exs in apps/* was invisible to an upward walk.
 
         architecture.sh used to walk UP from cwd for a project marker, so a
-        repo whose mix projects live in apps/* reported a bare folder list
-        and the domain map went silently missing. Also pins the pruning:
-        a vendored copy under deps/ must not be reported as first-party.
+        repo whose mix projects live in apps/* got no build-state notes. Also
+        pins the pruning: a vendored copy under deps/ is not a project.
         """
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td) / "repo"
-            for app, domain in (("engine", "Engine.Cases"), ("web", "Web.Accounts")):
-                lib = repo / "apps" / app / "lib" / app
-                lib.mkdir(parents=True)
+            for app in ("engine", "web"):
+                (repo / "apps" / app / "lib" / app).mkdir(parents=True)
                 (repo / "apps" / app / "mix.exs").write_text("defmodule M do\nend\n")
-                (repo / "apps" / app / "deps").mkdir()
-                (lib / "domain.ex").write_text(
-                    f'defmodule {domain} do\n'
-                    '  @moduledoc """\n  Real first-party domain.\n  """\n'
-                    "  use Ash.Domain\n  resource Foo\n  resource Bar\nend\n"
-                )
-            # A vendored dependency that must be pruned, not reported.
-            vend = repo / "apps/engine/deps/ash/lib"
-            vend.mkdir(parents=True)
+            (repo / "apps/engine/deps/ash/lib").mkdir(parents=True)
             (repo / "apps/engine/deps/ash/mix.exs").write_text("defmodule A do\nend\n")
-            (vend / "vendored.ex").write_text(
-                'defmodule Ash.Vendored do\n  use Ash.Domain\nend\n'
-            )
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
 
             report = context(run_hook("architecture.sh", repo, {}, {"HOME": td}))
-            self.assertIn("Engine.Cases", report)
-            self.assertIn("Web.Accounts", report)
-            self.assertIn("apps/engine", report)
-            self.assertIn("Real first-party domain.", report)  # descriptions kept
-            self.assertIn("2 resources", report)
-            self.assertNotIn("Ash.Vendored", report)  # deps/ pruned
-            self.assertNotIn("Quick layout", report)  # no longer falls back
+            self.assertIn("apps/web", report)       # found below the root
+            self.assertIn("COLD", report)           # engine: deps fetched, nothing built
+            self.assertNotIn("deps/ash", report)    # deps/ pruned
 
     def test_architecture_falls_back_to_layout_with_no_mix_project(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1415,29 +1395,27 @@ class ScryHookTests(unittest.TestCase):
             self.assertIn("CLAUDE_PLUGIN_ROOT", command)
 
     def test_manifests_disclose_the_two_advisory_hooks(self):
-        """A hook that speaks into a subagent, and one that fires on every turn,
-        are both visible behavior — disclosed in BOTH manifests or not shipped."""
+        """A hook that speaks into a subagent is visible behavior: disclosed in
+        BOTH manifests or not shipped. And neither manifest describes a hook
+        event that hooks.json does not register (the Stop hook was removed on
+        2026-09-27, and a manifest still describing it is silently wrong)."""
         claude = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
         codex = json.loads((ROOT / ".codex-plugin/plugin.json").read_text())
         self.assertEqual(claude["version"], codex["version"])
         long_desc = codex["interface"]["longDescription"]
         self.assertIn("SubagentStart", claude["description"])
         self.assertIn("SubagentStart", long_desc)
-        self.assertIn("Stop hook", claude["description"])
-        self.assertIn("Stop", long_desc)
-        self.assertIn("SCRY_WORKTREE_REMINDER_MINUTES", long_desc)
-        self.assertIn("SCRY_WORKTREE_DISK_MB_WARN", long_desc)
-        self.assertIn("SCRY_SCRATCH_MD_LIST_MAX", long_desc)
-        # It must not read as another deny hook: these two never block.
         self.assertIn("ADVISORY", long_desc)
-        self.assertIn("deletes nothing", long_desc)
-        # The Stop hook now reports scratch Markdown too, and a manifest that
-        # does not say so is a manifest that under-discloses what fires on
-        # every turn. Both manifests or not shipped.
+        registered = set(json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"])
+        self.assertNotIn("Stop", registered)
         for text in (claude["description"], long_desc, codex["description"]):
-            self.assertIn("Markdown", text)
-        self.assertIn("untracked Markdown files", claude["description"])
-        self.assertIn("untracked Markdown files", long_desc)
+            self.assertNotIn("boundary rules", text)  # Scry assumes no page style
+            # Removed hooks: the PR-open note and the end-of-session disposal.
+            for gone in ("gh pr create", "cleanup command", "leaving behind", "deletes nothing"):
+                self.assertNotIn(gone, text)
+            self.assertNotIn("Stop hook", text)
+            self.assertNotIn("SCRY_WORKTREE_REMINDER_MINUTES", text)
+            self.assertNotIn("SCRY_SCRATCH_MD_LIST_MAX", text)
 
     def test_the_tuning_table_documents_the_new_thresholds(self):
         """AGENTS.md: keep thresholds documented in the README tuning table."""
@@ -1796,23 +1774,6 @@ class ScryHookTests(unittest.TestCase):
             body += "  multitenancy do\n    strategy :attribute\n  end\n"
         (repo / "lib/app/thing.ex").write_text(body + "end\n")
         return repo
-
-    def test_advisory_warns_that_a_spark_extension_edit_is_expensive(self):
-        with tempfile.TemporaryDirectory() as td:
-            repo = Path(td) / "repo"
-            (repo / "lib").mkdir(parents=True)
-            (repo / "mix.exs").write_text("defmodule M do\nend\n")
-            (repo / "mix.lock").write_text('"spark": {:hex, :spark, "2.0"},\n')
-            ext = repo / "lib/ext.ex"
-            ext.write_text("defmodule App.Ext do\n  use Spark.Dsl.Transformer\nend\n")
-            out = context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(ext)))
-            self.assertIn("spark-extension-edit", out)
-            self.assertIn("COMPILE time", out)
-
-            plain = repo / "lib/plain.ex"
-            plain.write_text("defmodule App.P do\n  def f, do: 1\nend\n")
-            self.assertEqual(
-                context(run_hook("elixir_advisory.sh", repo, self._elixir_edit(plain))), "")
 
     def _read_payload(self, path):
         return {"tool_name": "Read", "tool_input": {"file_path": str(path)}}
@@ -2903,104 +2864,6 @@ class BranchPointAdvisoryTests(unittest.TestCase):
             self.assertEqual(result.stdout.strip(), "")
 
 
-class PrOpenAdvisoryTests(unittest.TestCase):
-    """Opening a pull request is the last cheap moment for a second reader.
-
-    Observed 2026-10-12 in trellys-app: auto-merge is armed on open and merge
-    deploys, and a session built every finding a reviewer returned, including
-    a guard against a worry the reviewer called an unconfirmed suspicion.
-    """
-
-    @staticmethod
-    def _git(cwd, *args):
-        return subprocess.run(["git", "-C", str(cwd), *args], check=True,
-                              capture_output=True, text=True).stdout.strip()
-
-    def _branch_with(self, base, files):
-        """A clone on a feature branch whose commit adds `files` {path: text}."""
-        origin = base / "origin"
-        repo = base / "repo"
-        g = self._git
-        origin.mkdir(parents=True)
-        g(origin, "init", "-q", "-b", "main")
-        g(origin, "config", "user.name", "Scry Test")
-        g(origin, "config", "user.email", "scry@example.test")
-        (origin / "seed.txt").write_text("seed\n")
-        g(origin, "add", "seed.txt")
-        g(origin, "commit", "-qm", "first")
-        subprocess.run(["git", "clone", "-q", str(origin), str(repo)],
-                       check=True, capture_output=True)
-        g(repo, "config", "user.name", "Scry Test")
-        g(repo, "config", "user.email", "scry@example.test")
-        g(repo, "checkout", "-q", "-b", "feat/thing")
-        for path, text in files.items():
-            (repo / path).parent.mkdir(parents=True, exist_ok=True)
-            (repo / path).write_text(text)
-            g(repo, "add", path)
-        g(repo, "commit", "-qm", "change")
-        return repo
-
-    def _run(self, repo, command, state, session="pr-1"):
-        payload = {
-            "session_id": session,
-            "transcript_path": "/dev/null",
-            "cwd": str(repo),
-            "hook_event_name": "PreToolUse",
-            "tool_name": "Bash",
-            "tool_input": {"command": command},
-        }
-        return run_hook("pr_open_advisory.sh", repo, payload,
-                        env={"TMPDIR": str(state)})
-
-    def _code(self, n):
-        return {"app.py": "".join(f"x{i} = {i}\n" for i in range(n))}
-
-    def test_it_states_the_size_and_the_evidence_before_a_pr_opens(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            repo = self._branch_with(base, self._code(40))
-            report = context(self._run(repo, 'gh pr create --title "x" --body "y"', base / "state"))
-            self.assertIn("changes 40 lines across 1 files", report)
-            self.assertIn("91.5% → 88.0%", report)
-            self.assertNotIn("A finding is input", report)
-            self.assertIn("`/code-review`, a separate agent, or a person", report)
-
-    def test_it_is_said_once_per_branch_per_session(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            repo = self._branch_with(base, self._code(40))
-            state = base / "state"
-            self.assertNotEqual(context(self._run(repo, "gh pr create", state)), "")
-            self.assertEqual(context(self._run(repo, "gh pr create", state)), "")
-            self.assertNotEqual(context(self._run(repo, "gh pr create", state, session="pr-2")), "")
-
-    def test_it_is_silent_for_other_commands(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            repo = self._branch_with(base, self._code(40))
-            for cmd in ("gh pr view", "gh pr merge --auto", "git push", "gh pr checks"):
-                self.assertEqual(context(self._run(repo, cmd, base / "state")), "", cmd)
-
-    def test_it_is_silent_for_a_tiny_change(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            repo = self._branch_with(base, self._code(5))
-            self.assertEqual(context(self._run(repo, "gh pr create", base / "state")), "")
-
-    def test_it_is_silent_when_only_prose_changed(self):
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            text = "".join(f"line {i}\n" for i in range(60))
-            repo = self._branch_with(base, {"README.md": text, "docs/guide.txt": text})
-            self.assertEqual(context(self._run(repo, "gh pr create", base / "state")), "")
-
-    def test_it_never_fails_outside_a_repo(self):
-        with tempfile.TemporaryDirectory() as td:
-            result = self._run(Path(td), "gh pr create", Path(td) / "state")
-            self.assertEqual(result.returncode, 0)
-            self.assertEqual(context(result), "")
-
-
 class ReviewHandbackAdvisoryTests(unittest.TestCase):
     """A reviewer's report comes back; the note separates kinds of finding.
 
@@ -3245,174 +3108,6 @@ class CodeCommentAdvisoryTests(unittest.TestCase):
                          (ROOT / "hooks/hooks.json").read_text())
 
 
-class GuidanceAttributionAdvisoryTests(unittest.TestCase):
-    """An edit to an instruction file adds a line that opens with a name and a
-    date. The note quotes the line and says how a later session weighs it."""
-
-    INSIGHT = "reads as one person's note from one day"
-
-    MATCH = ["Matt, 2026-10-18.",
-             "— Matt, Oct 18, 2026",
-             "> Claude 2026-10-18:",
-             "- **Matt Mathis**, 2026-10-18",
-             "Matt Mathis, October 18, 2026: the run moved",
-             "* Matt 18 October 2026",
-             "Matt, 2026-10-18 — moved the pins check",
-             "> Claude 2026-10-18: keep it short"]
-    NO_MATCH = ["2026-10-18: released 1.40",
-                "See the 2026-10-18 note",
-                "The Oct 18 build",
-                "Matt said on 2026-10-18 that the run moved",
-                "Updated 2026-10-18",
-                "October 18, 2026",
-                "Verified 2026-10-18 against prod",
-                "Added 2026-10-18 for the pipeline",
-                "Postgres 2026-10-18 migration rules"]
-
-    def setUp(self):
-        td = tempfile.TemporaryDirectory()
-        self.addCleanup(td.cleanup)
-        self.state = Path(td.name) / "state"
-        self.work = Path(td.name) / "work"
-        self.state.mkdir()
-        self.work.mkdir()
-
-    def _run(self, tool, tool_input, session="ga-1", env=None):
-        payload = {"session_id": session, "hook_event_name": "PostToolUse",
-                   "tool_name": tool, "tool_input": tool_input}
-        return context(run_hook("guidance_attribution_advisory.sh", "/", payload,
-                                env={"TMPDIR": str(self.state), **(env or {})}))
-
-    def _write(self, path, content, session="ga-1", env=None):
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
-        return self._run("Write", {"file_path": str(path), "content": content}, session, env)
-
-    def _edit(self, path, old, new, session="ga-1"):
-        path = Path(path)
-        path.write_text(path.read_text().replace(old, new, 1))
-        return self._run("Edit", {"file_path": str(path), "old_string": old,
-                                  "new_string": new}, session)
-
-    def _repo(self):
-        repo = self.work / "repo"
-        repo.mkdir()
-        git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
-        subprocess.run(git[:3] + ["init", "-q"], check=True)
-        return repo, git
-
-    # The pattern
-
-    def test_each_attribution_line_speaks_and_is_quoted(self):
-        for i, line in enumerate(self.MATCH):
-            note = self._write(self.work / f"m{i}" / "AGENTS.md",
-                               "# Guide\n\nRuns exit zero.\n" + line + "\n")
-            self.assertIn(self.INSIGHT, note, line)
-            self.assertIn(f'line 4 of {self.work / f"m{i}" / "AGENTS.md"} opens with', note)
-            self.assertIn(f'"{line.strip()}"', note)
-
-    def test_lines_without_a_leading_name_and_date_are_silent(self):
-        for i, line in enumerate(self.NO_MATCH):
-            self.assertEqual(self._write(self.work / f"n{i}" / "CLAUDE.md",
-                                         "# Guide\n" + line + "\n"), "", line)
-
-    def test_a_line_in_a_fenced_code_block_is_silent(self):
-        self.assertEqual(self._write(self.work / "CLAUDE.md",
-                                     "# Guide\n```\nMatt, 2026-10-18.\n```\n"), "")
-        note = self._write(self.work / "f" / "CLAUDE.md",
-                           "```\nx\n```\nMatt, 2026-10-18.\n")
-        self.assertIn("line 4 of", note)
-
-    # Which lines count
-
-    def test_an_edit_that_adds_the_line_speaks(self):
-        path = self.work / "CLAUDE.md"
-        path.write_text("# Guide\n\nRuns exit zero.\n")
-        note = self._edit(path, "Runs exit zero.\n", "Runs exit zero.\nMatt, 2026-10-18.\n")
-        self.assertIn("line 4 of", note)
-        self.assertIn(self.INSIGHT, note)
-
-    def test_an_edit_beside_an_existing_dated_line_is_silent(self):
-        path = self.work / "CLAUDE.md"
-        path.write_text("# Guide\nMatt, 2026-10-18.\nRuns exit zero.\n")
-        self.assertEqual(self._edit(path, "Matt, 2026-10-18.\nRuns exit zero.\n",
-                                    "Matt, 2026-10-18.\nRuns exit one.\n"), "")
-
-    def test_a_multiedit_whose_second_edit_adds_the_line(self):
-        path = self.work / "AGENTS.md"
-        path.write_text("a\nb\n")
-        path.write_text("a2\nb\n— Claude, Oct 18, 2026\n")
-        edits = [{"old_string": "a", "new_string": "a2"},
-                 {"old_string": "b\n", "new_string": "b\n— Claude, Oct 18, 2026\n"}]
-        self.assertIn("line 3 of", self._run("MultiEdit", {"file_path": str(path),
-                                                           "edits": edits}))
-
-    def test_a_write_to_a_tracked_file_that_already_had_the_line_is_silent(self):
-        repo, git = self._repo()
-        (repo / "AGENTS.md").write_text("# Guide\nMatt, 2026-10-18.\n")
-        subprocess.run(git + ["add", "."], check=True)
-        subprocess.run(git + ["commit", "-qm", "init"], check=True)
-        self.assertEqual(self._write(repo / "AGENTS.md",
-                                     "# Guide\nMatt, 2026-10-18.\nRuns exit zero.\n"), "")
-        self.assertIn("line 4 of", self._write(
-            repo / "AGENTS.md", "# Guide\nMatt, 2026-10-18.\nRuns exit zero.\n"
-            "Claude, 2026-10-19.\n", session="ga-2"))
-
-    def test_a_write_of_a_new_file_in_a_repo_speaks(self):
-        repo, _ = self._repo()
-        self.assertIn(self.INSIGHT, self._write(repo / "CLAUDE.md", "Matt, 2026-10-18.\n"))
-
-    def test_a_file_outside_a_repo_speaks(self):
-        self.assertIn(self.INSIGHT, self._write(self.work / "home" / "AGENTS.md",
-                                                "# Mine\nMatt, 2026-10-18.\n"))
-
-    # Which files count
-
-    def test_claude_local_and_markdown_under_dot_claude_count(self):
-        self.assertIn(self.INSIGHT, self._write(self.work / "CLAUDE.local.md",
-                                                "Matt, 2026-10-18.\n"))
-        self.assertIn(self.INSIGHT, self._write(self.work / ".claude" / "agents" / "rev.md",
-                                                "Matt, 2026-10-18.\n"))
-
-    def test_other_markdown_is_silent(self):
-        for name in ("README.md", "notes/AGENTS.md.bak", "docs/plan.md"):
-            self.assertEqual(self._write(self.work / name, "Matt, 2026-10-18.\n"), "", name)
-        self.assertEqual(self._write(self.work / ".claude" / "settings.json",
-                                     '"Matt, 2026-10-18."\n'), "")
-
-    # Once, and off
-
-    def test_once_per_file_per_session_marked_only_when_said(self):
-        path = self.work / "AGENTS.md"
-        self.assertEqual(self._write(path, "Runs exit zero.\n"), "")
-        self.assertIn(self.INSIGHT, self._write(path, "Matt, 2026-10-18.\n"))
-        self.assertEqual(self._write(path, "Claude, 2026-10-19.\n"), "")
-        self.assertIn(self.INSIGHT, self._write(self.work / "x" / "AGENTS.md",
-                                                "Claude, 2026-10-19.\n"))
-        self.assertIn(self.INSIGHT, self._write(path, "Claude, 2026-10-19.\n", session="ga-3"))
-
-    def test_the_off_switch(self):
-        self.assertEqual(self._write(self.work / "AGENTS.md", "Matt, 2026-10-18.\n",
-                                     env={"SCRY_GUIDANCE_ATTRIBUTION": "0"}), "")
-
-    def test_it_never_fails_on_a_bad_payload(self):
-        for raw in ("not json", "{}", '{"tool_name": "Edit", "x": "AGENTS.md"}',
-                    '{"tool_name": "Edit", "tool_input": null, "x": "CLAUDE.md"}', "[]"):
-            result = subprocess.run(["bash", str(ROOT / "guidance_attribution_advisory.sh")],
-                                    input=raw, text=True, capture_output=True,
-                                    env={**os.environ, "TMPDIR": str(self.state)})
-            self.assertEqual(result.returncode, 0, raw)
-            self.assertEqual(result.stdout, "", raw)
-
-    def test_registered_after_edit_write_and_multiedit(self):
-        groups = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]["PostToolUse"]
-        matchers = [g.get("matcher") for g in groups
-                    if any("guidance_attribution_advisory.sh" in h["command"]
-                           for h in g["hooks"])]
-        self.assertEqual(matchers, ["Edit|Write|MultiEdit"])
-
-
 class ShellWritesTests(unittest.TestCase):
     """A Bash command changes files. The before and after hooks run around a
     real command in a temp git repo, and the write hooks' notes for the files
@@ -3422,7 +3117,6 @@ class ShellWritesTests(unittest.TestCase):
     NEW_MD = "NEW MARKDOWN"
     COMMENT = "Scry: comment text"
     PLAIN_COMMENT = "Scry: this edit adds comment text."
-    ATTRIBUTION = "reads as one person's note from one day"
 
     def setUp(self):
         td = tempfile.TemporaryDirectory()
@@ -3541,24 +3235,13 @@ class ShellWritesTests(unittest.TestCase):
         self.git("checkout", "-q", "main")
         self.assertEqual(self.note("git merge -q --ff-only older"), "")
 
-    def test_a_guidance_file_outside_the_repo(self):
+    def test_a_guidance_file_outside_the_repo_is_silent(self):
+        # What is written into guidance files is not Scry's to judge (Matt,
+        # Nov 13), so a dated line added by shell brings no note.
         (self.home / ".claude").mkdir()
-        guide = self.home / ".claude" / "CLAUDE.md"
-        guide.write_text("Sam, 2026-10-01.\n")
-        # The line already there is in the saved copy, so adding a plain line is silent.
-        self.assertEqual(self.note("printf 'Keep replies short.\\n' >> \"$HOME/.claude/CLAUDE.md\"",
+        (self.home / ".claude" / "CLAUDE.md").write_text("Keep replies short.\n")
+        self.assertEqual(self.note("printf 'Matt, 2026-10-18.\\n' >> \"$HOME/.claude/CLAUDE.md\"",
                                    cwd=self.home), "")
-        ctx = self.note("printf 'Matt, 2026-10-18.\\n' >> \"$HOME/.claude/CLAUDE.md\"",
-                        cwd=self.home)
-        self.assertEqual(self.named(ctx), ["~/.claude/CLAUDE.md"])
-        self.assertIn("line 3 of ~/.claude/CLAUDE.md", ctx)
-        self.assertIn(self.ATTRIBUTION, ctx)
-
-    def test_a_heredoc_into_home_agents_md_brings_the_attribution_note(self):
-        ctx = self.note("cat > \"$HOME/AGENTS.md\" <<'EOF'\n# Agents\n\nMatt, 2026-10-18.\nEOF")
-        self.assertEqual(self.named(ctx), ["~/AGENTS.md"])
-        self.assertIn('opens with a name and a date: "Matt, 2026-10-18."', ctx)
-        self.assertIn(self.ATTRIBUTION, ctx)
 
     def test_a_read_only_command_is_silent(self):
         self.assertEqual(self.note("cat a.py && git status && ls -la"), "")
@@ -6962,7 +6645,7 @@ class MergeQueueHealthTests(unittest.TestCase):
 
 
 class FolderPagesTests(unittest.TestCase):
-    """folder_pages.sh: subfolders below cwd with their own domain pages, and
+    """folder_pages.sh: subfolders below cwd with their own pages, and
     any AGENTS.md with no CLAUDE.md that links to or imports it."""
 
     def setUp(self):
@@ -6995,7 +6678,7 @@ class FolderPagesTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), "add", "-f", "."], check=True)
         at_root = self.start(self.repo)
         self.assertIn("Scry — folder pages below ~/repo: 1 folder under this directory carries its own AGENTS.md or CLAUDE.md: lib/ (files).", at_root)
-        self.assertIn("domain vocabulary, action ownership, and boundary rules are absent from early plans, search terms, names, and builder briefs", at_root)
+        self.assertIn("what it says is absent from early plans, search terms, names, and builder briefs", at_root)
         self.assertNotIn("no CLAUDE.md", at_root)
         in_domain = self.start(self.repo / "lib/files")
         self.assertEqual(in_domain, "")

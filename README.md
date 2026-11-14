@@ -13,7 +13,7 @@ machine is carrying. Independent checks and advisories fill that in.
 
 | | Answers |
 |---|---|
-| **`architecture.sh`** | What *is* this codebase? |
+| **`architecture.sh`** | Will the first build or compile here surprise me? |
 | **`stack.sh`** | What is it built *on*? |
 | **`pins.sh`**, **`pins_edit_advisory.sh`** | Is a version pinned here known-vulnerable, or far behind what is released? One line at startup, once, for a high or critical advisory on a runtime dependency; a count in the status line; a note on the manifest being edited; the rest on demand |
 | **`elixir_build_guard.sh`** | Is this command about to cost me 20 minutes? |
@@ -32,20 +32,23 @@ machine is carrying. Independent checks and advisories fill that in.
 | **`statusline_setup.sh`** | Is Scry's status bar set up — and if not, why is there no bar? |
 | **Markdown trust** | What goes wrong when repository prose is mistaken for authority? |
 
-- **`architecture.sh`** — a map of the codebase. It is a *dispatcher*, not a
-  language scanner: it detects the stack and hands off to `scanners/`
-  (Elixir/Ash today, others to follow), so one hook works in every repo
-  including a polyglot tree. It searches **down from the repo root**, not up
-  from the session's directory — an upward walk only finds a project marker at
-  or above cwd, so a monorepo whose `mix.exs` files live in `apps/*` reported a
-  bare folder list and the domain map went silently missing, in exactly the
-  repo that most needed it. Every mix project found is reported, each with its
-  domains, resource counts, and `@moduledoc` first sentences.
+- **`architecture.sh`** — the build state of the codebase's projects, or a
+  quick folder layout when there is nothing to say. It is a *dispatcher*, not a
+  language scanner: it hands off to `scanners/` (Elixir today), so one hook
+  works in every repo including a polyglot tree. For each mix project it says
+  when deps are not fetched, when the build is cold (the next compile is a full
+  one), and when build-time config reads the environment. It does not describe
+  what the code holds (domains, resources): that is the work, not the
+  environment, and a repo's own pages carry it (removed in 1.52.0). It searches
+  **down from the repo root**, not up from the session's directory — an upward
+  walk only finds a project marker at or above cwd, so a monorepo whose
+  `mix.exs` files live in `apps/*` got nothing, in exactly the repo that most
+  needed it.
 
   The search prunes vendored trees as it walks rather than filtering after —
   a naive repo-wide search of a real monorepo returned **2,512** `mix.exs`
-  files, almost all under `deps/`, which would have reported Ash's own domains
-  as the application's. Excluding `deps/`, `_build/` and `node_modules/` left
+  files, almost all under `deps/`, which would have reported Ash's own
+  projects as the application's. Excluding `deps/`, `_build/` and `node_modules/` left
   62; excluding `.worktrees/` (~20 checkouts of the same projects) left the
   real 3. Pruned, it runs in ~240ms where a naive `find` takes ~2s.
 
@@ -807,18 +810,15 @@ industrialise that problem.
 | Orphan files (primary or session worktree) | none | a file exists in no commit on any branch |
 | Stashes | none | any stash entry exists, with its age |
 | Elixir/Ash worktree deps | `deps/` present | `deps/` missing — `mix deps.get` needed |
-| Ash domains | no mix project in the repo | every project found, with descriptions |
 | Scale-to-zero conflict | machine can actually stop | a polling worker + a pinned machine make it inert |
 | Pooler for migrations | direct URL configured | DDL pointed at a transaction pooler |
 | Dev tooling | none depended on | Tidewave / Livebook / LiveReload present |
 | Build-time config | env reads only in `runtime.exs` | `System.get_env` in `config.exs` |
 | Stale migration | migrations newer than any RESOURCE file | a resource changed since the last codegen |
 | Ash read without an actor | target resource has no policies, or an explicit bypass | a policy-bearing resource is read with no actor |
-| Spark extension edit | ordinary module | a DSL extension / transformer / verifier |
 | Elixir build state | `_build` populated | `_build` cold — next compile is a FULL build |
 | Force-rebuild command | any ordinary command | first `--force`/`rm -rf _build` attempt |
 | Open PRs | none, or `gh` unavailable | any open PR exists |
-| Pull request about to open | any command but `gh pr create`; under 10 changed lines; only prose changed; already said for this branch this session | once: lines and files changed, then what the research shows about a second reader and its findings |
 | Subagent report comes back | not a subagent hand-back; the report does not read as a review | the kinds of finding a review returns (defect, quality, speculative) and how each is settled |
 | Code comment written | not a source file; Markdown; under `$TMPDIR`, `/tmp/` or a `scratchpad/` directory; the edit adds no comment or doc text, whatever the file already holds; already said for this file this session | once per file: what keeps a comment in step with its code, plus a sentence for a comment about another module or file, or a name, a date or a story, in the added text or already in the file |
 | Pinned version with an advisory (session start) | none high or critical on a runtime dependency; or dev/test-only; or the branch itself changes that pin; or already said for this advisory set within the last day; or the start is a resume, clear or compact | one line, once: the count and up to three names |
@@ -838,9 +838,8 @@ a doctrine that quietly accumulates unlisted exceptions is just a preference.
 Deploy drift never stays silent **once configured** (unconfigured it says
 nothing, since a repo with no running service can never satisfy it); the
 Markdown trust census reports whenever repository Markdown exists; the stack summary
-reports whenever it finds config; and the Ash domain map reports whenever a mix
-project exists. The first two were granted exemptions previously; the last two
-were added deliberately (Matt, 2026-08-21/22) on the grounds that a stale doc
+reports whenever it finds config. The first two were granted exemptions
+previously; the stack summary was added deliberately (Matt, 2026-08-21/22) on the grounds that a stale doc
 crosses no threshold and trips no alarm, so orientation facts have to be stated
 rather than waited for. So does `stack.sh`: a stale doc crosses no threshold and trips no alarm,
 so the stack is stated every session rather than only when something looks
@@ -850,13 +849,9 @@ read-time reminder, avoiding a repeated token-heavy explanation.
 ## Example output
 
 ```
-Ash domains [apps/engine] (36, 122 resources):
-  MyApp.Accounts (3 resources) — Users, sessions, and API tokens.
-  MyApp.Billing (5 resources) — Subscriptions, invoices, and usage metering.
-  ... every domain, with its @moduledoc first sentence
-
-Ash domains [apps/exhibits] (1, 2 resources):
-  Exhibits.Jobs (2 resources)
+Elixir build is COLD in apps/engine (deps fetched, nothing compiled yet): the
+next `mix compile`/`mix test` is a FULL build of every dependency, not an
+incremental one.
 ```
 
 ```
@@ -1179,40 +1174,6 @@ change ran `git checkout -b <name>` with no start point and no preceding fetch.
 `git reflog` recorded "Created from HEAD" and the checkout had no `FETCH_HEAD` at
 all. The branch was current only because the clone was minutes old.
 
-## Before a pull request opens
-
-Opening a pull request is the last cheap moment for a second reader. In a
-standard flow a person still reviews and a person still deploys after it; where
-auto-merge is armed on open and merge deploys, nothing does.
-
-A `PreToolUse` advisory speaks just before `gh pr create`, once per branch per
-session. It reads only git's line and file counts against the merge base with
-`origin/<default>`. It does not try to know whether a review happened, and it
-never denies. It says what the research shows: who makes a good reader and what a useful
-review does. What to do with the findings is said when they come back (see
-"When a review comes back").
-It is silent under 10 changed lines and when every changed file is prose.
-
-Sources (every number was opened at its source on 2026-10-14):
-
-| Claim | Source |
-|---|---|
-| About 70% of outages come from changes | Google SRE |
-| Low review coverage: up to 2–5 more post-release bugs | McIntosh et al., MSR 2014 / EMSE 2016 |
-| Same-model self-correction: 91.5% → 88.0% | Huang et al., ICLR 2024 |
-| Filtered review 65% addressed (Uber) vs unfiltered 7–8% accepted (Mozilla, Ubisoft) | [Uber uReview](https://www.uber.com/blog/ureview/), [arXiv 2411.07091](https://arxiv.org/abs/2411.07091) |
-| Combining review runs raised F1 up to 43.67% | [arXiv 2509.01494](https://arxiv.org/abs/2509.01494) |
-| Every model did worse from diff to full context (one preprint) | [arXiv 2603.26130](https://arxiv.org/abs/2603.26130) |
-| Reviewers report something even when the work is sound | [Claude Code best practices](https://code.claude.com/docs/en/best-practices) |
-
-Not claimed because the evidence is missing: that persona prompts, specialist
-reviewers, checklists, or a different model as reviewer catch more defects.
-
-Observed 2026-10-12 in trellys-app: a session built every finding an adverse
-reviewer returned, including a second check against a worry the reviewer itself
-called an unconfirmed suspicion. In one week, 44 of 57 pull requests there
-opened with no reviewer dispatched first.
-
 ## When a review comes back
 
 A subagent's report reaches its parent as a turn of its own, and a
@@ -1300,41 +1261,6 @@ comments already in the file and kept the reasons; with it off, 0 of 18. No run
 changed code. An earlier wording made agents replace a precise, current reference
 to another module with a vague one in 3 of 3 runs on one file; the sentence about a
 reference that still matches brought that to 1 of 3.
-
-## When a session writes guidance
-
-A `PostToolUse` hook on `Edit`, `Write` and `MultiEdit` reads the lines an edit
-added to an instruction file: `AGENTS.md`, `CLAUDE.md` or `CLAUDE.local.md`
-anywhere, in a repo or not (`~/AGENTS.md` counts), and any `.md` under a
-`.claude/` directory. Every other path exits on the raw payload. When an added
-line opens with a person's name and a date, Scry quotes the line and its line
-number and says how it reads later: as one person's note from one day, which a
-later session weighs as dated and possibly drifted, not as standing guidance.
-It never tells the session what to do.
-
-The lines an edit added are those of the new text that were not lines of the
-old text. For a `Write`, they are the lines not in the file's git `HEAD`
-version when the file is tracked, otherwise all of the content, so rewriting a
-file that already held a dated line is silent. Lines inside a fenced code block
-are skipped.
-
-A line matches when, after optional list, quote, dash or emphasis markers
-(`-`, `*`, `>`, `_`, `—`, `–`, `**`), it opens with a capitalised name of one
-to three words and then a date: `2026-10-18`, `Oct 18, 2026`,
-`October 18, 2026` or `18 October 2026`. The shape is a sign-off: after the
-date the line ends (an optional `.`, `:`, `)`, `]` or closing emphasis), or goes
-on only after a colon or a dash. So `Matt, 2026-10-18.`,
-`— Matt, Oct 18, 2026`, `> Claude 2026-10-18: keep it short`,
-`Matt, 2026-10-18 — moved the pins check` and `- **Matt Mathis**, 2026-10-18`
-speak; `2026-10-18: released 1.40` (no name), `See the 2026-10-18 note`, `The
-Oct 18 build`, a date later in a sentence, and a capitalised word, date and
-more words (`Verified 2026-10-18 against prod`, `Postgres 2026-10-18 migration
-rules`) do not. Month and weekday names,
-and a few heading words such as `Updated` or `Released`, are not read as names.
-
-A file changed through a shell command reaches it through the shell-writes
-hook below. Once per file per session, and the marker is written only when the
-note is said. `SCRY_GUIDANCE_ATTRIBUTION=0` turns it off.
 
 ## When a shell command writes files
 
@@ -1476,21 +1402,20 @@ All of these are silent inside a subagent.
   registry, so an address that could mean more than one running session is not
   judged at all (SendMessage itself refuses such an address).
 
-## Folder pages: domain pages below the start folder, and an AGENTS.md alone
+## Folder pages: pages below the start folder, and an AGENTS.md alone
 
 An agent's start folder decides which folder pages (`AGENTS.md`, `CLAUDE.md`)
 are in context from turn 1. Codex and pi never load pages below the start
 folder, and Claude Code loads a subfolder's `CLAUDE.md` only after `Read`
 opens a file inside it — not during initial planning, `Grep`/`Glob` searches,
-or agent dispatch. Until a subfolder's page is in context, its domain
-vocabulary, action ownership, and boundary rules are absent from early plans,
-search terms, names, and builder briefs.
+or agent dispatch. Until a subfolder's page is in context, what it says is
+absent from early plans, search terms, names, and builder briefs.
 
 At the same time, Claude Code loads `CLAUDE.md` files and never reads an
 `AGENTS.md` on its own; Codex and pi load `AGENTS.md` and never read
-`CLAUDE.md`. Rules written only in an `AGENTS.md` reach Codex and pi sessions
-and no Claude session, and nothing shows it: they look written and are not
-read.
+`CLAUDE.md`. What is written only in an `AGENTS.md` reaches Codex and pi
+sessions and no Claude session, and nothing shows it: it looks written and is
+not read.
 
 `folder_pages.sh` (`SessionStart`, and `PostToolUse` on `Write|Edit` of an
 `AGENTS.md` or `CLAUDE.md`) checks both:
@@ -1546,7 +1471,6 @@ starts changing a decision.
 | `SCRY_PINS_REFRESH_BUDGET` | `45` | seconds of wall-clock the background refresh may spend; no session waits on it |
 | `SCRY_PINS_CACHE_DIR` | `${XDG_CACHE_HOME:-~/.cache}/scry` | where the pin cache lives |
 | `SCRY_PINS_OSV_URL`, `_HEX_URL`, `_NPM_URL`, `_PYPI_URL`, `_GITHUB_URL` | the public services | base URL of each source, for a mirror |
-| `SCRY_GUIDANCE_ATTRIBUTION` | `1` | `0` stops the note when an edit adds a line opening with a name and a date to `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md` or a `.md` under `.claude/` |
 | `SCRY_SHELL_WRITES` | `1` | `0` stops the before-and-after picture around each Bash command, and with it the write notes for files a shell command changed |
 | `SCRY_LOAD_NOTES` | `1` | `0` stops the note before a loop, parallel or background run of a remote tool |
 | `SCRY_LOAD_NOTE_MINUTES` | `30` | minutes before the fan-out note is said again for the same tool in the same session |
@@ -1559,7 +1483,7 @@ starts changing a decision.
 | `SCRY_KEEPALIVE_FRESH_SECS` (peek) | `3600` | the peek starts at three quarters of this much silence |
 | `SCRY_COLD_SEND_GUARD` | `1` | `0` stops the one-time turn-down of a first message to a cold agent |
 | `SCRY_COLD_SEND_WINDOW` | `3600` | seconds after a turn-down during which a second send goes through |
-| `SCRY_FOLDER_PAGES` | `1` | `0` silences `folder_pages.sh` (subfolder domain pages below `cwd` and `AGENTS.md` with no `CLAUDE.md` linked to it) |
+| `SCRY_FOLDER_PAGES` | `1` | `0` silences `folder_pages.sh` (subfolder pages below `cwd` and `AGENTS.md` with no `CLAUDE.md` linked to it) |
 | `SCRY_MERGE_QUEUE_IDLE_MINUTES` | `60` | minutes the merge queue can sit empty while reviewed, CI-green PRs wait before `health.sh` flags the queue as idle |
 | `SCRY_SCHEDULE_NOTES` | `1` | `0` stops the cost note on `CronCreate` and `ScheduleWakeup` |
 | `SCRY_PEEK_OFF_FILE` | `~/.claude/scry-peek.off` | a file whose existence turns the peek, its delivery and the guard off, read on every hook run |
