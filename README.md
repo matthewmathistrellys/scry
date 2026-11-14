@@ -36,8 +36,8 @@ machine is carrying. Independent checks and advisories fill that in.
   quick folder layout when there is nothing to say. It is a *dispatcher*, not a
   language scanner: it hands off to `scanners/` (Elixir today), so one hook
   works in every repo including a polyglot tree. For each mix project it says
-  when deps are not fetched, when the build is cold (the next compile is a full
-  one), and when build-time config reads the environment. It does not describe
+  when deps are not fetched and when the build is cold (the next compile is a
+  full one). It does not describe
   what the code holds (domains, resources): that is the work, not the
   environment, and a repo's own pages carry it (removed in 1.52.0). It searches
   **down from the repo root**, not up from the session's directory — an upward
@@ -509,59 +509,8 @@ machine is carrying. Independent checks and advisories fill that in.
   Deliberately skippable — pressure toward good behavior, not a gate — and
   quiet by default: full-file Writes, body-only tweaks, prose-touching edits,
   and files with no prose block all stay silent.
-- **`agent_model_guard.sh`** — one rule on every surface that dispatches work
-  to a model — `Agent`, `Workflow`, and a metered agent CLI run through `Bash`:
-  **the model must be chosen.** A blank model is not "the default" — it
-  silently inherits whatever the parent session runs on, invisibly at the call
-  site, and a fan-out multiplies it. On 2026-08-31 that consumed most of a
-  week's premium allowance in a single session: four verifier agents and a
-  builder, none naming a model, none needing the model they got. Nobody typed
-  the expensive model even once. They typed nothing, and got it anyway.
-
-  It is **not against any model**. A cheaper agent asking the strongest model a
-  hard question is legitimate and useful, and a premium model named
-  deliberately — including on every agent in a workflow — passes without
-  objection. Only the *absence of a decision* is blocked. It also refuses to
-  name which model to pick: model rosters age out, the rule does not, so the
-  instruction is to choose the cheapest one that can actually do the job and
-  leave that judgement where it belongs. A `fork`, which inherits by design and
-  ignores the override, gets one speed bump and then proceeds.
-
-  Afterwards, a `PostToolUse` note reports what a premium dispatch costs —
-  that it draws on a separate, much smaller allowance, that a single bounded
-  question is cheap while duration and breadth are not, and explicitly that
-  nothing is wrong, because the choice was deliberate and that was the point.
-  Every internal error fails **open**: an unparseable payload, an unwritable
-  state dir, a missing `python3` all allow the dispatch, because a cost guard
-  that wedges a session costs more than the tokens it saves.
-  `SCRY_PREMIUM_MODELS` (default `fable`) sets which models draw the note.
-
-  The same rule reaches one layer further out, to an agent CLI invoked through
-  `Bash`. With no model flag the CLI's own config default answers — a value set
-  once, months before the call, invisible at the call site, and usually the
-  strongest model the account can reach. On 2026-09-06 an overnight session ran
-  seventeen design reviews that way, every one on the premium config default,
-  draining the month's budget and locking the account out mid-day. A `codex`
-  call naming no model is denied; `-m`, `--model`, `--model=` and `-c model=`
-  all count as naming one, and management verbs that run no inference
-  (`login`, `--help`, `mcp`, `doctor`, …) pass untouched.
-
-  The command is **lexed and split on shell separators**, not grepped, because
-  a whole-string search gets it wrong in both directions: `mkdir -m 755 x &&
-  codex exec` looks pinned and is not, while `echo "run codex now"` looks like
-  a call and is not. Splitting on separators keeps a `-m` from vouching for a
-  command it does not belong to, and quoted separators stay inside their token
-  so an `&&` in a prompt does not split the call around it. A command shlex
-  cannot read fails **open**, like everything else here.
-
-  Which CLIs are metered is configuration, never a hardcoded roster — a tool
-  that bills today may not tomorrow, and one this file has never heard of may
-  bill the most. `SCRY_METERED_CLIS` (default `codex`) sets the list,
-  `SCRY_METERED_CLI_FREE` extends the no-inference verbs, and
-  `SCRY_METERED_CLI_GUARD=0` switches the check off.
-
-  One more thing on the same surface, and it is a **speed bump rather than a
-  block**: `claude -p` bypasses the subscription login by design and reads
+- **`api_billing_guard.sh`** — a `PreToolUse` speed bump on `Bash`:
+  `claude -p` bypasses the subscription login by design and reads
   `ANTHROPIC_API_KEY`, so with a key in the environment the run is metered per
   token against that API account while the subscription pays for none of it.
   Nothing in the command says so and nothing in the session shows it — people
@@ -569,6 +518,9 @@ machine is carrying. Independent checks and advisories fill that in.
   refundable. Billing the API deliberately is a legitimate thing to want, so the
   first attempt is refused with that stated and the same command repeated within
   five minutes goes through untouched. `SCRY_API_BILLING_GUARD=0` silences it.
+  (Split out of `agent_model_guard.sh` in 1.53.0, when the guard on choosing a
+  model moved to Grimoire: which account pays is the environment, which model
+  to use is the work.)
 
 - **`elixir_build_guard.sh`** — a `PreToolUse` speed bump in front of the
   commands that throw away compiled Elixir artifacts: `mix compile --force`,
@@ -813,9 +765,7 @@ industrialise that problem.
 | Scale-to-zero conflict | machine can actually stop | a polling worker + a pinned machine make it inert |
 | Pooler for migrations | direct URL configured | DDL pointed at a transaction pooler |
 | Dev tooling | none depended on | Tidewave / Livebook / LiveReload present |
-| Build-time config | env reads only in `runtime.exs` | `System.get_env` in `config.exs` |
 | Stale migration | migrations newer than any RESOURCE file | a resource changed since the last codegen |
-| Ash read without an actor | target resource has no policies, or an explicit bypass | a policy-bearing resource is read with no actor |
 | Elixir build state | `_build` populated | `_build` cold — next compile is a FULL build |
 | Force-rebuild command | any ordinary command | first `--force`/`rm -rf _build` attempt |
 | Open PRs | none, or `gh` unavailable | any open PR exists |

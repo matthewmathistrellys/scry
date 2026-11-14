@@ -800,7 +800,7 @@ fi
 ctx="Dev environment health (SessionStart):
 $(printf '%s\n' "${lines[@]}")
 
-Say anything flagged above directly and plainly at the start of your first response — don't wait to be asked. That includes: reviewed PRs sitting unqueued or knocked out of the merge queue, merge queue idle while reviewed PRs wait, flaky queue test failures, session in the primary worktree, session inside a linked worktree (do not orchestrate from it), primary not on main, deploy drift, session worktree stranded/drifted/unpushed, stale or abandoned worktrees, and failing CI on open PRs."
+The user does not see these lines. What is flagged above reaches them only if the session says it, and work begun without it is built on top of it. Flags of this kind: reviewed PRs sitting unqueued or knocked out of the merge queue, merge queue idle while reviewed PRs wait, flaky queue test failures, session in the primary worktree, session inside a linked worktree (do not orchestrate from it), primary not on main, deploy drift, session worktree stranded/drifted/unpushed, stale or abandoned worktrees, and failing CI on open PRs."
 
 emit "" "$ctx"
 exit 0

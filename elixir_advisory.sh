@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # elixir_advisory.sh — Claude Code PostToolUse hook (Edit|Write, *.ex files):
-# a growing library of Elixir/Ash anti-pattern checks, purely advisory.
+# prose drift in Elixir files, purely advisory. (Its Ash and Credo checks
+# moved to Grimoire in 1.52.0 and 1.53.0: judging code is the work, not
+# the environment.)
 #
 # Fires whenever an .ex file is edited or written. Reads the file's current
 # content straight off disk (more reliable than tool_input fields, which vary
@@ -30,7 +32,7 @@
 #   - Needs to shell out to a tool, walk the AST, or do anything a regex
 #     can't? Write one check_<name> function (mix_root and file_path are
 #     already in scope; append findings via `findings+=("...")`) and add its
-#     name to the EXTRA_CHECKS array. See check_ash_for_read_without_actor below as the template.
+#     name to the EXTRA_CHECKS array. See check_prose_drift below as the template.
 #   Either path leaves every existing check untouched.
 set -uo pipefail
 
@@ -94,12 +96,6 @@ add_regex_check() {
   REGEX_MESSAGE+=("$4")
 }
 
-add_regex_check \
-  "ash-repo-bypass" \
-  '\b\w*Repo\.(get!?|all|one!?|insert!?|update!?|delete!?)\b' \
-  "ash" \
-  "Direct Ecto Repo call(s) detected in a project that uses Ash. Calling Repo.get/get!/all/one/one!/insert/insert!/update/update!/delete/delete! directly bypasses Ash's pipeline silently: no authorization/policy checks run, no changeset validations apply, no notifiers fire, no calculations/aggregates are kept in sync. Nothing errors — it just quietly skips everything Ash would have enforced. Prefer the resource's Ash action or code interface instead (e.g. MyApp.Resource.get!/1, Ash.create!/1, Ash.read!/1, a generated code-interface function) unless this is a deliberate, reviewed exception (e.g. inside the Ash data layer/repo module itself, or a migration)."
-
 # To add anti-pattern #3: another add_regex_check call goes right here.
 
 for i in "${!REGEX_NAME[@]}"; do
@@ -134,160 +130,6 @@ done
 # ============================================================================
 
 
-# Ash.Query.for_read (or bare for_read/2,3 when Ash.Query is imported/used)
-# called without an `actor:` option. This is a real Ash security advisory
-# (GHSA-pcxq-fjp3-r752): calling for_read without the actor, then passing the
-# actor only to a downstream read/read! call, can let policies evaluate
-# without actor context and silently skip authorization.
-#
-# Only runs in Ash projects. This is regex-based in spirit (same pragmatic
-# trade-off as the Repo-bypass check above) but needs to look past the end of
-# the line the call starts on — Ash calls are routinely multi-line — so a
-# single per-line pattern.search() can't do it. It lives here (not in
-# add_regex_check) because the shared loop only
-# matches within one line at a time. Detection: find each `for_read(`, walk
-# forward counting balanced parens to find that call's own closing paren
-# (falling back to a bounded 400-char lookahead if parens never balance,
-# e.g. truncated/malformed code), and flag it if "actor:" doesn't appear
-# inside that span. This has known false negatives on unusual formatting
-# (e.g. "actor:" split oddly across a string) and will NOT catch every
-# multi-line style, but balanced-paren scanning handles the common Ash
-# idioms (single-line and multi-line calls) that a naive fixed-line-count
-# lookahead would miss.
-check_ash_for_read_without_actor() {
-  mix_has_dep "ash" || return 0
-  local out
-  out="$(python3 -c '
-import os, re, sys
-
-path = sys.argv[1]
-try:
-    content = open(path, "r", errors="replace").read()
-except OSError:
-    sys.exit(0)
-
-lines = content.splitlines()
-line_starts = []
-pos = 0
-for line in lines:
-    line_starts.append(pos)
-    pos += len(line) + 1
-
-def line_of(idx):
-    lo, hi = 0, len(line_starts) - 1
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if line_starts[mid] <= idx:
-            lo = mid
-        else:
-            hi = mid - 1
-    return lo + 1
-
-
-LIB_ROOT = sys.argv[2] if len(sys.argv) > 2 else ""
-
-PIPED = re.compile(r"([A-Z][\w.]*)\s*(?:\n\s*)?\|>\s*Ash\.Query\.$")
-
-
-def target_module(content, call_start):
-    """The module piped into Ash.Query.for_read, or "" if not determinable."""
-    m = PIPED.search(content[:call_start])
-    return m.group(1) if m else ""
-
-
-_policy_cache = {}
-
-
-def resource_has_policies(module):
-    """Does the Ash resource named `module` declare a policies block?
-
-    Resolved by the Elixir file-naming convention (Foo.BarBaz -> bar_baz.ex) so
-    only a handful of candidate files are ever opened -- walking and reading
-    the whole lib/ tree on every file edit would be far too slow for a
-    PostToolUse hook.
-    """
-    if module in _policy_cache:
-        return _policy_cache[module]
-    result = False
-    if LIB_ROOT and os.path.isdir(LIB_ROOT):
-        last = module.split(".")[-1]
-        snake = re.sub(r"(?<!^)(?=[A-Z])", "_", last).lower() + ".ex"
-        for cur, dirs, files in os.walk(LIB_ROOT):
-            dirs[:] = [d for d in dirs if d not in ("_build", "deps")]
-            if snake not in files:
-                continue
-            path = os.path.join(cur, snake)
-            try:
-                with open(path, encoding="utf-8", errors="replace") as f:
-                    body = f.read()
-            except OSError:
-                continue
-            if not re.search(r"^defmodule\s+[\w.]*\b" + re.escape(last) + r"\s+do", body, re.M):
-                continue
-            if "use Ash.Resource" not in body:
-                continue
-            result = bool(re.search(r"^\s*policies do", body, re.M))
-            break
-    _policy_cache[module] = result
-    return result
-
-
-findings = []
-for m in re.finditer(r"\bfor_read\(", content):
-    start = m.end()
-    depth = 1
-    i = start
-    n = len(content)
-    while i < n and depth > 0:
-        c = content[i]
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-        i += 1
-    if depth == 0:
-        args_text = content[start:i - 1]
-    else:
-        args_text = content[start:min(start + 400, n)]
-    if "actor:" in args_text:
-        continue
-
-    # An explicit `authorize?: false` is a reviewed decision, not an
-    # oversight. Checked on the whole surrounding pipeline, since it lands on
-    # the downstream read rather than on for_read itself.
-    lineno = line_of(m.start())
-    window = "\n".join(lines[max(0, lineno - 4):lineno + 6])
-    if "authorize?: false" in window:
-        continue
-
-    # THE GATE. Passing an actor only matters if the resource being queried
-    # has rules that would consult it. Measured on a real Ash app: without
-    # this, 93 of 93 for_read sites flagged -- every edit to any of 67 files
-    # produced the advisory, which is no signal at all. Only 5 of ~189
-    # resources there declare policies; for the rest the actor would be
-    # discarded. With the gate: 1 site, and that one was an explicit
-    # `authorize?: false` caught by the check above. Silent on a healthy
-    # codebase, loud on the real mistake (2026-08-22).
-    #
-    # Deliberately fails QUIET: an unresolvable module name says nothing,
-    # because a guess here is exactly the confident-wrong-answer failure this
-    # whole tool exists to avoid.
-    target = target_module(content, m.start())
-    if not target or not resource_has_policies(target):
-        continue
-
-    snippet = lines[lineno - 1].strip() if lineno - 1 < len(lines) else ""
-    findings.append("  line %d: %s   (%s declares policies)" % (lineno, snippet, target))
-
-if findings:
-    print("\n".join(findings))
-' "$file_path" "$mix_root/lib")"
-  [ -n "$out" ] || return 0
-  findings+=("[ash-for-read-without-actor] $(basename "$file_path"):
-$out
-
-Ash.Query.for_read (or for_read/2,3) called without an actor: option. This maps to a real, documented Ash security advisory — GHSA-pcxq-fjp3-r752 (github.com/ash-project/ash/security/advisories/GHSA-pcxq-fjp3-r752). Calling for_read without the actor, then passing the actor later (e.g. only on the downstream read/read! call), can let policies evaluate without actor context — silently skipping authorization. The correct form is for_read(:action, %{}, actor: current_user) |> read!() — actor goes on for_read itself, not (only) on the downstream call.")
-}
 
 
 # Prose drift: this edit changed function-level code, but the file's embedded
@@ -332,10 +174,10 @@ print("drift")
   [ -n "$drift" ] || return 0
   findings+=("[prose-drift] $(basename "$file_path"):
 
-This edit changed function-level code, and the file's prose (moduledoc / @doc / CRISP block) was not touched. Prose here is ATOMIC — it may describe only this module — and it is trusted only as far as it matches the code it sits next to. If this change altered what the module does or claims, update the prose now; a future reader otherwise inherits testimony the code no longer supports. If the prose still holds, move on — this is a look, not a gate.")
+This edit changed function-level code, and the file's prose (moduledoc / @doc / CRISP block) was not touched. Prose here is ATOMIC — it may describe only this module — and it is trusted only as far as it matches the code it sits next to. If this change altered what the module does or claims, the prose now describes code that is gone, and a future reader inherits testimony the code no longer supports. If it did not, the prose still holds.")
 }
 
-EXTRA_CHECKS=(check_ash_for_read_without_actor check_prose_drift)
+EXTRA_CHECKS=(check_prose_drift)
 
 # To add anti-pattern #4 (or beyond) that needs more than a regex: write a
 # check_<name> function above this line, then list its name here.
