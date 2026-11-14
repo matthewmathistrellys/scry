@@ -819,7 +819,6 @@ industrialise that problem.
 | Elixir build state | `_build` populated | `_build` cold — next compile is a FULL build |
 | Force-rebuild command | any ordinary command | first `--force`/`rm -rf _build` attempt |
 | Open PRs | none, or `gh` unavailable | any open PR exists |
-| Pull request about to open | any command but `gh pr create`; under 10 changed lines; only prose changed; already said for this branch this session | once: lines and files changed, then what the research shows about a second reader and its findings |
 | Subagent report comes back | not a subagent hand-back; the report does not read as a review | the kinds of finding a review returns (defect, quality, speculative) and how each is settled |
 | Code comment written | not a source file; Markdown; under `$TMPDIR`, `/tmp/` or a `scratchpad/` directory; the edit adds no comment or doc text, whatever the file already holds; already said for this file this session | once per file: what keeps a comment in step with its code, plus a sentence for a comment about another module or file, or a name, a date or a story, in the added text or already in the file |
 | Pinned version with an advisory (session start) | none high or critical on a runtime dependency; or dev/test-only; or the branch itself changes that pin; or already said for this advisory set within the last day; or the start is a resume, clear or compact | one line, once: the count and up to three names |

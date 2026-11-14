@@ -1406,11 +1406,13 @@ class ScryHookTests(unittest.TestCase):
         self.assertIn("SubagentStart", claude["description"])
         self.assertIn("SubagentStart", long_desc)
         self.assertIn("ADVISORY", long_desc)
-        self.assertIn("deletes nothing", long_desc)
         registered = set(json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"])
         self.assertNotIn("Stop", registered)
         for text in (claude["description"], long_desc, codex["description"]):
             self.assertNotIn("boundary rules", text)  # Scry assumes no page style
+            # Removed hooks: the PR-open note and the end-of-session disposal.
+            for gone in ("gh pr create", "cleanup command", "leaving behind", "deletes nothing"):
+                self.assertNotIn(gone, text)
             self.assertNotIn("Stop hook", text)
             self.assertNotIn("SCRY_WORKTREE_REMINDER_MINUTES", text)
             self.assertNotIn("SCRY_SCRATCH_MD_LIST_MAX", text)
