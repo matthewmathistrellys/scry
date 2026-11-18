@@ -545,10 +545,6 @@ machine is carrying. Independent checks and advisories fill that in.
 - **`health.sh`** — the repo's health from this session's perspective:
   - **Primary worktree state:** on main? dirty? stranded on a merged branch?
     How long parked? Files that exist in no commit on any branch?
-  - **Primary worktree consequences:** when the session is in the primary
-    worktree, projects the mechanical consequences — orphaned edits inherited
-    by future sessions, silent ref corruption from concurrent checkouts,
-    repo-wide merge blockage if left on a feature branch.
   - **Session worktree health:** when the session is in a linked worktree,
     states unprompted that Claude Code has locked the session to it and gives
     the one working way out (`ExitWorktree`) — the lock is real, not a
@@ -567,13 +563,27 @@ machine is carrying. Independent checks and advisories fill that in.
     health URL and it never stays silent again; leave it unconfigured and it
     stays out of the way, because a repo with nothing deployed cannot act on
     the warning (see [Deploy drift](#deploy-drift)).
-  - **Worktree hygiene sweep:** merged worktrees safe to remove, abandoned
-    branches quietly aging, missing directories, detached HEADs.
   - **Open PRs and CI status:** every open PR with CI rollup (green, failing,
     interrupted, pending, or unknown) and review state (approved, changes
     requested, needs review).
     The session's own branch is marked. Zero config — derived from the git
     remote via `gh`. Silently skipped if `gh` isn't installed.
+- **`worktree_insights.sh`** (`PreToolUse`, Bash) — when a command creates a
+  branch or worktree, reports the traces of recent activity in that checkout
+  (files modified in the last `SCRY_WT_ACTIVITY_MINUTES`, when HEAD last moved)
+  and says plainly that it cannot tell who or what made them. For
+  `git worktree add` it also describes the repo's other worktrees (how many,
+  how many have no commits beyond origin/main as of the last fetch, how old the
+  oldest is) and what a fresh worktree typically begins without. Quiet when
+  there is nothing to observe. It replaces the session-start primary-worktree
+  warning and cleanup list: a note with no task attached tends to become a
+  standing rule, while one at the moment of creating a branch or worktree
+  reaches an agent with its hand on the action.
+- **`worktree_merge_insight.sh`** (`PostToolUse`, Bash) — after `gh pr merge` or
+  `git merge` run inside a linked worktree, and only once `gh` reports the PR
+  merged (a merge queue or `--auto` only queues it, so it stays quiet), reports
+  what `git status` and the upstream branch showed and what that state
+  typically means. States what it did not look at (ignored files, editors).
 - **`fleet.sh`** — how many other Claude and Codex sessions are live in this repo *and its
   worktrees*, how old they are, whether one is in your exact directory, which
   subagents are editing here without a session of their own, whether other
@@ -754,7 +764,7 @@ industrialise that problem.
 | Sessions in this repo | just you | any other live one |
 | Last session | none recorded | a title exists |
 | Session left by `/clear` | start was not a `/clear` | always: id, title, transcript path, resume cost, whether a summary was requested for it |
-| Session worktree location | never silent | states primary-worktree consequences, or the linked-worktree lock + `ExitWorktree` escape hatch — whichever applies |
+| Session worktree location | silent in the primary checkout | in a linked worktree: the lock + `ExitWorktree` escape hatch |
 | Session worktree merged | not merged | content already in main |
 | Session worktree drift | up to date | origin/main ahead of fork point |
 | Unpushed commits | all pushed | commits only on disk |
@@ -852,18 +862,8 @@ Newer releases not counted yet, published inside the last 5 day(s): ash 3.34.6
 ```
 Dev environment health (SessionStart):
 Primary worktree: /Users/you/Dev/myapp
-- THIS SESSION IS IN THE PRIMARY WORKTREE — the shared checkout for the repo.
-  Edits here are not isolated: uncommitted changes are inherited by every
-  session that arrives after this one, with no indication of ownership. A
-  branch switch from any concurrent session moves the checked-out ref silently
-  — commits land on the wrong branch without warning. If this worktree is left
-  on a feature branch, the repo-wide merge path stays blocked until someone
-  returns it to main.
 - On main. Modified: 0, untracked: 0.
 - Production is up to date with origin/main (a1b2c3d).
-Worktrees: 3 total (2 besides primary).
-- 1 worktree(s) already fully merged into origin/main and safe to remove
-  (git worktree remove): fix/old-thing
 Open PRs: 2
   #42 feat/new-thing -- CI green, approved <- this session
   #43 fix/edge-case -- CI failing (1/4), no reviews
@@ -883,7 +883,6 @@ This session's worktree: /Users/you/Dev/myapp/.worktrees/feat-new-thing
 - origin/main is 5 commit(s) ahead of this branch's fork point — base has
   drifted.
 - No remote tracking branch. 3 commit(s) exist only on this disk.
-Worktrees: 3 total (2 besides primary).
 Open PRs: 1
   #42 feat/new-thing -- CI green, no reviews <- this session
 ```
@@ -1402,6 +1401,8 @@ starts changing a decision.
 | `SCRY_WORKTREE_REMINDER_MINUTES` | `45` | how long a session must run before the disposal reminder speaks |
 | `SCRY_WORKTREE_DISK_MB_WARN` | `2048` | worktree disk at which an unmerged pile is worth saying out loud |
 | `SCRY_WORKTREE_DU_BUDGET` | `4` | seconds of `du` allowed before the size is reported as a floor |
+| `SCRY_WT_ACTIVITY_MINUTES` | `10` | how recent a file change or HEAD move counts as a trace of activity when a branch or worktree is created |
+| `SCRY_WT_STAT_BUDGET` | `3` | seconds spent reading file times before the count is reported as partial |
 | `SCRY_SCRATCH_MD_LIST_MAX` | `5` | scratch `.md` files named in the disposal note before the rest become a count |
 | `SCRY_BRANCH_POINT_FETCH_HOURS` | `2` | age of the last fetch past which a branch-point count is reported as dated |
 | `SCRY_CACHE_HANDOFF_LEAD_SECONDS` | `120` | how long before the prompt cache expires the monitor speaks (keep-alive or summary request) |
