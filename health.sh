@@ -8,9 +8,8 @@
 #
 # Sections, in order: primary worktree, deploy drift (only when
 # SCRY_HEALTH_URL is configured), session worktree, someone else pushing to
-# this session's branch, a worktree hygiene sweep (missing directories,
-# stale/merged branches, quietly abandoned branches), and open PRs with CI
-# status. Each section's own comment says when it speaks.
+# this session's branch, and open PRs with CI status. Worktree cleanup is not
+# listed here: a list with no task attached tends to be read as a standing rule. Each section's own comment says when it speaks.
 #
 # Emits its findings via `additionalContext` so a fresh agent session sees
 # the repo's actual state up front, every session, not just when something's
@@ -160,9 +159,6 @@ untracked="$(g status --porcelain | grep -c '^??')"
 lines=()
 lines+=("Primary worktree: $main_wt")
 
-if [ "$in_primary" -eq 1 ]; then
-  lines+=("- THIS SESSION IS IN THE PRIMARY WORKTREE — the shared checkout for the repo. Edits here are not isolated: uncommitted changes are inherited by every session that arrives after this one, with no indication of ownership. A branch switch from any concurrent session moves the checked-out ref silently — commits land on the wrong branch without warning. If this worktree is left on a feature branch, the repo-wide merge path stays blocked until someone returns it to main.")
-fi
 
 if [ "$branch" = "main" ]; then
   lines+=("- On main. Modified: $modified, untracked: $untracked.")
@@ -390,106 +386,6 @@ if [ -n "$cur_branch" ]; then
       lines+=("- SOMEONE ELSE PUSHED TO THIS BRANCH: ${cur_remote}/${cur_branch} is $incoming commit(s) ahead of this checkout (newest by $last_who). Those commits are NOT in the files on disk here, so this tree is not the branch. An edit written against these files is written against superseded text: it can fail to apply, and where it does apply it can revert what landed. Read them before editing: git -C $session_wt log HEAD..${cur_remote}/${cur_branch} and git -C $session_wt diff HEAD..${cur_remote}/${cur_branch}.")
     fi
   fi
-fi
-
-# ── Worktree hygiene sweep ──────────────────────────────────────────────────
-# Parse `git worktree list --porcelain` into parallel path/branch arrays.
-wt_path=()
-wt_branch=()
-current_path=""
-while IFS= read -r wline; do
-  case "$wline" in
-    "worktree "*) current_path="${wline#worktree }" ;;
-    "branch refs/heads/"*)
-      wt_path+=("$current_path")
-      wt_branch+=("${wline#branch refs/heads/}")
-      ;;
-    "detached")
-      wt_path+=("$current_path")
-      wt_branch+=("")
-      ;;
-  esac
-done < <(g worktree list --porcelain 2>/dev/null)
-
-# Abandoned = not merged into main AND last commit older than this many days —
-# a branch nobody merged, pushed, or touched again. The riskiest state, since
-# it looks like it might still matter but nothing is actually watching it.
-ABANDONED_DAYS=3
-ABANDONED_SECONDS=$((ABANDONED_DAYS * 86400))
-
-total=${#wt_path[@]}
-missing=0
-missing_list=()
-detached=0
-detached_list=()
-stale=0
-stale_list=()
-abandoned=0
-abandoned_list=()
-
-i=0
-while [ "$i" -lt "$total" ]; do
-  wt="${wt_path[$i]}"
-  br="${wt_branch[$i]}"
-  i=$((i+1))
-  [ "$wt" = "$main_wt" ] && continue
-  if [ ! -d "$wt" ]; then
-    missing=$((missing+1))
-    missing_list+=("$wt")
-    continue
-  fi
-  if [ -z "$br" ]; then
-    detached=$((detached+1))
-    detached_list+=("$wt")
-    continue
-  fi
-  [ "$br" = "main" ] && continue
-  if content_is_in_main "refs/heads/$br"; then
-    stale=$((stale+1))
-    stale_list+=("$br")
-    continue
-  fi
-  # Not merged — check whether it's just quietly aging instead of active.
-  last_commit_epoch="$(git -C "$main_wt" log -1 --format=%ct "refs/heads/$br" 2>/dev/null || echo "$now_epoch")"
-  age_seconds=$((now_epoch - last_commit_epoch))
-  if [ "$age_seconds" -gt "$ABANDONED_SECONDS" ]; then
-    age_days=$((age_seconds / 86400))
-    abandoned=$((abandoned+1))
-    abandoned_list+=("$br ($age_days d, $wt)")
-  fi
-done
-
-other=$((total - 1))
-lines+=("Worktrees: $total total ($other besides primary).")
-if [ "$detached" -gt 0 ]; then
-  sample="$(printf '%s, ' "${detached_list[@]:0:6}")"
-  lines+=("- $detached in detached HEAD (not on a named branch): ${sample%, }")
-fi
-if [ "$missing" -gt 0 ]; then
-  sample="$(printf '%s, ' "${missing_list[@]:0:6}")"
-  lines+=("- $missing worktree(s) point at a missing directory (git worktree prune would clean the list): ${sample%, }")
-fi
-if [ "$stale" -gt 0 ]; then
-  sample=""
-  si=0
-  for b in "${stale_list[@]}"; do
-    [ "$si" -ge 6 ] && { sample="$sample, ..."; break; }
-    [ -n "$sample" ] && sample="$sample, "
-    sample="$sample$b"
-    si=$((si+1))
-  done
-  lines+=("- $stale worktree(s) already fully merged into origin/main and safe to remove (git worktree remove): $sample")
-fi
-if [ "$abandoned" -gt 0 ]; then
-  sample=""
-  si=0
-  for b in "${abandoned_list[@]}"; do
-    [ "$si" -ge 6 ] && { sample="$sample, ..."; break; }
-    [ -n "$sample" ] && sample="$sample, "
-    sample="$sample$b"
-    si=$((si+1))
-  done
-  lines+=("- $abandoned worktree(s) UNMERGED but untouched for over $ABANDONED_DAYS days — likely abandoned, needs a human look (not auto-removable, may hold real work): $sample")
 fi
 
 # ── Open PRs, merge queue, and CI status ───────────────────────────────────
@@ -800,7 +696,7 @@ fi
 ctx="Dev environment health (SessionStart):
 $(printf '%s\n' "${lines[@]}")
 
-The user does not see these lines. What is flagged above reaches them only if the session says it, and work begun without it is built on top of it. Flags of this kind: reviewed PRs sitting unqueued or knocked out of the merge queue, merge queue idle while reviewed PRs wait, flaky queue test failures, session in the primary worktree, session inside a linked worktree (do not orchestrate from it), primary not on main, deploy drift, session worktree stranded/drifted/unpushed, stale or abandoned worktrees, and failing CI on open PRs."
+The user does not see these lines. What is flagged above reaches them only if the session says it, and work begun without it is built on top of it. Flags of this kind: reviewed PRs sitting unqueued or knocked out of the merge queue, merge queue idle while reviewed PRs wait, flaky queue test failures, session inside a linked worktree (do not orchestrate from it), primary not on main, deploy drift, session worktree stranded/drifted/unpushed, and failing CI on open PRs."
 
 emit "" "$ctx"
 exit 0

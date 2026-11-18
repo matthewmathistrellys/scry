@@ -2451,6 +2451,137 @@ class ContextLengthAdvisoryTests(unittest.TestCase):
         self.assertNotIn("model", json.dumps(rec))
 
 
+class WorktreeInsightTests(unittest.TestCase):
+    """Creating a branch or worktree, and merging inside a linked worktree:
+    observations with their source, consequences in guidance wording."""
+
+    VERDICT_WORDS = ("should", "safe to", "nothing is lost", "must", "you need")
+
+    @staticmethod
+    def _git(cwd, *args):
+        return subprocess.run(["git", "-C", str(cwd), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def _repo(self, base):
+        repo = base / "repo"
+        repo.mkdir()
+        g = self._git
+        g(repo, "init", "-q", "-b", "main")
+        g(repo, "config", "user.name", "Scry Test")
+        g(repo, "config", "user.email", "scry@example.test")
+        (repo / "a.txt").write_text("a\n")
+        g(repo, "add", "a.txt")
+        g(repo, "commit", "-qm", "a", "--date", "2020-01-01T00:00:00")
+        old = time.time() - 7200
+        os.utime(repo / "a.txt", (old, old))
+        # HEAD's reflog entry is recent by construction; age it by rewriting.
+        return repo
+
+    @staticmethod
+    def _payload(cwd, command, event="PreToolUse"):
+        return {"session_id": "wt-1", "transcript_path": "/dev/null",
+                "cwd": str(cwd), "hook_event_name": event,
+                "tool_name": "Bash", "tool_input": {"command": command}}
+
+    def test_activity_traces_are_reported_without_naming_who(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._repo(Path(td))
+            (repo / "b.txt").write_text("b\n")  # just modified
+            report = context(run_hook("worktree_insights.sh", repo,
+                                      self._payload(repo, "git checkout -b feat/x")))
+            self.assertIn("modified in the last 10 minutes", report)
+            self.assertIn("cannot tell who or what", report)
+            self.assertIn("can swap them out", report)
+            for word in self.VERDICT_WORDS:
+                self.assertNotIn(word, report.lower())
+
+    def test_it_is_silent_when_nothing_changed_recently(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._repo(Path(td))
+            env = {"SCRY_WT_ACTIVITY_MINUTES": "0"}
+            result = run_hook("worktree_insights.sh", repo,
+                              self._payload(repo, "git checkout -b feat/x"), env=env)
+            self.assertEqual(result.stdout.strip(), "")
+
+    def test_it_ignores_commands_that_create_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._repo(Path(td))
+            (repo / "b.txt").write_text("b\n")
+            result = run_hook("worktree_insights.sh", repo,
+                              self._payload(repo, "git status && git branch -a"))
+            self.assertEqual(result.stdout.strip(), "")
+
+    def test_worktree_add_describes_the_other_worktrees_with_their_limits(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._repo(base)
+            self._git(repo, "worktree", "add", "-q", str(base / "w1"), "-b", "old")
+            (repo / "b.txt").write_text("b\n")
+            report = context(run_hook(
+                "worktree_insights.sh", repo,
+                self._payload(repo, "git worktree add ../w2 -b new")))
+            self.assertIn("1 other registered worktree", report)
+            self.assertIn("origin has not been fetched", report)
+            self.assertIn("typically are not in it", report)
+            for word in self.VERDICT_WORDS:
+                self.assertNotIn(word, report.lower())
+
+    def _fake_gh(self, base, merged_number):
+        bindir = base / "bin"
+        bindir.mkdir()
+        gh = bindir / "gh"
+        gh.write_text("#!/bin/sh\necho %s\n" % merged_number)
+        gh.chmod(0o755)
+        return {"PATH": "%s:%s" % (bindir, os.environ["PATH"])}
+
+    def test_merge_in_a_linked_worktree_reports_state_in_guidance_wording(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._repo(base)
+            wt = base / "w1"
+            self._git(repo, "worktree", "add", "-q", str(wt), "-b", "feat")
+            (wt / "dirty.txt").write_text("x\n")
+            env = self._fake_gh(base, 80)
+            report = context(run_hook(
+                "worktree_merge_insight.sh", wt,
+                self._payload(wt, "gh pr merge 80 --squash", "PostToolUse"), env=env))
+            self.assertIn("PR #80", report)
+            self.assertIn("1 changed path(s)", report)
+            self.assertIn("did not look at files git ignores", report)
+            self.assertIn("typically holds", report)
+            for word in self.VERDICT_WORDS:
+                self.assertNotIn(word, report.lower())
+
+    def test_merge_is_silent_in_the_primary_checkout(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._repo(base)
+            result = run_hook("worktree_merge_insight.sh", repo,
+                              self._payload(repo, "gh pr merge 80", "PostToolUse"),
+                              env=self._fake_gh(base, 80))
+            self.assertEqual(result.stdout.strip(), "")
+
+    def test_merge_is_silent_when_the_pr_is_not_merged_yet(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = self._repo(base)
+            wt = base / "w1"
+            self._git(repo, "worktree", "add", "-q", str(wt), "-b", "feat")
+            result = run_hook("worktree_merge_insight.sh", wt,
+                              self._payload(wt, "gh pr merge 80 --auto", "PostToolUse"),
+                              env=self._fake_gh(base, ""))
+            self.assertEqual(result.stdout.strip(), "")
+
+    def test_session_start_no_longer_warns_about_the_primary_checkout(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._repo(Path(td))
+            result = run_hook("health.sh", repo,
+                              {"cwd": str(repo), "session_id": "s", "hook_event_name": "SessionStart"})
+            text = result.stdout
+            self.assertNotIn("PRIMARY WORKTREE", text)
+            self.assertNotIn("safe to remove", text)
+
+
 if __name__ == "__main__":
     unittest.main()
 

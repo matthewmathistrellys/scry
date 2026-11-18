@@ -23,6 +23,14 @@ behavior lives in `README.md`; these rules govern changes to the shared hooks.
   means: often a potential consequence, or why a source is untrustworthy for
   the question at hand). An insight is short and clean; it says what the thing
   means, not how the thing works, and it never tells the reader what to do.
+  A note is guidance, not a verdict: it says what was looked at, when and how,
+  and what that kind of situation can lead to, in words like "can", "may" and
+  "typically". Scry cannot see everything (other agent tools, ignored files,
+  editors), so a statement it cannot guarantee is left out; a check it could not
+  make is said to be unmade, not skipped. Words that decide for the reader
+  ("should", "safe to", "nothing is lost") are the thing to avoid. Where who is
+  acting cannot be seen, Scry reports the traces it can see (what changed, and
+  when) rather than guessing who.
 - **Never silently wrong.** Report an external dependency as unknown when it
   cannot be checked; do not imply it was checked and found healthy.
 - **One concern per script.** Architecture, repository health, session fleet,
